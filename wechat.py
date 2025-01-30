@@ -16,6 +16,7 @@ class WxBot:
         self.wcf = Wcf(host, port)
         logging.info('connected to wechatferry.')
 
+        self.self_info = self.get_myself()
         self.wxid = self.wcf.get_self_wxid()
         self.all_contacts = self.get_all_contacts()
         self.message_callback = callback or self.on_message
@@ -97,6 +98,12 @@ class WxBot:
         """ 停止接收消息 """
         self.wcf.disable_recv_msg()
 
+    def get_myself(self) -> dict:
+        """ 获取自己的微信信息
+        {wxid, code, name, gender}
+        """
+        return self.wcf.get_user_info()
+
     def send_text_msg(self, msg: str, receiver: str, at_list: str = '') -> None:
         """ 发送消息
         :param msg: 消息字符串
@@ -143,17 +150,22 @@ class WxBot:
     def fetch_history(self, wxid: str, count: int = 50) -> list[tuple]:
         """ 获取群或联系人的聊天记录
 
-        返回一个列表。每个元素为一个元组，格式为 (发送者, 消息内容)
+        返回一个列表。每个元素为一个元组，格式为 (发送者名称, 消息内容)
         """
-        SQL = '''SELECT BytesExtra, CompressContent, StrContent, Type, SubType FROM msg '''\
+        SQL = '''SELECT IsSender, BytesExtra, CompressContent, StrContent, Type, SubType FROM msg '''\
                 f'''WHERE StrTalker = "{wxid}" AND (Type = 1 OR (Type = 49 AND SubType = 57)) '''\
                 f'''ORDER BY CreateTime DESC LIMIT {count};'''
         records = self.wcf.query_sql('MSG0.db', SQL)
-        result = []
 
-        def process_record(record: dict):
-            sender = decode_sender_name(record['BytesExtra'])
-            sender = self.get_display_name(sender, wxid if wxid.endswith('@chatroom') else '')
+        def process_record(wxid: str, record: dict) -> tuple | None:
+            is_me = record['IsSender'] == 1
+
+            if is_me:
+                sender_name = self.self_info['name']
+            else:
+                is_group = wxid.endswith('@chatroom')
+                sender_name = decode_sender_name(record['BytesExtra']) if is_group else wxid
+                sender_name = self.get_display_name(sender_name, wxid if is_group else '')
 
             content = ''
             if record['Type'] == 1:  # 纯文本消息
@@ -164,11 +176,14 @@ class WxBot:
             # 不知道为什么有的 StrContent 中的消息还是 xml 格式的. 这里直接过滤掉
             if not content.startswith('<'):
                 content = content.replace('\n', ' ')
-                result.append((sender, content))
+                return sender_name, content
 
+        result = []
         for record in records:
             try:
-                process_record(record)
+                parsed_tuple = process_record(wxid, record)
+                if parsed_tuple:
+                    result.append(parsed_tuple)
             except Exception as e:
                 # logging.error(f'Error on processing record: {e}')
                 pass

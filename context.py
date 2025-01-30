@@ -24,8 +24,15 @@ class ChatWindow:
         """ 清空聊天记录 """
         self._history.clear()
 
+    def empty(self):
+        """ 是否为空 """
+        return not self._history
+
     def __str__(self):
         return '\n'.join(self._history)
+
+    def __len__(self):
+        return len(self._history)
 
 
 class ContextManager:
@@ -59,7 +66,3 @@ class ContextManager:
         else:
             self._contexts[contact] = ChatWindow()
             self._contexts[contact].append(user, message)
-
-    def push_window(self, chat_window: ChatWindow):
-        """ 批量存储消息 """
-        self._contexts[chat_window] = chat_window
