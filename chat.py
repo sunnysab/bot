@@ -1,23 +1,9 @@
+import logging
 from abc import abstractmethod
-
-from config import CONFIG
-
-
-def get_system_prompt(self_name: str):
-    """ 获取系统提示 """
-
-    return '''你现在位于一个群聊中聊天。请你发表回复，尽量简洁，符合语境和聊天人类习惯，结尾不要添加标点符号。''' \
-           '''你要注意话题的变更，无需回复旧的话题。''' \
-           '''如果相关主题回复过，没有必要再回复，或你决定不说话，请说：本轮不发言。''' \
-           f'''聊天记录包含了你和群友最近的发言。你叫 {{{self_name}}}：\n'''
 
 
 class ChatAI:
     """ 聊天机器人 """
-
-    def __init__(self, name: str):
-        self.name = name
-        self.prompt = get_system_prompt(self.name)
 
     @staticmethod
     def silent(s: str) -> bool:
@@ -25,7 +11,7 @@ class ChatAI:
         return '本轮不发言' in s
 
     @abstractmethod
-    def chat(self, message: str) -> str | None:
+    def chat(self, prompt: str, message: str) -> str | None:
         """ 聊天 """
         pass
 
@@ -33,25 +19,26 @@ class ChatAI:
 class ChatGLM(ChatAI):
     """ 智谱清言 """
 
-    def __init__(self, key: str, name: str, model: str = 'glm-4-plus'):
-        super().__init__(name)
+    def __init__(self, key: str, model: str = 'glm-4-plus'):
+        super().__init__()
 
         from zhipuai import ZhipuAI
 
         self.model = model
         self.client = ZhipuAI(api_key=key)
 
-    def chat(self, message: str) -> str | None:
+    def chat(self, prompt: str, message: str) -> str | None:
         """ 聊天 """
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {'role': 'system', 'content': get_system_prompt(self.name)},
+                {'role': 'system', 'content': prompt},
                 {'role': 'user', 'content': message}],
         )
 
         completion_message = response.choices[0].message
         response_text: str = completion_message.content
+        logging.debug(f'ChatGLM response: {response_text}')
 
         # 如果回复内容为“本轮不发言”，则返回 None
         if self.silent(response_text):
@@ -62,24 +49,25 @@ class ChatGLM(ChatAI):
 class Ollama(ChatAI):
     """ Ollama """
 
-    def __init__(self, name: str, model: str, url: str):
-        super().__init__(name)
+    def __init__(self, model: str, url: str):
+        super().__init__()
 
         from ollama import Client
         self.model = model
         self.client = Client(url)
 
-    def chat(self, message: str) -> str | None:
+    def chat(self, prompt: str, message: str) -> str | None:
         """ 聊天 """
         response = self.client.chat(
             model=self.model,
             messages=[
-                {'role': 'system', 'content': get_system_prompt(self.name)},
+                {'role': 'system', 'content': prompt},
                 {'role': 'user', 'content': message}],
         )
 
-        completion_message = response.choices[0].message
-        response_text: str = completion_message.content
+        response_text: str = response['message']['content']
+        logging.debug(f'Ollama response: {response_text}')
+
         # 额外处理一下 Deepseek-R1 思维链的思维过程.
         RIGHT_THINK_BRACE = '</think>'
         right_brace = response_text.find(RIGHT_THINK_BRACE) + len(RIGHT_THINK_BRACE) + 1
