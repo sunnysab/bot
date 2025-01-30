@@ -14,8 +14,8 @@ def get_system_prompt(self_name: str):
 class ChatAI:
     """ 聊天机器人 """
 
-    def __init__(self):
-        self.name = CONFIG['self-name']
+    def __init__(self, name: str):
+        self.name = name
         self.prompt = get_system_prompt(self.name)
 
     @staticmethod
@@ -32,8 +32,8 @@ class ChatAI:
 class ChatGLM(ChatAI):
     """ 智谱清言 """
 
-    def __init__(self, key: str, model: str = 'glm-4-plus'):
-        super().__init__()
+    def __init__(self, key: str, name: str, model: str = 'glm-4-plus'):
+        super().__init__(name)
 
         from zhipuai import ZhipuAI
 
@@ -60,8 +60,8 @@ class ChatGLM(ChatAI):
 class Ollama(ChatAI):
     """ Ollama """
 
-    def __init__(self, model: str, url: str):
-        super().__init__()
+    def __init__(self, name: str, model: str, url: str):
+        super().__init__(name)
 
         from ollama import Client
         self.model = model
