@@ -1,12 +1,10 @@
 import logging
-import re
 import signal
 import time
+from typing import override
+from plugin import *
 
-from collections.abc import Callable
-from queue import Empty
-from threading import Thread
-from wcferry import Wcf, WxMsg as RawMessage
+from wechat import WxBot, RawMessage
 
 HOST = '192.168.2.105'
 PORT = 10086
@@ -14,118 +12,48 @@ PORT = 10086
 logging.basicConfig(level=logging.INFO)
 
 
-class WxBot:
-    """ 微信机器人组件 """
+class WxHelper(WxBot):
+    """ 微信机器人助手 """
 
-    def __init__(self, host: str, port: int, callback: Callable[[RawMessage], None]=None):
-        logging.info('starting robot...')
-        self.wcf = Wcf(host, port)
-        logging.info('connected to wechatferry.')
+    plugin_mappings: dict[str, list[Plugin]]
+    """ 插件映射表. 键为联系人名称，值为插件列表 """
 
-        self.wxid = self.wcf.get_self_wxid()
-        self.all_contacts = self.get_all_contacts()
-        self.message_callback = callback or self.on_message
+    def __init__(self, host: str, port: int):
+        super().__init__(host, port)
+        self.plugin_mappings = {}
 
-    def cleanup(self):
-        self.wcf.cleanup()
+    def set(self, contact: str, plugins: list[Plugin]):
+        """ 设置插件 """
+        self.plugin_mappings[contact] = plugins
 
-    def get_all_contacts(self) -> dict:
-        """ 获取联系人（包括好友、公众号、服务号、群成员……）
-        :return: 联系人字典，键值对. 格式: {'wxid': 'NickName'}
-        """
-        contacts = self.wcf.query_sql('MicroMsg.db', 'SELECT UserName, NickName FROM Contact;')
-        return {contact['UserName']: contact['NickName'] for contact in contacts}
+    @override
+    def on_message(self, msg: RawMessage):
+        """ 消息处理函数 """
+        if msg.from_self():
+            return
 
-    def _auto_accept_friend_request(self, msg: RawMessage) -> None:
-        """ 自动通过好友请求 """
-        import xml.etree.ElementTree as ET
+        # 消息来源。如果是群消息，则为群名称；否则为联系人备注
+        source = msg.roomid or msg.sender
+        display_source = self.all_contacts.get(source, source)
+        logging.info(f'New message from {display_source}: {msg.content}')
 
-        try:
-            xml = ET.fromstring(msg.content)
-            v3 = xml.attrib['encryptusername']
-            v4 = xml.attrib['ticket']
-            scene = int(xml.attrib['scene'])
-            logging.info(f'Accepting friend request from {v3} (ticket: {v4})')
-            self.wcf.accept_new_friend(v3, v4, scene)
-            logging.info(f'Accepted friend request from {v3}')
-        except Exception as e:
-            logging.error(f'Failed to accept friend: {e}')
+        # 消息处理
+        response_back: str | None = None
 
-    def _say_hi_to_new_friend(self, msg: RawMessage) -> None:
-        """ 自动发送欢迎消息给新好友 """
-        PATTERN_1 = r'你已添加了(.*)，现在可以开始聊天了。'
-        PATTERN_2 = 'You have added (.*) as your Weixin contact. Start chatting!'
-        nick_name = re.findall(PATTERN_1, msg.content) or re.findall(PATTERN_2, msg.content)
-        if nick_name:
-            self.all_contacts[msg.sender] = nick_name[0]
-            self.send_text_msg(f'Hi {nick_name[0]}，我自动通过了你的好友请求。', msg.sender)
+        for plugin in self.plugin_mappings.get(display_source, [DefaultPlugin()]):
+            response_back = plugin.handle(msg)
+            if response_back:
+                break
+        if not response_back:
+            return # 没有回复内容
 
-        raise Exception('Failed to get new friend\'s nickname.')
-
-    def _process_message(self, msg: RawMessage) -> None:
-        """ 处理消息. 将消息放入回调函数中处理 """
-        match msg.type:
-            case 1: # 文本消息
-                self.message_callback(msg)
-            case 37: # 好友请求
-                self._auto_accept_friend_request(msg)
-            case 10000: # 系统信息
-                self._say_hi_to_new_friend(msg)
-            case _:
-                logging.info(f'Unknown message type: {msg.type}')
-                logging.info(msg)
-
-    @staticmethod
-    def on_message(msg: RawMessage):
-        """ 默认的文本消息处理方法, 输出消息内容 """
-        try:
-            logging.info(msg)
-        except Exception as e:
-            logging.error(e)
-
-    def start_receiving_message(self) -> None:
-        def inner_process_msg(wcf: Wcf):
-            while wcf.is_receiving_msg():
-                try:
-                    msg = wcf.get_msg()
-                    logging.info(msg)
-                    self._process_message(msg)
-                except Empty:
-                    continue  # Empty message
-                except Exception as e:
-                    logging.error(f'Error on receiving: {e}')
-
-        self.wcf.enable_receiving_msg()
-        Thread(target=inner_process_msg, name='GetMessage', args=(self.wcf,), daemon=True).start()
-
-    def stop_receiving_message(self) -> None:
-        """ 停止接收消息 """
-        self.wcf.disable_recv_msg()
-
-    def send_text_msg(self, msg: str, receiver: str, at_list: str = '') -> None:
-        """ 发送消息
-        :param msg: 消息字符串
-        :param receiver: 接收人wxid或者群id
-        :param at_list: 要@的wxid, @所有人的wxid为：notify@all
-        """
-        ats = ''
-        if at_list:
-            if at_list == 'notify@all':  # @所有人
-                ats = ' @所有人'
-            else:
-                wxids = at_list.split(',')
-                for wxid in wxids:
-                    ats += f' @{self.wcf.get_alias_in_chatroom(wxid, receiver)}'
-
-        if not ats:
-            logging.info(f'To {receiver}: {msg}')
-            self.wcf.send_text(f'{msg}', receiver, at_list)
+        # 发送消息
+        if msg.from_group():
+            self.send_text_msg(response_back, msg.roomid, msg.sender)
         else:
-            logging.info(f'To {receiver}: {ats}\r{msg}')
-            self.wcf.send_text(f'{ats}\n\n{msg}', receiver, at_list)
+            self.send_text_msg(response_back, msg.sender)
 
-
-FERRY: WxBot = WxBot(HOST, PORT)
+FERRY: WxHelper = WxHelper(HOST, PORT)
 
 def cleanup():
     logging.info('Cleaning up before exit...')
@@ -137,7 +65,10 @@ def signal_handler(sig, frame):
     logging.info('Ctrl+C pressed. Exit.')
     cleanup()
 
-FERRY.start_receiving_message()
 signal.signal(signal.SIGINT, signal_handler)
+
+
+FERRY.start_receiving_message()
+FERRY.set('后端重构开发群', [WeatherPlugin(), IdiomPlugin()])
 while True:
     time.sleep(1)
