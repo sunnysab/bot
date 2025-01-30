@@ -41,11 +41,11 @@ class WxHelper(WxBot):
         response_back: str | None = None
 
         for plugin in self.plugin_mappings.get(display_source, [DefaultPlugin()]):
-            response_back = plugin.handle(msg)
-            if response_back:
+            response_back, _continue = plugin.handle(msg)
+            if response_back or not _continue:
                 break
         if not response_back:
-            return # 没有回复内容
+            return  # 没有回复内容
 
         # 发送消息
         if msg.from_group():
@@ -53,7 +53,9 @@ class WxHelper(WxBot):
         else:
             self.send_text_msg(response_back, msg.sender)
 
+
 FERRY: WxHelper = WxHelper(HOST, PORT)
+
 
 def cleanup():
     logging.info('Cleaning up before exit...')
@@ -61,14 +63,16 @@ def cleanup():
     FERRY.cleanup()
     exit(0)
 
+
 def signal_handler(sig, frame):
     logging.info('Ctrl+C pressed. Exit.')
     cleanup()
 
-signal.signal(signal.SIGINT, signal_handler)
 
+signal.signal(signal.SIGINT, signal_handler)
 
 FERRY.start_receiving_message()
 FERRY.set('后端重构开发群', [WeatherPlugin(), IdiomPlugin()])
+FERRY.set('研究生摆烂群', [DoNothingPlugin()])
 while True:
     time.sleep(1)
