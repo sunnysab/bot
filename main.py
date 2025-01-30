@@ -2,12 +2,12 @@ import logging
 import signal
 import time
 from typing import override
-from plugin import *
 
+from chat import ChatAI, ChatGLM
+from context import ContextManager, ChatWindow
+from plugin import *
 from wechat import WxBot, RawMessage
 
-HOST = '192.168.2.105'
-PORT = 10086
 
 logging.basicConfig(level=logging.INFO)
 
@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO)
 class WxHelper(WxBot):
     """ 微信机器人助手 """
 
-    plugin_mappings: dict[str, list[Plugin]]
+    _plugin_mappings: dict[str, list[Plugin]]
     """ 插件映射表. 键为联系人名称，值为插件列表 """
 
     def __init__(self, host: str, port: int):
@@ -27,7 +27,14 @@ class WxHelper(WxBot):
 
     def set(self, contact: str, plugins: list[Plugin]):
         """ 设置插件 """
-        self.plugin_mappings[contact] = plugins
+        self._plugin_mappings[contact] = plugins
+
+    def get_myself(self) -> dict:
+        """ 获取自己的微信信息
+        {wxid, code, name, gender}
+        """
+        return self.wcf.get_user_info()
+
     def load_context(self) -> None:
         """ 加载上下文 """
         for contact in self.get_recent_sessions(10):
@@ -37,7 +44,7 @@ class WxHelper(WxBot):
             self._context.push_window(context)
 
     @override
-    def on_message(self, msg: RawMessage):
+    def on_message(self, msg: RawMessage) -> None:
         """ 消息处理函数 """
         if msg.from_self():
             return
@@ -53,7 +60,7 @@ class WxHelper(WxBot):
         # 消息处理
         response_back: str | None = None
 
-        for plugin in self.plugin_mappings.get(display_source, [DefaultPlugin()]):
+        for plugin in self._plugin_mappings.get(source, [DefaultPlugin()]):
             response_back, _continue = plugin.handle(msg)
             if response_back or not _continue:
                 break
@@ -69,26 +76,32 @@ class WxHelper(WxBot):
             self._context.push_message(msg.sender, response_back)
 
 
-FERRY: WxHelper = WxHelper(HOST, PORT)
+def main():
+    from config import CONFIG
+    host, port = CONFIG['wcf-host'], CONFIG['wcf-port']
+    FERRY: WxHelper = WxHelper(host, port)
 
+    # 捕获 Ctrl+C 信号
+    def signal_handler(sig, frame):
+        logging.info('Ctrl+C pressed. Exit.')
+        FERRY.stop_receiving_message()
+        FERRY.cleanup()
+        exit(0)
 
-def cleanup():
-    logging.info('Cleaning up before exit...')
-    FERRY.stop_receiving_message()
-    FERRY.cleanup()
-    exit(0)
+    signal.signal(signal.SIGINT, signal_handler)
 
+    # 设置插件
+    ai_implementation: ChatAI = ChatGLM(key=CONFIG['chatglm-key'], name=FERRY.self_info['name'])
 
-def signal_handler(sig, frame):
-    logging.info('Ctrl+C pressed. Exit.')
-    cleanup()
+    FERRY.set('后端重构开发群', [WeatherPlugin(), IdiomPlugin()])
+    FERRY.set('研究生摆烂群', [DoNothingPlugin()])
 
-
-signal.signal(signal.SIGINT, signal_handler)
-
-FERRY.start_receiving_message()
-FERRY.set('后端重构开发群', [WeatherPlugin(), IdiomPlugin()])
-FERRY.set('研究生摆烂群', [DoNothingPlugin()])
-while True:
-    time.sleep(1)
     FERRY.load_context()
+
+    # 开始接收消息
+    FERRY.start_receiving_message()
+    while True:
+        time.sleep(1)
+
+if __name__ == '__main__':
+    main()
