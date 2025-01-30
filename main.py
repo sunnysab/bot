@@ -20,11 +20,21 @@ class WxHelper(WxBot):
 
     def __init__(self, host: str, port: int):
         super().__init__(host, port)
-        self.plugin_mappings = {}
+        self._plugin_mappings = {}
+        self._context = ContextManager()
+        self.self_info = self.get_myself()
+        logging.info(f'Hello, {self.self_info["name"]}!')
 
     def set(self, contact: str, plugins: list[Plugin]):
         """ 设置插件 """
         self.plugin_mappings[contact] = plugins
+    def load_context(self) -> None:
+        """ 加载上下文 """
+        for contact in self.get_recent_sessions(10):
+            messages = self.fetch_history(contact)
+            messages = [ChatWindow.message_template(user, text) for user, text in messages]
+            context = ChatWindow(messages)
+            self._context.push_window(context)
 
     @override
     def on_message(self, msg: RawMessage):
@@ -32,10 +42,13 @@ class WxHelper(WxBot):
         if msg.from_self():
             return
 
+        # 加入聊天记录缓存
+        self._context.push_message(msg.roomid, msg.content, self.all_contacts.get(msg.sender, msg.sender))
+
         # 消息来源。如果是群消息，则为群名称；否则为联系人备注
-        source = msg.roomid or msg.sender
-        display_source = self.all_contacts.get(source, source)
-        logging.info(f'New message from {display_source}: {msg.content}')
+        name = lambda x: self.all_contacts.get(x, x)
+        source = name(msg.roomid)
+        logging.info(f'New message from {name(msg.roomid)}: {msg.content}')
 
         # 消息处理
         response_back: str | None = None
@@ -50,8 +63,10 @@ class WxHelper(WxBot):
         # 发送消息
         if msg.from_group():
             self.send_text_msg(response_back, msg.roomid, msg.sender)
+            self._context.push_message(msg.roomid, response_back, name(msg.sender))
         else:
             self.send_text_msg(response_back, msg.sender)
+            self._context.push_message(msg.sender, response_back)
 
 
 FERRY: WxHelper = WxHelper(HOST, PORT)
@@ -76,3 +91,4 @@ FERRY.set('后端重构开发群', [WeatherPlugin(), IdiomPlugin()])
 FERRY.set('研究生摆烂群', [DoNothingPlugin()])
 while True:
     time.sleep(1)
+    FERRY.load_context()
