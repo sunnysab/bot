@@ -3,9 +3,11 @@
 class ChatWindow:
     """ 维护单个聊天会话（群或联系人）的状态 """
 
-    def __init__(self, max_history: int = 100):
+    def __init__(self, history=None, max_history: int = 100):
         self.max_history = max_history
-        self._history = []
+
+        history = history or []
+        self._history = history[:max_history]
 
     @staticmethod
     def message_template(user: str, message: str):
@@ -57,3 +59,7 @@ class ContextManager:
         else:
             self._contexts[contact] = ChatWindow()
             self._contexts[contact].append(user, message)
+
+    def push_window(self, chat_window: ChatWindow):
+        """ 批量存储消息 """
+        self._contexts[chat_window] = chat_window
