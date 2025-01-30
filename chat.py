@@ -6,8 +6,9 @@ from config import CONFIG
 def get_system_prompt(self_name: str):
     """ 获取系统提示 """
 
-    return '''你现在位于一个群聊中聊天。请你发表回复，尽量简洁，符合语境和聊天人类习惯，不要添加标点符号。''' \
-           '''如果相关主题回复过，或你决定不说话，请说：本轮不发言。''' \
+    return '''你现在位于一个群聊中聊天。请你发表回复，尽量简洁，符合语境和聊天人类习惯，结尾不要添加标点符号。''' \
+           '''你要注意话题的变更，无需回复旧的话题。''' \
+           '''如果相关主题回复过，没有必要再回复，或你决定不说话，请说：本轮不发言。''' \
            f'''聊天记录包含了你和群友最近的发言。你叫 {{{self_name}}}：\n'''
 
 
@@ -49,7 +50,8 @@ class ChatGLM(ChatAI):
                 {'role': 'user', 'content': message}],
         )
 
-        response_text: str = response.choices[0].message
+        completion_message = response.choices[0].message
+        response_text: str = completion_message.content
 
         # 如果回复内容为“本轮不发言”，则返回 None
         if self.silent(response_text):
@@ -76,7 +78,8 @@ class Ollama(ChatAI):
                 {'role': 'user', 'content': message}],
         )
 
-        response_text: str = response.choices[0].message
+        completion_message = response.choices[0].message
+        response_text: str = completion_message.content
         # 额外处理一下 Deepseek-R1 思维链的思维过程.
         RIGHT_THINK_BRACE = '</think>'
         right_brace = response_text.find(RIGHT_THINK_BRACE) + len(RIGHT_THINK_BRACE) + 1
