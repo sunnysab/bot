@@ -1,14 +1,13 @@
 import logging
 import signal
-import time
 from typing import override
 
-from chat import ChatGLM
+from chat import ChatGLM, Ollama
 from context import ContextManager
 from plugin import *
 from wechat import WxBot, RawMessage
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 
 
 class WxHelper(WxBot):
@@ -74,7 +73,8 @@ class WxHelper(WxBot):
         # 消息处理
         response_back: str | None = None
         for plugin in self._plugin_mappings.get(source, [self._default_plugin]):
-            response_back, _continue = plugin.handle(msg, self._context.get_context(msg.roomid))
+            chat_context = self._context.get_context(msg.roomid)
+            response_back, _continue = plugin.handle(msg, context=chat_context, me=self.self_info['name'])
             if response_back or not _continue:
                 break
         if not response_back:
@@ -104,7 +104,7 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
 
     # 设置插件
-    ai_implementation: ChatAI = ChatGLM(key=CONFIG['chatglm-key'], name=FERRY.self_info['name'])
+    ai_implementation: ChatAI = Ollama(model='deepseek-r1:7b', url=CONFIG['ollama-host'])
 
     FERRY.set_default_plugin(DoNothingPlugin())
     FERRY.attach_plugin('后端重构开发群', [DoNothingPlugin()])
