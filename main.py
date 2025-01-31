@@ -65,16 +65,19 @@ class WxHelper(WxBot):
         # 加入聊天记录缓存
         self._context.push_message(msg.roomid, msg.content, self.all_contacts.get(msg.sender, msg.sender))
 
+        # 自己的名字
+        self_name = self.self_info['name']
+
         # 消息来源。如果是群消息，则为群名称；否则为联系人备注
         name = lambda x: self.all_contacts.get(x, x)
         source = name(msg.roomid)
         logging.info(f'New message from {name(msg.roomid)}: {msg.content}')
 
         # 消息处理
-        response_back: str | None = None
+        response_back: list[str] | None = None
         for plugin in self._plugin_mappings.get(source, [self._default_plugin]):
             chat_context = self._context.get_context(msg.roomid)
-            response_back, _continue = plugin.handle(msg, context=chat_context, me=self.self_info['name'])
+            response_back, _continue = plugin.handle(msg, context=chat_context, me=self_name)
             if response_back or not _continue:
                 break
         if not response_back:
@@ -82,11 +85,13 @@ class WxHelper(WxBot):
             return  # 没有回复内容
 
         # 回复消息
-        self.send_text_msg(response_back, msg.roomid)
-        if msg.from_group():
-            self._context.push_message(msg.roomid, response_back, name(msg.sender))
-        else:
-            self._context.push_message(msg.sender, response_back)
+        # TODO: 改成异步，加延时.
+        for text in response_back:
+            self.send_text_msg(text, msg.roomid)
+            if msg.from_group():
+                self._context.push_message(msg.roomid, text, self_name)
+            else:
+                self._context.push_message(msg.sender, text)
 
 
 def main():
@@ -104,11 +109,11 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
 
     # 设置插件
-    ai_implementation: ChatAI = Ollama(model='deepseek-r1:7b', url=CONFIG['ollama-host'])
+    ai_implementation: ChatAI = ChatGLM(key=CONFIG['chatglm-key'])
 
-    FERRY.set_default_plugin(DoNothingPlugin())
-    FERRY.attach_plugin('后端重构开发群', [DoNothingPlugin()])
-    FERRY.attach_plugin('研究生摆烂群', [DoNothingPlugin()])
+    # FERRY.set_default_plugin(ChatPlugin(ai_implementation))
+    # FERRY.attach_plugin('后端重构开发群', [DoNothingPlugin()])
+    # FERRY.attach_plugin('研究生摆烂群', [DoNothingPlugin()])
     FERRY.attach_plugin('sunnysab', [ChatPlugin(ai_implementation)])
 
     FERRY.load_context()
