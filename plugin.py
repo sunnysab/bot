@@ -56,23 +56,9 @@ class ChatPlugin(Plugin):
         self.frequency = frequency # 最快情况每 frequency 秒调用一次模型
         self.context_length = context_length
 
-    @staticmethod
-    def get_group_chat_prompt(self_name: str):
-        """ 获取系统提示 """
-
-        return f'''你现在位于一个群聊中聊天。请你发表回复，尽量简洁，符合语境和聊天人类习惯，结尾不要添加标点符号。
-               注意话题的变更，无需回复旧的话题。
-               且如果相关主题你曾经回复过，没有必要再回复，或你决定不说话，请说：本轮不发言。
-               聊天记录包含了你和群友最近的发言。你叫 {{{self_name}}}，只回答你要说的话，不要带上下文：\n'''
-
-    @staticmethod
-    def get_private_chat_prompt(self_name: str):
-        """ 获取系统提示 """
-
-        return f'''你在和朋友聊天。尽量简洁，符合语境和聊天人类习惯，口语化，结尾不要添加标点符号
-                注意话题的变更，无需回复旧的话题
-                且如果相关主题你曾经回复过，没有必要再回复，或你决定不说话，请说：本轮不发言
-                聊天记录包含了你和对方最近的发言。你叫 {{{self_name}}}。只回答你要说的话，不要带上下文：\n'''
+        from jinja2 import Template
+        template_file = open('prompt.txt', encoding='utf-8').read()
+        self.prompt_template = Template(template_file)
 
     def handle(self, msg: RawMessage, **kwargs):
         # rate limit
@@ -84,15 +70,14 @@ class ChatPlugin(Plugin):
                 return None, True
         self.last_check_time[msg.roomid] = now, 0
 
-        me = kwargs['me']
         history = str(kwargs['context'].latest_n(self.context_length))
-        get_prompt = self.get_group_chat_prompt if msg.from_group() else self.get_private_chat_prompt
-        response = self.ai.chat(history, get_prompt(me))
+        prompt = self.prompt_template.render(self_name=kwargs['self_name'], contact=kwargs['contact'], is_group=msg.from_group())
+        response = self.ai.chat(history, prompt.strip())
         if not response:
             return None, False
 
         # 有时候模型返回数据中会带有 "昵称: " 的前缀，这里需要去掉
-        prefix = f'{me}:'
+        prefix = kwargs['self_name'] + ':'
         response = [x.lstrip(prefix) for x in response]
 
         return response, response is not None

@@ -77,7 +77,7 @@ class WxHelper(WxBot):
         response_back: list[str] | None = None
         for plugin in self._plugin_mappings.get(source, [self._default_plugin]):
             chat_context = self._context.get_context(msg.roomid)
-            response_back, _continue = plugin.handle(msg, context=chat_context, me=self_name)
+            response_back, _continue = plugin.handle(msg, context=chat_context, self_name=self_name, contact=source)
             if response_back or not _continue:
                 break
         if not response_back:
