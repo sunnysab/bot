@@ -1,4 +1,4 @@
-import logging
+from loguru import logger
 from abc import abstractmethod
 from typing import Optional
 
@@ -43,7 +43,7 @@ class OpenAI(ChatAI):
 
         completion_message = response.choices[0].message
         response_text: str = completion_message.content
-        logging.debug(f'OpenAI compatible response: {response_text}')
+        logger.debug(f'OpenAI compatible response: {response_text}')
 
         # 如果回复内容为“本轮不发言”，则返回 None
         if self.silent(response_text):
@@ -100,7 +100,7 @@ class Ollama(ChatAI):
         )
 
         response_text: str = response['message']['content']
-        logging.debug(f'Ollama response: {response_text}')
+        logger.debug(f'Ollama response: {response_text}')
 
         # 额外处理一下 Deepseek-R1 思维链的思维过程.
         RIGHT_THINK_BRACE = '</think>'

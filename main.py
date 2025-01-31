@@ -1,4 +1,4 @@
-import logging
+from loguru import logger
 import signal
 from typing import override
 
@@ -7,7 +7,8 @@ from context import ContextManager
 from plugin import *
 from wechat import WxBot, RawMessage
 
-logging.basicConfig(level=logging.DEBUG)
+
+logger.add(sink='bot.log', rotation='1 week', retention='7 days', level='DEBUG')
 
 
 class WxHelper(WxBot):
@@ -24,7 +25,7 @@ class WxHelper(WxBot):
         self.set_default_plugin(_default_plugin)
         self._plugin_mappings = {}
         self._context = ContextManager()
-        logging.info(f'Hello, {self.self_info["name"]}!')
+        logger.info(f'Hello, {self.self_info["name"]}!')
 
     def set_default_plugin(self, plugin: Plugin | list[Plugin]):
         """ 设置默认插件 """
@@ -50,7 +51,7 @@ class WxHelper(WxBot):
             for user, text in messages:
                 self._context.push_message(contact, text, user)
 
-        logging.info(f'Loaded {len(sessions)} sessions, {count_loaded} messages.')
+        logger.info(f'{len(sessions)} sessions, {count_loaded} messages loaded.')
 
     @override
     def on_message(self, msg: RawMessage) -> None:
@@ -75,7 +76,7 @@ class WxHelper(WxBot):
         # 消息来源。如果是群消息，则为群名称；否则为联系人备注
         name = lambda x: self.all_contacts.get(x, x)
         source = name(msg.roomid)
-        logging.info(f'New message from {name(msg.roomid)}: {msg.content}')
+        logger.info(f'New message from {name(msg.roomid)}: {msg.content}')
 
         # 消息处理
         response_back: list[str] | None = []
@@ -88,7 +89,7 @@ class WxHelper(WxBot):
                 response_back.extend(current_round)
 
         if not response_back:
-            logging.debug('no response to send.')
+            logger.debug('no response to send.')
             return  # 没有回复内容
 
         # 回复消息
@@ -108,7 +109,7 @@ def main():
 
     # 捕获 Ctrl+C 信号
     def signal_handler(sig, frame):
-        logging.info('Ctrl+C pressed. Exit.')
+        logger.warning('Ctrl+C pressed. Exit.')
         FERRY.stop_receiving_message()
         FERRY.cleanup()
         exit(0)
@@ -123,8 +124,8 @@ def main():
 
     FERRY.set_default_plugin([repeater, chat_plugin])
     # FERRY.attach_plugin('后端重构开发群', [DoNothingPlugin()])
-    # FERRY.attach_plugin('研究生摆烂群', [DoNothingPlugin()])
-    FERRY.attach_plugin('sunnysab', [ChatPlugin(ai_implementation)])
+    FERRY.attach_plugin('研究生摆烂群', [DoNothingPlugin()])
+    # FERRY.attach_plugin('sunnysab', [chat_plugin])
 
     FERRY.load_context()
 

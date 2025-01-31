@@ -1,5 +1,5 @@
 import re
-import logging
+from loguru import logger
 from collections.abc import Callable
 from queue import Empty
 from threading import Thread
@@ -12,9 +12,9 @@ class WxBot:
     """ 微信机器人组件 """
 
     def __init__(self, host: str, port: int, callback: Callable[[RawMessage], None]=None):
-        logging.info('starting robot...')
+        logger.info('starting robot...')
         self.wcf = Wcf(host, port)
-        logging.info('connected to wechatferry.')
+        logger.info('connected to wechatferry.')
 
         self.self_info = self.get_myself()
         self.wxid = self.wcf.get_self_wxid()
@@ -40,11 +40,11 @@ class WxBot:
             v3 = xml.attrib['encryptusername']
             v4 = xml.attrib['ticket']
             scene = int(xml.attrib['scene'])
-            logging.info(f'Accepting friend request from {v3} (ticket: {v4})')
+            logger.info(f'Accepting friend request from {v3} (ticket: {v4})')
             self.wcf.accept_new_friend(v3, v4, scene)
-            logging.info(f'Accepted friend request from {v3}')
+            logger.info(f'Accepted friend request from {v3}')
         except Exception as e:
-            logging.error(f'Failed to accept friend: {e}')
+            logger.error(f'Failed to accept friend: {e}')
 
     def _say_hi_to_new_friend(self, msg: RawMessage) -> None:
         """ 自动发送欢迎消息给新好友 """
@@ -69,16 +69,16 @@ class WxBot:
             case 10000: # 系统信息
                 self._say_hi_to_new_friend(msg)
             case _:
-                logging.info(f'Unknown message type: {msg.type}')
-                logging.info(msg)
+                logger.info(f'Unknown message type: {msg.type}')
+                logger.info(msg)
 
     @staticmethod
     def on_message(msg: RawMessage):
         """ 默认的文本消息处理方法, 输出消息内容 """
         try:
-            logging.info(msg)
+            logger.info(msg)
         except Exception as e:
-            logging.error(e)
+            logger.error(e)
 
     def start_receiving_message(self) -> None:
         def inner_process_msg(wcf: Wcf):
@@ -89,7 +89,7 @@ class WxBot:
                 except Empty:
                     continue  # Empty message
                 except Exception as e:
-                    logging.error(f'Error on receiving: {e}')
+                    logger.error(f'Error on receiving: {e}')
 
         self.wcf.enable_receiving_msg()
         Thread(target=inner_process_msg, name='GetMessage', args=(self.wcf,), daemon=True).start()
@@ -120,10 +120,10 @@ class WxBot:
                     ats += f' @{self.wcf.get_alias_in_chatroom(wxid, receiver)}'
 
         if not ats:
-            logging.info(f'To {receiver}: {msg}')
+            logger.info(f'To {receiver}: {msg}')
             self.wcf.send_text(f'{msg}', receiver, at_list)
         else:
-            logging.info(f'To {receiver}: {ats}\r{msg}')
+            logger.info(f'To {receiver}: {ats}\r{msg}')
             self.wcf.send_text(f'{ats}\n\n{msg}', receiver, at_list)
 
     def get_recent_sessions(self, count: int = 10):
@@ -185,7 +185,7 @@ class WxBot:
                 if parsed_tuple:
                     result.append(parsed_tuple)
             except Exception as e:
-                # logging.error(f'Error on processing record: {e}')
+                # logger.error(f'Error on processing record: {e}')
                 pass
 
         result.reverse()
