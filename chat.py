@@ -1,6 +1,7 @@
-from loguru import logger
 from abc import abstractmethod
 from typing import Optional
+
+from loguru import logger
 
 
 class ChatAI:
@@ -43,48 +44,37 @@ class OpenAI(ChatAI):
 
         completion_message = response.choices[0].message
         response_text: str = completion_message.content
-        logger.debug(f'OpenAI compatible response: {response_text}')
+        logger.debug(f'OpenAI compatible interface. prompt: {repr(prompt)}, message: {repr(message)} response: {repr(response_text)}')
+        if 'reasoning_content' in completion_message.model_extra:
+            logger.debug(f'reasoning content: {repr(completion_message.model_extra["reasoning_content"])}')
 
         # 如果回复内容为“本轮不发言”，则返回 None
         if self.silent(response_text):
             return None
+        # Deepseek-R1 的思维链过程在 ChatCompletion 的 extra 字段中
+        # 无需单独处理，直接返回即可
         return [x.strip() for x in response_text.split() if x.strip()]
 
 
 class Deepseek(OpenAI):
     """ Deepseek """
 
-    def __init__(self, key: str, model: str = 'deepseek-chat'):
-        super().__init__(url='https://api.deepseek.com', key=key, model=model)
-
-    def chat(self, prompt: str, message: str) -> Optional[list[str]]:
-        """ 聊天 """
-        texts: Optional[list[str]] = super().chat(prompt, message)
-        if not texts:
-            return texts
-
-        # 额外处理一下 Deepseek-R1 思维链的思维过程.
-        RIGHT_THINK_BRACE = '</think>'
-        try:
-            if (right_brace := texts.index(RIGHT_THINK_BRACE)) > 0:
-                 return texts[right_brace + 1:]
-        except ValueError:
-            pass
-        return texts
+    def __init__(self, key: str, model: str = 'deepseek-chat', **kwargs):
+        super().__init__(url='https://api.deepseek.com', key=key, model=model, **kwargs)
 
 
 class ChatGLM(OpenAI):
     """ 智谱清言 """
 
-    def __init__(self, key: str, model: str = 'glm-4-flash'):
-        super().__init__(url='https://open.bigmodel.cn/api/paas/v4', key=key, model=model)
+    def __init__(self, key: str, model: str = 'glm-4-flash', **kwargs):
+        super().__init__(url='https://open.bigmodel.cn/api/paas/v4', key=key, model=model, **kwargs)
 
 
 class Ollama(ChatAI):
     """ Ollama """
 
-    def __init__(self, model: str, url: str):
-        super().__init__()
+    def __init__(self, model: str, url: str, **kwargs):
+        super().__init__(**kwargs)
 
         from ollama import Client
         self.model = model
@@ -100,7 +90,7 @@ class Ollama(ChatAI):
         )
 
         response_text: str = response['message']['content']
-        logger.debug(f'Ollama response: {response_text}')
+        logger.debug(f'Ollama interface. prompt: {repr(prompt)}, message: {repr(message)} response: {repr(response_text)}')
 
         # 额外处理一下 Deepseek-R1 思维链的思维过程.
         RIGHT_THINK_BRACE = '</think>'
