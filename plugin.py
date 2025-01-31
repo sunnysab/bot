@@ -51,6 +51,8 @@ class ChatPlugin(Plugin):
             self.max_ignore = 1
         elif max_ignore > 50:
             self.max_ignore = 50
+        else:
+            self.max_ignore = max_ignore
         self.frequency = frequency # 最快情况每 frequency 秒调用一次模型
         self.context_length = context_length
 
