@@ -58,29 +58,58 @@ def decode_compress_content(data: str | bytes) -> str:
         binary: bytes = base64.b64decode(data)
     elif isinstance(data, bytes):  # 如果是字节串
         binary = data
+    else:
+        raise ValueError('data must be str or bytes')
 
-    content = lb.decompress(binary, uncompressed_size=0x10004)
-    return content.decode('utf-8')
+    content = lb.decompress(binary, uncompressed_size=len(binary) << 10)
+    return content.decode('utf-8').replace('\x00', '')  # 去掉字符串中的空字符
 
 
-def decode_reference_message(data: str | bytes) -> dict:
-    """解码引用消息"""
-    content = decode_compress_content(data)
-    root = ET.fromstring(content)
+def fix_xml(xml: str) -> str:
+    """修复 XML 格式"""
+    replacement = [('&lt;', '<'), ('&gt;', '>'), ('&amp;', '&')]
+    for old, new in replacement:
+        xml = xml.replace(old, new)
+    return xml
+
+
+def parse_reference_message(xml_data: str) -> dict:
+    """解析引用消息"""
+    xml_data = fix_xml(xml_data)
+    root = ET.fromstring(xml_data)
+
+    message_sub_type = root.find('.//type').text
+    assert message_sub_type == '57', '消息类型不是引用消息'
+
+    content = root.find('.//title').text
+    sender = root.find('.//fromusername').text
+    referred_message = root.find('.//refermsg/content').text
+    if referred_message.startswith('<'):
+        referred_content_root = ET.fromstring(referred_message)
+        referred_message = referred_content_root.find('.//title').text
+    referred_message_sender = root.find('.//refermsg/chatusr').text
 
     return {
-        'content': root.find('.//title').text,
-        'fromusername': root.find('.//fromusername').text,
-        'refer_user': root.find('.//refermsg/displayname').text,
-        'refer_content': root.find('.//refermsg/content').text
+        'content': content,
+        'sender': sender,
+        'referred_message': referred_message,
+        'referred_message_sender': referred_message_sender
     }
 
 
+def decode_reference_message(xml_data: str | bytes) -> dict:
+    """解码引用消息"""
+    content = decode_compress_content(xml_data)
+    return parse_reference_message(content)
+
+
 if __name__ == '__main__':
+    from pprint import pprint
+
     message = 'CgQIEBAAGhcIARITd3hpZF9rZjd6YnlqanhzOHIyMhqBAwgHEvwCPG1zZ3NvdXJjZT4KICAgIDxhdHVzZXJsaXN0PgogICAgICAgIDwhW0NEQVRBWyx3eGlkX21zODBpbHk1Nnk0bjIxXV0+CiAgICA8L2F0dXNlcmxpc3Q+CiAgICA8cHVhPjE8L3B1YT4KICAgIDxzaWxlbmNlPjE8L3NpbGVuY2U+CiAgICA8bWVtYmVyY291bnQ+ODwvbWVtYmVyY291bnQ+CiAgICA8c2lnbmF0dXJlPlYxX3gyUHNvSnVDfHYxX3gyUHNvSnVDPC9zaWduYXR1cmU+CiAgICA8dG1wX25vZGU+CiAgICAgICAgPHB1Ymxpc2hlci1pZCAvPgogICAgPC90bXBfbm9kZT4KICAgIDxzZWNfbXNnX25vZGU+CiAgICAgICAgPGFsbm9kZT4KICAgICAgICAgICAgPGZyPjE8L2ZyPgogICAgICAgIDwvYWxub2RlPgogICAgPC9zZWNfbXNnX25vZGU+CjwvbXNnc291cmNlPgoaJAgCEiBhODlkYTMwMzE5ZGVmYWY0OWUyMjhhYWI5ZjU5NmU5NA=='
     data = decode_bytes_extra(message)
-    print(data)
+    pprint(data)
 
     compressed = '8js8P3htbCB2ZXJzaW9uPSIxLjAiPz4KPG1zZz4KCTxhcHBtc2cgYXBwaWQ9IiIgc2RrdmVyPSIwIj4KCQk8dGl0bGU+cHJvdG88Lw0AABcAUWRlcyAvIQDTYWN0aW9uPnZpZXc8Lw0AACIAkXR5cGU+NTc8LwkAABIAQXNob3cNADUwPC8MAAAZAHNjb250ZW50UQAzdXJsCgBGZGF0YQ4AOWxvdw0ACh4Ao3JlY29yZGl0ZW09AFZ0aHVtYjEAcm1lc3NhZ2WhAAMjAHNsYW5pbmZvDgBScmVmZXIVAQD4AAC/ABYxvgDwCwk8c3ZyaWQ+Mjk1OTkzMzgxMTYyODQwMTE2zgABGwABOAD0D2Zyb211c3I+MjU1Njk4ODY5ODVAY2hhdHJvb208Lx4AASsAABcAACsA9AZ3eGlkX21zODBpbHk1Nnk0bjIxPC8dAAIqAPcHcmVhdGV0aW1lPjE3MzgyMzcyOTI8LxcAAScA+BFkaXNwbGF5bmFtZT7lvLrlk6XlpKflj7fnsonkuJ08LyAAATEA5W1zZ3NvdXJjZT4mbHQ7DgCQJmd0OwogICAgFgBWYWxub2QTAAACAAAXACBmchMAEDELABIvDAAFMgAbLzMAACQAUnNpbGVuWgACNAAHEQAFOQCwbWVtYmVyY291bnRdABA4OQAbLxUABS0AgXNpZ25hdHVymwDWVjFfNVdkYXdybnB8dgwAAUEACSkABT8AT3RtcF/ZAALgcHVibGlzaGVyLWlkIC+IAAU0AB0vNQAAYQB/c2VjX21zZ04AAwsLAQQCAAA4AAI2AQIOAQIMAAFpAAACAAAfAA9GAQEdL2wAASoACrkBFjwQAAChAwVfA5M+5LiA5qC3PC9vAwAdACg8L/YCRzxleHQRAwIbAkB1c2VyUgIDJgMCFQAHSgIDGAB2Y29tbWVudHEDkGFwcGF0dGFjaGgA5Qk8dG90YWxsZW4+MDwvDAABhQICJgAAbQECKgDoZW1vdGljb25tZDU+PC8OAAEvAGNmaWxlZXgtBLMJPGFlc2tleT48LwkAAdUACXwAQDx3ZWKeBGJzaGFyZWRkAAXlARVJdwAFEwBQUmVxSWSnAAsSAAFaAA1MADA8d2U7BTNuZm9aAHRhZ2VwYXRoVwAKPwEBFwEG6wCkYXBwc2VydmljZRgFCxIAA3QAB2IAAM4AUnNlYXJjYgABMgACtQQSPF0EAq4BAlUE5GtmN3pieWpqeHM4cjIyfwQDIgByCgk8c2Nlbo8FAQkAEQqSAAACAgDMABM8MgZEPjE8LwsAAJAANWFwcBACAX8AAzEACwMCgDwvbXNnPgoA'
-    content = decode_compress_content(compressed)
-    print(content)
+    data = decode_reference_message(compressed)
+    pprint(data)
