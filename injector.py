@@ -1,6 +1,9 @@
 import argparse
 import ctypes
-import os.path
+import os
+import signal
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+from typing import override
 
 
 class Wcf:
@@ -23,17 +26,56 @@ class Wcf:
             print('退出失败！')
 
 
+class UploadHandler(SimpleHTTPRequestHandler):
+    def do_PUT(self):
+        # 获取路径并转换为本地路径
+        path = self.translate_path(self.path)
+
+        # 检查路径是否为目录（不允许覆盖目录）
+        if os.path.isdir(path):
+            self.send_error(405, "Method Not Allowed")
+            return
+
+        # 确保父目录存在
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        # 读取请求内容
+        content_length = int(self.headers['Content-Length'])
+        content = self.rfile.read(content_length)
+
+        # 写入文件
+        with open(path, 'wb') as f:
+            f.write(content)
+
+        # 发送响应
+        self.send_response(201)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'File uploaded successfully')
+
+    def do_POST(self):
+        # 让 POST 和 PUT 使用相同逻辑
+        self.do_PUT()
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Wcf SDK Loader')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode')
-    parser.add_argument('--port', type=int, default=10086, help='Port number to use')
+    parser.add_argument('--wcf-port', type=int, default=10086, help='Port number for WCF to use')
+    parser.add_argument('--web-port', type=int, default=8000, help='Port number for HTTP server to use')
     args = parser.parse_args()
 
-    while True:
-        wcf = Wcf()
-        wcf.load(debug=args.debug, port=args.port)
+    wcf = Wcf()
+    wcf.load(debug=args.debug, port=args.wcf_port)
+    print('WCF SDK loaded.')
 
-        key = input('Press Enter to exit...')
+    def signal_handler(sig, frame):
+        print('Ctrl+C pressed. Exit.')
         wcf.cleanup()
-        if key != 'r':
-            break
+        exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    print('Listening on port', args.web_port)
+    server_address = ('', args.web_port)
+    httpd = HTTPServer(server_address, UploadHandler)
+    httpd.serve_forever()
