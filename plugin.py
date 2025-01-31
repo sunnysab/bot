@@ -137,7 +137,7 @@ class ChatPlugin(Plugin):
 
         history = str(kwargs['context'].latest_n(self.context_length))
         prompt = self.prompt_template.render(self_name=kwargs['self_name'], contact=kwargs['contact'], is_group=msg.from_group())
-        response = self.ai.chat(history, prompt.strip())
+        response = self.ai.chat(prompt.strip(), history)
         if not response:
             return None, False
 
