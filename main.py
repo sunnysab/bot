@@ -21,8 +21,8 @@ class WxHelper(WxBot):
     """ 插件映射表. 键为联系人名称，值为插件列表 """
 
     def __init__(self, host: str, port: int, _default_plugin: Plugin | list[Plugin] = DefaultPlugin(),
-                 reply_delay_coefficient: float = 0):
-        super().__init__(host, port)
+                 reply_delay_coefficient: float = 0, dry_run: bool = False):
+        super().__init__(host, port, dry_run=dry_run)
 
         assert isinstance(_default_plugin, Plugin) or isinstance(_default_plugin, list)
         assert reply_delay_coefficient >= 0
@@ -30,7 +30,7 @@ class WxHelper(WxBot):
         self.set_default_plugin(_default_plugin)
         self._plugin_mappings = {}
         self._context = ContextManager()
-        self._delay_coefficient = reply_delay_coefficient
+        self.delay_coefficient = reply_delay_coefficient
         logger.info(f'Hello, {self.self_info["name"]}!')
 
     def set_default_plugin(self, plugin: Plugin | list[Plugin]):
@@ -116,8 +116,8 @@ class WxHelper(WxBot):
         # 回复消息
         # TODO: 改成异步发送
         for text in response_back:
-            if self._delay_coefficient:
-                time.sleep(len(text) * self._delay_coefficient)
+            if self.delay_coefficient:
+                time.sleep(len(text) * self.delay_coefficient)
             self.send_text_msg(text, msg.roomid)
             if msg.from_group():
                 self._context.push_message(msg.roomid, text, self_name)
