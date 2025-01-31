@@ -1,12 +1,13 @@
-from loguru import logger
 import signal
 from typing import override
 
-from chat import ChatGLM, Ollama, Deepseek
+from loguru import logger
+
+from chat import Deepseek
 from context import ContextManager
+from message import parse_reference_message
 from plugin import *
 from wechat import WxBot, RawMessage
-
 
 logger.add(sink='bot.log', rotation='1 week', retention='7 days', level='DEBUG')
 
@@ -53,9 +54,23 @@ class WxHelper(WxBot):
 
         logger.info(f'{len(sessions)} sessions, {count_loaded} messages loaded.')
 
+    def _parse_reference_message(self, msg: RawMessage) -> None:
+        """ 解析引用消息. 注意。这个函数会修改原始消息对象 """
+
+        assert msg.type == 49
+        try:
+            parsed_message = parse_reference_message(msg.content)
+        except Exception as e:
+            logger.error(f'Error on parsing reference message: {e}')
+            return
+        msg.content = parsed_message['content'] + f'引用的消息（{parsed_message['referred_message']}）'
+
     @override
     def on_message(self, msg: RawMessage) -> None:
         """ 消息处理函数 """
+
+        if msg.type == 49:
+            self._parse_reference_message(msg)
 
         # 自己的消息不用回复，也不用存储。在发送的时候会自动存储。
         if msg.from_self():
@@ -76,7 +91,7 @@ class WxHelper(WxBot):
         # 消息来源。如果是群消息，则为群名称；否则为联系人备注
         name = lambda x: self.all_contacts.get(x, x)
         source = name(msg.roomid)
-        logger.info(f'New message from {name(msg.roomid)}: repr({msg.content})')
+        logger.info(f'new message from {name(msg.roomid)}: {repr(msg.content)}')
 
         # 消息处理
         response_back: list[str] | None = []

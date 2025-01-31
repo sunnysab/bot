@@ -62,7 +62,7 @@ class WxBot:
 
         logger.debug(msg)
         match msg.type:
-            case 1: # 文本消息
+            case 1 | 49: # 文本消息
                 self.message_callback(msg)
             case 37: # 好友请求
                 # self._auto_accept_friend_request(msg)
