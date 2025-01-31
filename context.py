@@ -37,6 +37,12 @@ class ChatWindow:
     def __len__(self):
         return len(self._history)
 
+    def __iter__(self):
+        return iter(self._history)
+
+    def __getitem__(self, item):
+        return self._history[item]
+
 
 class ContextManager:
     """ 上下文管理器 """

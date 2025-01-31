@@ -14,20 +14,24 @@ class WxHelper(WxBot):
     """ 微信机器人助手 """
 
     _plugin_mappings: dict[str, list[Plugin]]
-    _default_plugin = DefaultPlugin()
+    _default_plugins: list[Plugin]
 
     """ 插件映射表. 键为联系人名称，值为插件列表 """
 
-    def __init__(self, host: str, port: int, _default_plugin: Plugin = DefaultPlugin()):
+    def __init__(self, host: str, port: int, _default_plugin: Plugin | list[Plugin] = DefaultPlugin()):
         super().__init__(host, port)
-        self._default_plugin = _default_plugin
+
+        self.set_default_plugin(_default_plugin)
         self._plugin_mappings = {}
         self._context = ContextManager()
         logging.info(f'Hello, {self.self_info["name"]}!')
 
-    def set_default_plugin(self, plugin: Plugin):
+    def set_default_plugin(self, plugin: Plugin | list[Plugin]):
         """ 设置默认插件 """
-        self._default_plugin = plugin
+        if isinstance(plugin, Plugin):
+            self._default_plugins = [plugin]
+        else:
+            self._default_plugins = plugin
 
     def attach_plugin(self, contact: str, plugins: Plugin | list[Plugin]):
         """ 设置插件 """
@@ -74,14 +78,17 @@ class WxHelper(WxBot):
         logging.info(f'New message from {name(msg.roomid)}: {msg.content}')
 
         # 消息处理
-        response_back: list[str] | None = None
-        for plugin in self._plugin_mappings.get(source, [self._default_plugin]):
+        response_back: list[str] | None = []
+        for plugin in self._plugin_mappings.get(source, self._default_plugins):
             chat_context = self._context.get_context(msg.roomid)
-            response_back, _continue = plugin.handle(msg, context=chat_context, self_name=self_name, contact=source)
-            if response_back or not _continue:
+            current_round, _continue = plugin.handle(msg, context=chat_context, self_name=self_name, contact=source)
+            if not _continue:
                 break
+            if current_round:
+                response_back.extend(current_round)
+
         if not response_back:
-            logging.info('No response to send.')
+            logging.debug('no response to send.')
             return  # 没有回复内容
 
         # 回复消息
@@ -112,8 +119,9 @@ def main():
     # ai_provider: ChatAI = ChatGLM(key=CONFIG['chatglm-key'])
     ai_provider: ChatAI = Deepseek(key=CONFIG['deepseek-key'])
     chat_plugin = ChatPlugin(ai_provider, max_ignore=2, frequency=10, context_length=10)
+    repeater = RepeatPlugin()
 
-    # FERRY.set_default_plugin(ChatPlugin(ai_implementation))
+    FERRY.set_default_plugin([repeater, chat_plugin])
     # FERRY.attach_plugin('后端重构开发群', [DoNothingPlugin()])
     # FERRY.attach_plugin('研究生摆烂群', [DoNothingPlugin()])
     FERRY.attach_plugin('sunnysab', [ChatPlugin(ai_implementation)])
