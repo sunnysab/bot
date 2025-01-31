@@ -12,11 +12,12 @@ from message import decode_sender_name, decode_compress_content
 class WxBot:
     """ 微信机器人组件 """
 
-    def __init__(self, host: str, port: int, callback: Callable[[RawMessage], None] = None):
+    def __init__(self, host: str, port: int, callback: Callable[[RawMessage], None] = None, dry_run: bool = False):
         logger.info('starting robot...')
         self.wcf = Wcf(host, port)
         logger.info('connected to wechatferry.')
 
+        self.dry_run = dry_run
         self.self_info = self.get_myself()
         self.wxid = self.wcf.get_self_wxid()
         self.all_contacts = self.get_all_contacts()
@@ -113,6 +114,10 @@ class WxBot:
         :param receiver: 接收人wxid或者群id
         :param at_list: 要@的wxid, @所有人的wxid为：notify@all
         """
+        if self.dry_run:
+            logger.info(f'[DRY RUN] To {receiver}: {msg}')
+            return
+
         ats = ''
         if at_list:
             if at_list == 'notify@all':  # @所有人
