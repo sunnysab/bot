@@ -1,7 +1,9 @@
+import re
 import time
 from abc import abstractmethod
 
 from chat import ChatAI
+from context import ChatWindow
 from wechat import RawMessage
 
 
@@ -34,6 +36,69 @@ class DoNothingPlugin(Plugin):
     def handle(self, msg: RawMessage, **kwargs):
         return None, False
 
+
+class RepeatPlugin(Plugin):
+    def __init__(self, repeat_count: int = 2, context_length: int = 10, max_length: int = 20):
+        """ 跟队形（复读机）插件
+
+        :param repeat_count: 队形阈值
+        :param context_length: 拉取的上下文长度
+        :param max_length: 单条队形的最大长度。 python 会计算中文字符长度，一个中文字符算一个长度。
+        """
+        assert repeat_count > 1
+        assert context_length > repeat_count
+        assert max_length > 0
+
+        self.repeat_count = repeat_count
+        self.context_length = context_length
+        self.max_length = max_length
+        # 为了避免重复回复，记录上一次重复的消息。
+        # key 是聊天窗口编号，value 是最后一次重复的消息（去重）
+        self.last_repeat = {}
+
+    @staticmethod
+    def preprocess(text: str) -> str:
+        """ 预处理消息. 此时消息格式为：'昵称: 消息内容' """
+        # 去掉昵称
+        text = text.split(':', 1)[1]
+        # 去掉中文标点
+        text = re.sub(r'[，。！？；：、（）《》【】“”‘’—…]', '', text)
+        # 去掉英文标点
+        text = re.sub(r'[,.!?;:(){}"\'\[\]<>]', '', text)
+        # 去掉表情（由英文方括号括起，中间是中英的文字）
+        text = re.sub(r'[.*?]', '', text)
+        return text
+
+    def handle(self, msg: RawMessage, **kwargs):
+        """ 跟队形回复。 如果去掉中文英文标点及表情后的消息连续重复特定数量，则凑个热闹跟着回复一句。 """
+        context: ChatWindow = kwargs['context'].latest_n(self.context_length)
+        if len(context) < self.repeat_count:
+            return None, True
+
+        # 对历史消息去除昵称、标点等操作
+        clear_context: list[str] = [self.preprocess(x) for x in context]
+        count_dict = {}
+        for pos, text in enumerate(clear_context):
+            if text not in count_dict:
+                count_dict[text] = [pos]
+            else:
+                count_dict[text].append(pos)
+        # 找到最多的重复元素及次数, 其实就是找 count_dict 中 value 最长的.
+        max_repeat = max(count_dict.values(), key=len)
+        if len(max_repeat) < self.repeat_count:
+            return None, True
+
+        # 找一条别人说过的队形，跟上
+        text = context[max_repeat[-1]]
+        text = text.split(':', 1)[1]
+        # 太长不跟
+        if len(text) > self.max_length:
+            return None, True
+        # 队形跟过了就不要再跟了
+        if msg.roomid in self.last_repeat and self.last_repeat[msg.roomid] == text:
+            return None, True
+        self.last_repeat[msg.roomid] = text
+        return [text], True
 
 
 class ChatPlugin(Plugin):
