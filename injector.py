@@ -1,15 +1,15 @@
 import ctypes
 import os.path
+import argparse
 
 
 class Wcf:
-
     DEFAULT_SDK_PATH = 'binary/sdk.dll'
 
     def __init__(self):
         pass
 
-    def load(self, debug:bool=False, port:int=10086):
+    def load(self, debug: bool = False, port: int = 10086):
         if not os.path.exists(self.DEFAULT_SDK_PATH):
             print('SDK 不存在！')
 
@@ -22,8 +22,18 @@ class Wcf:
         if self.sdk.WxDestroySDK() != 0:
             print('退出失败！')
 
+
 if __name__ == '__main__':
-    wcf = Wcf()
-    wcf.load()
-    input('Press Enter to exit...')
-    wcf.cleanup()
+    parser = argparse.ArgumentParser(description='Wcf SDK Loader')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode')
+    parser.add_argument('--port', type=int, default=10086, help='Port number to use')
+    args = parser.parse_args()
+
+    while True:
+        wcf = Wcf()
+        wcf.load(debug=args.debug, port=args.port)
+
+        key = input('Press Enter to exit...')
+        wcf.cleanup()
+        if key != 'r':
+            break
