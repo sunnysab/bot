@@ -1,3 +1,5 @@
+import base64
+import re
 from abc import abstractmethod
 from typing import Optional
 
@@ -15,6 +17,11 @@ class ChatAI:
     @abstractmethod
     def chat(self, prompt: str, message: str) -> Optional[list[str]]:
         """ 聊天 """
+        pass
+
+    @abstractmethod
+    def describe_image(self, prompt: str, image: bytes | str) -> Optional[str]:
+        """ 图像描述 """
         pass
 
 
@@ -70,6 +77,32 @@ class ChatGLM(OpenAI):
     def __init__(self, key: str, model: str = 'glm-4-flash', **kwargs):
         super().__init__(url='https://open.bigmodel.cn/api/paas/v4', key=key, model=model, **kwargs)
 
+    @staticmethod
+    def get_image_prompt() -> str:
+        """ 获取图片描述的提示 """
+        return '尽可能少的字数描述图片主体是什么, 里面物品有什么. 给人的感觉如何. 不要描述物品放置的目的.'
+
+    def describe_image(self, prompt: str, image: bytes | str) -> Optional[str]:
+        """ 图像描述 """
+        encoded_image = base64.b64encode(image).decode('utf-8')
+
+        response = self.client.chat.completions.create(
+            model='glm-4v-flash', # TODO: 支持修改.
+            temperature=0.95,
+            top_p=0.70,
+            messages=[{'role': 'user', 'content': [
+                {'type': 'image_url', 'image_url': {'url': encoded_image}},
+                {'type': 'text', 'text': prompt},
+            ]}],
+        )
+
+        completion_message = response.choices[0].message
+        response_text: str = completion_message.content
+        logger.debug(f'ChatGLM image description. response: {repr(response_text)}')
+
+        response_text = re.sub(r'\s\S\n', '', response_text)
+        return response_text
+
 
 class Ollama(ChatAI):
     """ Ollama """
@@ -104,3 +137,16 @@ class Ollama(ChatAI):
         if self.silent(response_text):
             return None
         return [x.strip() for x in response_text.split() if x.strip()]
+
+
+if __name__ == '__main__':
+    chatglm = ChatGLM(key='')
+    prompt = chatglm.get_image_prompt()
+
+    image = open('image/dog.jpg', 'rb').read()
+    description = chatglm.describe_image(prompt, image)
+    print('dog: ', description)
+
+    image = open('image/lunch.jpg', 'rb').read()
+    description = chatglm.describe_image(prompt, image)
+    print('lunch: ', description)
