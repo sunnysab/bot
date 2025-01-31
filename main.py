@@ -2,7 +2,7 @@ import logging
 import signal
 from typing import override
 
-from chat import ChatGLM, Ollama
+from chat import ChatGLM, Ollama, Deepseek
 from context import ContextManager
 from plugin import *
 from wechat import WxBot, RawMessage
@@ -109,7 +109,9 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
 
     # 设置插件
-    ai_implementation: ChatAI = ChatGLM(key=CONFIG['chatglm-key'])
+    # ai_provider: ChatAI = ChatGLM(key=CONFIG['chatglm-key'])
+    ai_provider: ChatAI = Deepseek(key=CONFIG['deepseek-key'])
+    chat_plugin = ChatPlugin(ai_provider, max_ignore=2, frequency=10)
 
     # FERRY.set_default_plugin(ChatPlugin(ai_implementation))
     # FERRY.attach_plugin('后端重构开发群', [DoNothingPlugin()])

@@ -72,7 +72,7 @@ class ChatPlugin(Plugin):
                 聊天记录包含了你和对方最近的发言。你叫 {{{self_name}}}。只回答你要说的话，不要带上下文：\n'''
 
     def handle(self, msg: RawMessage, **kwargs):
-        # 检查是否需要调用模型
+        # rate limit
         now = time.time()
         if msg.roomid in self.last_check_time:
             last_check_time, ignored = self.last_check_time[msg.roomid]
