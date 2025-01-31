@@ -83,11 +83,11 @@ def parse_reference_message(xml_data: str) -> dict:
 
     content = root.find('.//title').text
     sender = root.find('.//fromusername').text
-    referred_message = root.find('.//refermsg/content').text
+    referred_message_sender = root.find('.//refermsg/chatusr').text
+    referred_message = root.find('.//refermsg/content').text or root.find('.//refermsg//title').text or ''
     if referred_message.startswith('<'):
         referred_content_root = ET.fromstring(referred_message)
         referred_message = referred_content_root.find('.//title').text
-    referred_message_sender = root.find('.//refermsg/chatusr').text
 
     return {
         'content': content,
