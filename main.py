@@ -1,4 +1,5 @@
 import signal
+import time
 from typing import override
 
 from loguru import logger
@@ -19,12 +20,17 @@ class WxHelper(WxBot):
     _plugin_mappings: dict[str, list[Plugin]]
     """ 插件映射表. 键为联系人名称，值为插件列表 """
 
-    def __init__(self, host: str, port: int, _default_plugin: Plugin | list[Plugin] = DefaultPlugin()):
+    def __init__(self, host: str, port: int, _default_plugin: Plugin | list[Plugin] = DefaultPlugin(),
+                 reply_delay_coefficient: float = 0):
         super().__init__(host, port)
+
+        assert isinstance(_default_plugin, Plugin) or isinstance(_default_plugin, list)
+        assert reply_delay_coefficient >= 0
 
         self.set_default_plugin(_default_plugin)
         self._plugin_mappings = {}
         self._context = ContextManager()
+        self._delay_coefficient = reply_delay_coefficient
         logger.info(f'Hello, {self.self_info["name"]}!')
 
     def set_default_plugin(self, plugin: Plugin | list[Plugin]):
@@ -53,7 +59,8 @@ class WxHelper(WxBot):
 
         logger.info(f'{len(sessions)} sessions, {count_loaded} messages loaded.')
 
-    def _parse_reference_message(self, msg: RawMessage) -> None:
+    @staticmethod
+    def _parse_reference_message(msg: RawMessage) -> None:
         """ 解析引用消息. 注意。这个函数会修改原始消息对象 """
 
         assert msg.type == 49
@@ -107,8 +114,10 @@ class WxHelper(WxBot):
             return  # 没有回复内容
 
         # 回复消息
-        # TODO: 改成异步，加延时.
+        # TODO: 改成异步发送
         for text in response_back:
+            if self._delay_coefficient:
+                time.sleep(len(text) * self._delay_coefficient)
             self.send_text_msg(text, msg.roomid)
             if msg.from_group():
                 self._context.push_message(msg.roomid, text, self_name)
@@ -119,7 +128,7 @@ class WxHelper(WxBot):
 def main():
     from config import CONFIG
     host, port = CONFIG['wcf-host'], CONFIG['wcf-port']
-    FERRY: WxHelper = WxHelper(host, port)
+    FERRY: WxHelper = WxHelper(host, port, reply_delay_coefficient=0.2)
 
     # 捕获 Ctrl+C 信号
     def signal_handler(sig, frame):
