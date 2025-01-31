@@ -1,5 +1,3 @@
-
-
 class ChatWindow:
     """ 维护单个聊天会话（群或联系人）的状态 """
 
@@ -65,7 +63,7 @@ class ContextManager:
         """ 清空所有上下文 """
         self._contexts.clear()
 
-    def push_message(self, contact: str, message: str, user: str=''):
+    def push_message(self, contact: str, message: str, user: str = ''):
         """ 存储消息 """
         if not user:
             user = contact

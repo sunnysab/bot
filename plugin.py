@@ -118,7 +118,7 @@ class ChatPlugin(Plugin):
             self.max_ignore = 50
         else:
             self.max_ignore = max_ignore
-        self.frequency = frequency # 最快情况每 frequency 秒调用一次模型
+        self.frequency = frequency  # 最快情况每 frequency 秒调用一次模型
         self.context_length = context_length
 
         from jinja2 import Template
@@ -136,7 +136,8 @@ class ChatPlugin(Plugin):
         self.last_check_time[msg.roomid] = now, 0
 
         history = str(kwargs['context'].latest_n(self.context_length))
-        prompt = self.prompt_template.render(self_name=kwargs['self_name'], contact=kwargs['contact'], is_group=msg.from_group())
+        prompt = self.prompt_template.render(self_name=kwargs['self_name'], contact=kwargs['contact'],
+                                             is_group=msg.from_group())
         response = self.ai.chat(prompt.strip(), history)
         if not response:
             return None, False

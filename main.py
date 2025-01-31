@@ -15,9 +15,8 @@ logger.add(sink='bot.log', rotation='1 week', retention='7 days', level='DEBUG')
 class WxHelper(WxBot):
     """ 微信机器人助手 """
 
-    _plugin_mappings: dict[str, list[Plugin]]
     _default_plugins: list[Plugin]
-
+    _plugin_mappings: dict[str, list[Plugin]]
     """ 插件映射表. 键为联系人名称，值为插件列表 """
 
     def __init__(self, host: str, port: int, _default_plugin: Plugin | list[Plugin] = DefaultPlugin()):
@@ -148,6 +147,7 @@ def main():
     FERRY.start_receiving_message()
     while True:
         time.sleep(1)
+
 
 if __name__ == '__main__':
     main()

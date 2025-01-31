@@ -44,7 +44,8 @@ class OpenAI(ChatAI):
 
         completion_message = response.choices[0].message
         response_text: str = completion_message.content
-        logger.debug(f'OpenAI compatible interface. prompt: {repr(prompt)}, message: {repr(message)} response: {repr(response_text)}')
+        logger.debug(
+            f'OpenAI compatible interface. prompt: {repr(prompt)}, message: {repr(message)} response: {repr(response_text)}')
         if 'reasoning_content' in completion_message.model_extra:
             logger.debug(f'reasoning content: {repr(completion_message.model_extra["reasoning_content"])}')
 
@@ -90,7 +91,8 @@ class Ollama(ChatAI):
         )
 
         response_text: str = response['message']['content']
-        logger.debug(f'Ollama interface. prompt: {repr(prompt)}, message: {repr(message)} response: {repr(response_text)}')
+        logger.debug(
+            f'Ollama interface. prompt: {repr(prompt)}, message: {repr(message)} response: {repr(response_text)}')
 
         # 额外处理一下 Deepseek-R1 思维链的思维过程.
         RIGHT_THINK_BRACE = '</think>'

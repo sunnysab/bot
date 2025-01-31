@@ -1,6 +1,6 @@
+import argparse
 import ctypes
 import os.path
-import argparse
 
 
 class Wcf:
