@@ -76,7 +76,7 @@ class WxHelper(WxBot):
         # 消息来源。如果是群消息，则为群名称；否则为联系人备注
         name = lambda x: self.all_contacts.get(x, x)
         source = name(msg.roomid)
-        logger.info(f'New message from {name(msg.roomid)}: {msg.content}')
+        logger.info(f'New message from {name(msg.roomid)}: repr({msg.content})')
 
         # 消息处理
         response_back: list[str] | None = []

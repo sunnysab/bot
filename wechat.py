@@ -59,6 +59,8 @@ class WxBot:
 
     def _process_message(self, msg: RawMessage) -> None:
         """ 处理消息. 将消息放入回调函数中处理 """
+
+        logger.debug(msg)
         match msg.type:
             case 1: # 文本消息
                 self.message_callback(msg)
@@ -67,10 +69,10 @@ class WxBot:
                 # disabled because wcf is not working
                 pass
             case 10000: # 系统信息
-                self._say_hi_to_new_friend(msg)
+                # self._say_hi_to_new_friend(msg)
+                pass
             case _:
-                logger.info(f'Unknown message type: {msg.type}')
-                logger.info(msg)
+                logger.warning(f'Unknown message type: {msg.type}')
 
     @staticmethod
     def on_message(msg: RawMessage):
