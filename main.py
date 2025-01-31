@@ -111,7 +111,7 @@ def main():
     # 设置插件
     # ai_provider: ChatAI = ChatGLM(key=CONFIG['chatglm-key'])
     ai_provider: ChatAI = Deepseek(key=CONFIG['deepseek-key'])
-    chat_plugin = ChatPlugin(ai_provider, max_ignore=2, frequency=10)
+    chat_plugin = ChatPlugin(ai_provider, max_ignore=2, frequency=10, context_length=10)
 
     # FERRY.set_default_plugin(ChatPlugin(ai_implementation))
     # FERRY.attach_plugin('后端重构开发群', [DoNothingPlugin()])
