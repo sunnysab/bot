@@ -8,8 +8,9 @@
 """
 
 import base64
-from xml.etree import ElementTree as ET
 from typing import Any, Dict
+from xml.etree import ElementTree as ET
+
 from proto.bytes_extra_pb2 import BytesExtra
 
 

@@ -1,8 +1,9 @@
 import re
-from loguru import logger
 from collections.abc import Callable
 from queue import Empty
 from threading import Thread
+
+from loguru import logger
 from wcferry import Wcf, WxMsg as RawMessage
 
 from message import decode_sender_name, decode_compress_content
@@ -11,7 +12,7 @@ from message import decode_sender_name, decode_compress_content
 class WxBot:
     """ 微信机器人组件 """
 
-    def __init__(self, host: str, port: int, callback: Callable[[RawMessage], None]=None):
+    def __init__(self, host: str, port: int, callback: Callable[[RawMessage], None] = None):
         logger.info('starting robot...')
         self.wcf = Wcf(host, port)
         logger.info('connected to wechatferry.')
@@ -62,13 +63,13 @@ class WxBot:
 
         logger.debug(msg)
         match msg.type:
-            case 1 | 49: # 文本消息
+            case 1 | 49:  # 文本消息
                 self.message_callback(msg)
-            case 37: # 好友请求
+            case 37:  # 好友请求
                 # self._auto_accept_friend_request(msg)
                 # disabled because wcf is not working
                 pass
-            case 10000: # 系统信息
+            case 10000:  # 系统信息
                 # self._say_hi_to_new_friend(msg)
                 pass
             case _:
@@ -154,9 +155,9 @@ class WxBot:
 
         返回一个列表。每个元素为一个元组，格式为 (发送者名称, 消息内容)
         """
-        SQL = '''SELECT IsSender, BytesExtra, CompressContent, StrContent, Type, SubType FROM msg '''\
-                f'''WHERE StrTalker = "{wxid}" AND (Type = 1 OR (Type = 49 AND SubType = 57)) '''\
-                f'''ORDER BY CreateTime DESC LIMIT {count};'''
+        SQL = '''SELECT IsSender, BytesExtra, CompressContent, StrContent, Type, SubType FROM msg ''' \
+              f'''WHERE StrTalker = "{wxid}" AND (Type = 1 OR (Type = 49 AND SubType = 57)) ''' \
+              f'''ORDER BY CreateTime DESC LIMIT {count};'''
         records = self.wcf.query_sql('MSG0.db', SQL)
 
         def process_record(wxid: str, record: dict) -> tuple | None:
