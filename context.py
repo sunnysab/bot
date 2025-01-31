@@ -28,6 +28,9 @@ class ChatWindow:
         """ 是否为空 """
         return not self._history
 
+    def latest_n(self, n: int):
+        return ChatWindow(self._history[-n:]) if n < len(self._history) else self
+
     def __str__(self):
         return '\n'.join(self._history)
 

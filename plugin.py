@@ -37,7 +37,7 @@ class DoNothingPlugin(Plugin):
 
 
 class ChatPlugin(Plugin):
-    def __init__(self, ai_provider: ChatAI, max_ignore: int = 5, frequency: int = 10):
+    def __init__(self, ai_provider: ChatAI, max_ignore: int = 5, frequency: int = 10, context_length: int = 10):
         """ 聊天插件
 
         :param ai_provider: AI 服务提供者
@@ -52,6 +52,7 @@ class ChatPlugin(Plugin):
         elif max_ignore > 50:
             self.max_ignore = 50
         self.frequency = frequency # 最快情况每 frequency 秒调用一次模型
+        self.context_length = context_length
 
     @staticmethod
     def get_group_chat_prompt(self_name: str):
@@ -82,7 +83,7 @@ class ChatPlugin(Plugin):
         self.last_check_time[msg.roomid] = now, 0
 
         me = kwargs['me']
-        history = str(kwargs['context'])
+        history = str(kwargs['context'].latest_n(self.context_length))
         get_prompt = self.get_group_chat_prompt if msg.from_group() else self.get_private_chat_prompt
         response = self.ai.chat(history, get_prompt(me))
         if not response:
