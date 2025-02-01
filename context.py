@@ -28,7 +28,7 @@ class SingleRecord:
         # 去掉英文标点
         text = re.sub(r'[,.!?;:(){}"\'\[\]<>]', '', text)
         # 去掉表情（由英文方括号括起，中间是中英的文字）
-        text = re.sub(r'\[[a-zA-Z]{2-5}\]', '', text)
+        text = re.sub(r'\[[a-zA-Z]{2-9}\]', '', text)
         return text
 
     def pure_text(self):
