@@ -6,7 +6,7 @@ from typing import Optional
 from loguru import logger
 
 
-class ChatAI:
+class AiProvider:
     """ 聊天机器人 """
 
     @staticmethod
@@ -25,7 +25,7 @@ class ChatAI:
         pass
 
 
-class OpenAI(ChatAI):
+class OpenAI(AiProvider):
     """ OpenAI 兼容接口 """
 
     def __init__(self, url: str, key: str, model: str = 'deepseek-chat', temperature: float = 0.8, top_p: float = 0.95):
@@ -104,7 +104,7 @@ class ChatGLM(OpenAI):
         return response_text
 
 
-class Ollama(ChatAI):
+class Ollama(AiProvider):
     """ Ollama """
 
     def __init__(self, model: str, url: str, **kwargs):

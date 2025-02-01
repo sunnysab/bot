@@ -2,7 +2,7 @@ import re
 import time
 from abc import abstractmethod
 
-from chat import ChatAI
+from ai import AiProvider
 from context import ChatWindow
 from wechat import RawMessage
 
@@ -78,7 +78,7 @@ class RepeatPlugin(Plugin):
 
 
 class ChatPlugin(Plugin):
-    def __init__(self, ai_provider: ChatAI, max_ignore: int = 5, frequency: int = 10, context_length: int = 10):
+    def __init__(self, ai_provider: AiProvider, max_ignore: int = 5, frequency: int = 10, context_length: int = 10):
         """ 聊天插件
 
         :param ai_provider: AI 服务提供者
