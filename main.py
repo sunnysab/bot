@@ -154,7 +154,7 @@ class WxHelper(WxBot):
                 time.sleep(len(text) * self.delay_coefficient)
             now = int(time.time())
             await self.send_text_msg(text, msg.roomid)
-            self._context.push_message(msg.roomid, sender, text, now)
+            self._context.push_message(msg.roomid, self_name, text, now)
 
 
 def main():
