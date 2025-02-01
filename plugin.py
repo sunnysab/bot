@@ -1,6 +1,6 @@
-import re
 import time
 from abc import abstractmethod
+from typing import override
 
 from ai import AiProvider
 from context import ChatWindow
@@ -9,7 +9,7 @@ from wechat import RawMessage
 
 class Plugin:
     @abstractmethod
-    def handle(self, msg: RawMessage, **kwargs) -> tuple[list[str] | None, bool]:
+    async def handle(self, msg: RawMessage, **kwargs) -> tuple[list[str] | None, bool]:
         """ 处理消息
 
         :param msg: 消息对象
@@ -19,7 +19,8 @@ class Plugin:
 
 
 class EndProcessingPlugin(Plugin):
-    def handle(self, msg: RawMessage, **kwargs):
+    @override
+    async def handle(self, msg: RawMessage, **kwargs):
         return None, False
 
 
@@ -42,7 +43,8 @@ class RepeatPlugin(Plugin):
         # key 是聊天窗口编号，value 是最后一次重复的消息（去重）
         self.last_repeat = {}
 
-    def handle(self, msg: RawMessage, **kwargs):
+    @override
+    async def handle(self, msg: RawMessage, **kwargs):
         """ 跟队形回复。 如果去掉中文英文标点及表情后的消息连续重复特定数量，则凑个热闹跟着回复一句。 """
         if msg.type != 1:  # 只处理文本消息
             return None, True
@@ -99,9 +101,10 @@ class ChatPlugin(Plugin):
 
         from jinja2 import Template
         template_file = open('prompt.txt', encoding='utf-8').read()
-        self.prompt_template = Template(template_file)
+        self.prompt_template = Template(template_file, enable_async=True)
 
-    def handle(self, msg: RawMessage, **kwargs):
+    @override
+    async def handle(self, msg: RawMessage, **kwargs):
         if msg.type != 1:  # 只处理文本消息
             return None, True
 
@@ -115,9 +118,9 @@ class ChatPlugin(Plugin):
         self.last_check_time[msg.roomid] = now, 0
 
         history = str(kwargs['context'].latest_n(self.context_length))
-        prompt = self.prompt_template.render(self_name=kwargs['self_name'], contact=kwargs['contact'],
+        prompt = await self.prompt_template.render_async(self_name=kwargs['self_name'], contact=kwargs['contact'],
                                              is_group=msg.from_group())
-        response = self.ai.chat(prompt.strip(), history)
+        response = await self.ai.chat(prompt.strip(), history)
         if not response:
             return None, False
 

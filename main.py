@@ -1,4 +1,5 @@
 import signal
+import asyncio
 from typing import override
 
 import requests
@@ -49,14 +50,14 @@ class WxHelper(WxBot):
             plugins = [plugins]
         self._plugin_mappings[contact] = plugins
 
-    def load_context(self, session_count: int = 10, window_size: int = 30) -> None:
+    async def load_context(self, session_count: int = 10, window_size: int = 30) -> None:
         """ 可以在启动时加载最近的若干聊天记录, 如果想提高启动速度, 可以不调用它.
 
         :param session_count: 加载的最近会话数量
         :param window_size: 每个会话加载的消息数量
         """
         count_loaded = 0
-        sessions = self.get_recent_sessions(session_count)
+        sessions = await self.get_recent_sessions(session_count)
         for contact in sessions:
             window = self.fetch_history(contact, window_size)
             count_loaded += len(window)
@@ -65,7 +66,7 @@ class WxHelper(WxBot):
         logger.info(f'{len(sessions)} sessions, {count_loaded} messages loaded.')
 
     @staticmethod
-    def _parse_reference_message(msg: RawMessage) -> None:
+    async def _parse_reference_message(msg: RawMessage) -> None:
         """ 解析引用消息. 注意。这个函数会修改原始消息对象 """
 
         assert msg.type == 49
@@ -76,10 +77,10 @@ class WxHelper(WxBot):
             raise e
         msg.content = parsed_message['content'] + f'引用了消息（{parsed_message['referred_message']}）'
 
-    def _parse_image_message(self, msg: RawMessage) -> None:
+    async def _parse_image_message(self, msg: RawMessage) -> None:
         """ 解析图片消息 """
         try:
-            accessible_url = self._fetch_image(msg)
+            accessible_url = await self._fetch_image(msg)
         except Exception as e:
             logger.error(e)
             raise e
@@ -88,26 +89,26 @@ class WxHelper(WxBot):
         assert image_content, '图片内容为空'
 
         chatglm_provider: ChatGLM = ChatGLM(key=CONFIG['chatglm-key'])
-        description = chatglm_provider.describe_image(chatglm_provider.get_image_prompt(), image_content)
+        description = await chatglm_provider.describe_image(chatglm_provider.get_image_prompt(), image_content)
         description = description.replace('\n', '')
         logger.info(f'image description: {description}')
         msg.content = f'图片（文字描述：{description}）'
 
-    def _special_message_hook(self, msg: RawMessage) -> None:
+    async def _special_message_hook(self, msg: RawMessage) -> None:
         """ 特殊消息处理 """
         match msg.type:
             case 49:  # 引用消息
-                self._parse_reference_message(msg)
+                await self._parse_reference_message(msg)
             case 3:  # 图片消息
-                self._parse_image_message(msg)
+                await self._parse_image_message(msg)
             case _:
                 pass
 
     @override
-    def on_message(self, msg: RawMessage) -> None:
+    async def on_message(self, msg: RawMessage) -> None:
         """ 消息处理函数 """
 
-        self._special_message_hook(msg)
+        await self._special_message_hook(msg)
 
         # 自己的消息不用回复，也不用存储。在发送的时候会自动存储。
         if msg.from_self():
@@ -115,11 +116,11 @@ class WxHelper(WxBot):
 
         if self._context.get_context(msg.roomid).empty():
             # 如果收到某人的消息，但是没有上下文，则尝试加载历史消息
-            window = self.fetch_history(msg.roomid)
+            window = await self.fetch_history(msg.roomid)
             self._context.get_context(msg.roomid).extend(window)
 
         # 自己的名字
-        self_name = self.get_display_name(self.wxid, msg.roomid)
+        self_name: str = await self.get_display_name(self.wxid, msg.roomid)
         # 消息来源。如果是群消息，则为群名称；否则为联系人备注
         name = lambda x: self.all_contacts.get(x, x)
         source = name(msg.roomid)
@@ -137,7 +138,7 @@ class WxHelper(WxBot):
         response_back: list[str] | None = []
         for plugin in self._plugin_mappings.get(source, self._default_plugins):
             chat_context = self._context.get_context(msg.roomid)
-            current_round, _continue = plugin.handle(msg, context=chat_context, self_name=self_name, contact=source)
+            current_round, _continue = await plugin.handle(msg, context=chat_context, self_name=self_name, contact=source)
             if not _continue:
                 break
             if current_round:
@@ -152,7 +153,7 @@ class WxHelper(WxBot):
             if self.delay_coefficient:
                 time.sleep(len(text) * self.delay_coefficient)
             now = int(time.time())
-            self.send_text_msg(text, msg.roomid)
+            await self.send_text_msg(text, msg.roomid)
             self._context.push_message(msg.roomid, sender, text, now)
 
 
@@ -182,7 +183,7 @@ def main():
     FERRY.attach_plugin('研究生摆烂群', [EndProcessingPlugin()])
     # FERRY.attach_plugin('sunnysab', [chat_plugin])
 
-    FERRY.load_context()
+    asyncio.run(FERRY.load_context())
 
     # 开始接收消息
     FERRY.start_receiving_message()

@@ -15,12 +15,12 @@ class AiProvider:
         return '本轮不发言' in s
 
     @abstractmethod
-    def chat(self, prompt: str, message: str) -> Optional[list[str]]:
+    async def chat(self, prompt: str, message: str) -> Optional[list[str]]:
         """ 聊天 """
         pass
 
     @abstractmethod
-    def describe_image(self, prompt: str, image: bytes | str) -> Optional[str]:
+    async def describe_image(self, prompt: str, image: bytes | str) -> Optional[str]:
         """ 图像描述 """
         pass
 
@@ -31,16 +31,16 @@ class OpenAI(AiProvider):
     def __init__(self, url: str, key: str, model: str = 'deepseek-chat', temperature: float = 0.8, top_p: float = 0.95):
         super().__init__()
 
-        from openai import OpenAI
+        from openai import AsyncOpenAI
 
         self.model = model
         self.temperature = temperature
         self.top_p = top_p
-        self.client = OpenAI(base_url=url, api_key=key)
+        self.client = AsyncOpenAI(base_url=url, api_key=key)
 
-    def chat(self, prompt: str, message: str) -> Optional[list[str]]:
+    async def chat(self, prompt: str, message: str) -> Optional[list[str]]:
         """ 聊天 """
-        response = self.client.chat.completions.create(
+        response = await self.client.chat.completions.create(
             model=self.model,
             temperature=self.temperature,
             top_p=self.top_p,
@@ -82,11 +82,11 @@ class ChatGLM(OpenAI):
         """ 获取图片描述的提示 """
         return '尽可能少的字数描述图片主体是什么, 里面物品有什么. 给人的感觉如何. 不要描述物品放置的目的.'
 
-    def describe_image(self, prompt: str, image: bytes | str) -> Optional[str]:
+    async def describe_image(self, prompt: str, image: bytes | str) -> Optional[str]:
         """ 图像描述 """
         encoded_image = base64.b64encode(image).decode('utf-8')
 
-        response = self.client.chat.completions.create(
+        response = await self.client.chat.completions.create(
             model='glm-4v-flash', # TODO: 支持修改.
             temperature=0.95,
             top_p=0.70,
@@ -110,13 +110,13 @@ class Ollama(AiProvider):
     def __init__(self, model: str, url: str, **kwargs):
         super().__init__(**kwargs)
 
-        from ollama import Client
+        from ollama import AsyncClient
         self.model = model
-        self.client = Client(url)
+        self.client = AsyncClient(url)
 
-    def chat(self, prompt: str, message: str) -> Optional[list[str]]:
+    async def chat(self, prompt: str, message: str) -> Optional[list[str]]:
         """ 聊天 """
-        response = self.client.chat(
+        response = await self.client.chat(
             model=self.model,
             messages=[
                 {'role': 'system', 'content': prompt},
@@ -139,14 +139,18 @@ class Ollama(AiProvider):
         return [x.strip() for x in response_text.split() if x.strip()]
 
 
-if __name__ == '__main__':
-    chatglm = ChatGLM(key='')
+async def main():
+    chatglm = ChatGLM(key='your-key')
     prompt = chatglm.get_image_prompt()
 
     image = open('image/dog.jpg', 'rb').read()
-    description = chatglm.describe_image(prompt, image)
+    description = await chatglm.describe_image(prompt, image)
     print('dog: ', description)
 
     image = open('image/lunch.jpg', 'rb').read()
-    description = chatglm.describe_image(prompt, image)
+    description = await chatglm.describe_image(prompt, image)
     print('lunch: ', description)
+
+if __name__ == '__main__':
+    import asyncio
+    asyncio.run(main())
