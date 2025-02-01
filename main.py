@@ -92,7 +92,7 @@ class WxHelper(WxBot):
         self._context.push_message(msg.roomid, msg.content, self.all_contacts.get(msg.sender, msg.sender))
 
         # 自己的名字
-        self_name = self.self_info['name']
+        self_name = self.get_display_name(self.wxid, msg.roomid)
 
         # 消息来源。如果是群消息，则为群名称；否则为联系人备注
         name = lambda x: self.all_contacts.get(x, x)

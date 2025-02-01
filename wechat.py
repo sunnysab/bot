@@ -146,13 +146,21 @@ class WxBot:
 
     def get_display_name(self, wxid: str, chatroom: str = '') -> str:
         """ 获取联系人的显示名称. 对于群友，优先使用本地的备注，其次使用群昵称，最后使用微信昵称 """
-        marked_name = self.all_contacts.get(wxid)
-        if marked_name:
-            return marked_name
+        if chatroom == wxid:  # 非群聊
+            chatroom = ''
+
+        if (wxid, chatroom) in self._cached_display_name:
+            return self._cached_display_name[(wxid, chatroom)]
+
         if chatroom:
-            alias = self.wcf.get_alias_in_chatroom(wxid, chatroom)
-            if alias:
+            if alias := self.wcf.get_alias_in_chatroom(wxid, chatroom):
+                self._cached_display_name[(wxid, chatroom)] = alias
                 return alias
+
+        if wxid == self.wxid:
+            return self.self_info['name']
+
+        # 使用兜底方案：在 contacts 表中查找昵称
         return self.all_contacts.get(wxid, wxid)
 
     def fetch_history(self, wxid: str, count: int = 50) -> list[tuple]:
