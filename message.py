@@ -46,7 +46,7 @@ def decode_bytes_extra(data: str | bytes) -> Dict[str, Any]:
 
 
 def decode_sender_name(data: str | bytes) -> str:
-    """解码 BytesExtra 中发送者名称"""
+    """解码 BytesExtra 中发送者 wxid """
     return decode_bytes_extra(data)['1']
 
 

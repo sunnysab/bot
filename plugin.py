@@ -42,19 +42,6 @@ class RepeatPlugin(Plugin):
         # key 是聊天窗口编号，value 是最后一次重复的消息（去重）
         self.last_repeat = {}
 
-    @staticmethod
-    def preprocess(text: str) -> str:
-        """ 预处理消息. 此时消息格式为：'昵称: 消息内容' """
-        # 去掉昵称
-        text = text.split(':', 1)[1]
-        # 去掉中文标点
-        text = re.sub(r'[，。！？；：、（）《》【】“”‘’—…]', '', text)
-        # 去掉英文标点
-        text = re.sub(r'[,.!?;:(){}"\'\[\]<>]', '', text)
-        # 去掉表情（由英文方括号括起，中间是中英的文字）
-        text = re.sub(r'[.*?]', '', text)
-        return text
-
     def handle(self, msg: RawMessage, **kwargs):
         """ 跟队形回复。 如果去掉中文英文标点及表情后的消息连续重复特定数量，则凑个热闹跟着回复一句。 """
         if msg.type != 1:  # 只处理文本消息
@@ -65,7 +52,7 @@ class RepeatPlugin(Plugin):
             return None, True
 
         # 对历史消息去除昵称、标点等操作
-        clear_context: list[str] = [self.preprocess(x) for x in context]
+        clear_context: list[str] = [x.pure_text() for x in context]
         count_dict = {}
         for pos, text in enumerate(clear_context):
             if text not in count_dict:
