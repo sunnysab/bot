@@ -1,5 +1,5 @@
+import asyncio
 import re
-import time
 from collections.abc import Callable
 from queue import Empty
 from threading import Thread
@@ -40,7 +40,7 @@ class WxBot:
         contacts = self.wcf.query_sql('MicroMsg.db', 'SELECT UserName, NickName FROM Contact;')
         return {contact['UserName']: contact['NickName'] for contact in contacts}
 
-    def _auto_accept_friend_request(self, msg: RawMessage) -> None:
+    async def _auto_accept_friend_request(self, msg: RawMessage) -> None:
         """ 自动通过好友请求 """
         import xml.etree.ElementTree as ET
 
@@ -55,18 +55,18 @@ class WxBot:
         except Exception as e:
             logger.error(f'Failed to accept friend: {e}')
 
-    def _say_hi_to_new_friend(self, msg: RawMessage) -> None:
+    async def _say_hi_to_new_friend(self, msg: RawMessage) -> None:
         """ 自动发送欢迎消息给新好友 """
         PATTERN_1 = r'你已添加了(.*)，现在可以开始聊天了。'
         PATTERN_2 = 'You have added (.*) as your Weixin contact. Start chatting!'
         nick_name = re.findall(PATTERN_1, msg.content) or re.findall(PATTERN_2, msg.content)
         if nick_name:
             self.all_contacts[msg.sender] = nick_name[0]
-            self.send_text_msg(f'[Doge] {nick_name[0]}你终于加我了！！', msg.sender)
+            await self.send_text_msg(f'[Doge] {nick_name[0]}你终于加我了！！', msg.sender)
 
         raise Exception('Failed to get new friend\'s nickname.')
 
-    def _fetch_image(self, msg: RawMessage) -> str:
+    async def _fetch_image(self, msg: RawMessage) -> str:
         message_id, extra = msg.id, msg.extra
         actual_path = self.wcf.download_image(message_id, extra, self.remote_storage_path)
         if not actual_path:
@@ -77,23 +77,23 @@ class WxBot:
         url = f'{self.remote_server_prefix}/{relative_path}'
         return url
 
-    def _process_message(self, msg: RawMessage) -> None:
+    async def _process_message(self, msg: RawMessage) -> None:
         """ 处理消息. 将消息放入回调函数中处理 """
 
         logger.debug(msg)
         match msg.type:
             case 1 | 49:  # 文本消息
-                self._message_callback(msg)
+                await self._message_callback(msg)
             case 47:  # 表情
                 msg.content = '[表情]'
-                self._message_callback(msg)
+                await self._message_callback(msg)
             case 3:  # 图片
                 try:
-                    self._fetch_image(msg)
+                    await self._fetch_image(msg)
                 except Exception as e:
                     logger.error(e)
 
-                self._message_callback(msg)
+                await self._message_callback(msg)
             case 37:  # 好友请求
                 # self._auto_accept_friend_request(msg)
                 # disabled because wcf is not working
@@ -105,7 +105,7 @@ class WxBot:
                 logger.warning(f'Unknown message type: {msg.type}')
 
     @staticmethod
-    def on_message(msg: RawMessage):
+    async def on_message(msg: RawMessage):
         """ 默认的文本消息处理方法, 输出消息内容 """
         try:
             logger.info(msg)
@@ -117,7 +117,7 @@ class WxBot:
             while wcf.is_receiving_msg():
                 try:
                     msg = wcf.get_msg()
-                    self._process_message(msg)
+                    asyncio.run(self._process_message(msg))
                 except Empty:
                     continue  # Empty message
                 except Exception as e:
@@ -136,7 +136,7 @@ class WxBot:
         """
         return self.wcf.get_user_info()
 
-    def send_text_msg(self, msg: str, receiver: str, at_list: str = '') -> None:
+    async def send_text_msg(self, msg: str, receiver: str, at_list: str = '') -> None:
         """ 发送消息
         :param msg: 消息字符串
         :param receiver: 接收人wxid或者群id
@@ -162,7 +162,7 @@ class WxBot:
             logger.info(f'To {receiver}: {ats}\r{msg}')
             self.wcf.send_text(f'{ats}\n\n{msg}', receiver, at_list)
 
-    def get_recent_sessions(self, count: int = 10):
+    async def get_recent_sessions(self, count: int = 10):
         """ 获取最近的聊天会话 """
         SQL = f'SELECT Username FROM ChatInfo ORDER BY LastReadedCreateTime DESC LIMIT {count};'
         records = self.wcf.query_sql('MicroMsg.db', SQL)
@@ -172,7 +172,7 @@ class WxBot:
 
         return [x['Username'] for x in records if filter_wxid(x['Username'])]
 
-    def get_display_name(self, wxid: str, chatroom: str = '') -> str:
+    async def get_display_name(self, wxid: str, chatroom: str = '') -> str:
         """ 获取联系人的显示名称. 对于群友，优先使用本地的备注，其次使用群昵称，最后使用微信昵称 """
         if chatroom == wxid:  # 非群聊
             chatroom = ''
@@ -191,7 +191,7 @@ class WxBot:
         # 使用兜底方案：在 contacts 表中查找昵称
         return self.all_contacts.get(wxid, wxid)
 
-    def fetch_history(self, wxid: str, count: int = 50) -> ChatWindow:
+    async def fetch_history(self, wxid: str, count: int = 50) -> ChatWindow:
         """ 获取群或联系人的聊天记录
 
         返回一个列表。每个元素为一个元组，格式为 (发送者名称, 消息内容, 创建时间)
@@ -202,11 +202,11 @@ class WxBot:
               f'''ORDER BY CreateTime DESC LIMIT {count};'''
         records = self.wcf.query_sql('MSG0.db', SQL)
 
-        def parse_record(wxid: str, record: dict) -> Tuple[str, str, int] | None:
+        async def parse_record(wxid: str, record: dict) -> Tuple[str, str, int] | None:
             is_group: bool = wxid.endswith('@chatroom')
             sender_wxid: str = decode_sender_name(record['BytesExtra']) if is_group else wxid
             # 如果是群聊，get_display_name 可以获取发送者的群昵称
-            sender_name: str = self.get_display_name(sender_wxid, wxid)
+            sender_name: str = await self.get_display_name(sender_wxid, wxid)
 
             content = ''
             if record['Type'] == 1:  # 纯文本消息
@@ -223,16 +223,16 @@ class WxBot:
             if not content.startswith('<'):
                 return sender_name, content, record['CreateTime']
 
-        def try_parse_record(wxid: str, record: dict) -> Tuple[str, str, int] | None:
+        async def try_parse_record(wxid: str, record: dict) -> Tuple[str, str, int] | None:
             try:
-                return parse_record(wxid, record)
+                return await parse_record(wxid, record)
             except Exception as e:
                 # logger.error(f'Error on processing record: {e}')
                 return None
 
         result = ChatWindow()
         for record in records:
-            if parsed := try_parse_record(wxid, record):
+            if parsed := await try_parse_record(wxid, record):
                 result.append(*parsed)
 
         return result
