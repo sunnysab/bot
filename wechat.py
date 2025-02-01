@@ -12,16 +12,20 @@ from message import decode_sender_name, decode_compress_content
 class WxBot:
     """ 微信机器人组件 """
 
-    def __init__(self, host: str, port: int, callback: Callable[[RawMessage], None] = None, dry_run: bool = False):
+    def __init__(self, host: str, port: int, remote_storage_path: str, remote_server_prefix: str,
+                 callback: Callable[[RawMessage], None] = None, dry_run: bool = False):
         logger.info('starting robot...')
         self.wcf = Wcf(host, port)
         logger.info('connected to wechatferry.')
 
+        self.remote_storage_path = remote_storage_path
+        self.remote_server_prefix = remote_server_prefix
         self.dry_run = dry_run
         self.self_info = self.get_myself()
         self.wxid = self.wcf.get_self_wxid()
+        self._cached_display_name = dict()
         self.all_contacts = self.get_all_contacts()
-        self.message_callback = callback or self.on_message
+        self._message_callback = callback or self.on_message
 
     def cleanup(self):
         self.wcf.cleanup()
@@ -59,13 +63,34 @@ class WxBot:
 
         raise Exception('Failed to get new friend\'s nickname.')
 
+    def _fetch_image(self, msg: RawMessage) -> str:
+        message_id, extra = msg.id, msg.extra
+        actual_path = self.wcf.download_image(message_id, extra, self.remote_storage_path)
+        if not actual_path:
+            raise Exception(f'failed to download image (unknown reason)')
+
+        logger.info(f'new image saved to {actual_path}')
+        relative_path = actual_path.replace(self.remote_storage_path, '').lstrip('/')
+        url = f'{self.remote_server_prefix}/{relative_path}'
+        return url
+
     def _process_message(self, msg: RawMessage) -> None:
         """ 处理消息. 将消息放入回调函数中处理 """
 
         logger.debug(msg)
         match msg.type:
             case 1 | 49:  # 文本消息
-                self.message_callback(msg)
+                self._message_callback(msg)
+            case 47:  # 表情
+                msg.content = '[表情]'
+                self._message_callback(msg)
+            case 3:  # 图片
+                try:
+                    self._fetch_image(msg)
+                except Exception as e:
+                    logger.error(e)
+
+                self._message_callback(msg)
             case 37:  # 好友请求
                 # self._auto_accept_friend_request(msg)
                 # disabled because wcf is not working
