@@ -4,3 +4,4 @@ venv/
 
 *.dll
 *.exe
+*.log
