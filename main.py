@@ -18,8 +18,16 @@ class WxHelper(WxBot):
     _plugin_mappings: dict[str, list[Plugin]]
     """ 插件映射表. 键为联系人名称，值为插件列表 """
 
-    def __init__(self, host: str, port: int, remote_storage_path: str, remote_server_prefix: str, dry_run: bool = False,
-                 _default_plugin: Plugin | list[Plugin] = EndProcessingPlugin(), reply_delay_coefficient: float = 0):
+    def __init__(
+            self,
+            host: str,
+            port: int,
+            remote_storage_path: str,
+            remote_server_prefix: str,
+            dry_run: bool = False,
+            _default_plugin: Plugin | list[Plugin] = EndProcessingPlugin(),
+            reply_delay_coefficient: float = 0
+    ):
         # TODO: 用 kwargs 传参，简化代码
         super().__init__(host, port, remote_storage_path=remote_storage_path, remote_server_prefix=remote_server_prefix,
                          dry_run=dry_run)
