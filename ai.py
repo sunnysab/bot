@@ -61,7 +61,7 @@ class OpenAI(AiProvider):
             return None
         # Deepseek-R1 的思维链过程在 ChatCompletion 的 extra 字段中
         # 无需单独处理，直接返回即可
-        return [x.strip() for x in response_text.split() if x.strip()]
+        return [x.strip() for x in response_text.split('\n') if x.strip()]
 
 
 class Deepseek(OpenAI):

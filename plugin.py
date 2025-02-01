@@ -120,7 +120,9 @@ class ChatPlugin(Plugin):
         history = str(kwargs['context'].latest_n(self.context_length))
         prompt = await self.prompt_template.render_async(self_name=kwargs['self_name'], contact=kwargs['contact'],
                                              is_group=msg.from_group())
-        response = await self.ai.chat(prompt.strip(), history)
+
+        text = '回复你扮演的角色所要说的话。以下聊天记录供你参考：\n\n' + history
+        response = await self.ai.chat(prompt.strip(), text)
         if not response:
             return None, False
 
