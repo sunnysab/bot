@@ -2,3 +2,6 @@ openai
 ollama
 jinja2
 loguru
+protobuf
+requests
+wcferry
