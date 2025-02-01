@@ -1,10 +1,7 @@
 import signal
 import asyncio
-from typing import override
-
 import requests
 from loguru import logger
-
 from ai import Deepseek, ChatGLM
 from config import CONFIG
 from context import ContextManager
@@ -13,7 +10,6 @@ from plugin import *
 from wechat import WxBot, RawMessage
 
 logger.add(sink='bot.log', rotation='1 week', retention='7 days', level='DEBUG')
-
 
 class WxHelper(WxBot):
     """ 微信机器人助手 """
