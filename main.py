@@ -82,12 +82,14 @@ class WxHelper(WxBot):
             logger.error(e)
             raise e
 
-        chatglm_provider: ChatGLM = ChatGLM(key=CONFIG['chatglm-key'])
         image_content = requests.get(accessible_url).content
+        assert image_content, '图片内容为空'
+
+        chatglm_provider: ChatGLM = ChatGLM(key=CONFIG['chatglm-key'])
         description = chatglm_provider.describe_image(chatglm_provider.get_image_prompt(), image_content)
-        description = description.replace('\n', ' ')
+        description = description.replace('\n', '')
         logger.info(f'image description: {description}')
-        msg.content = f'图片（描述：{description}）'
+        msg.content = f'图片（文字描述：{description}）'
 
     def _special_message_hook(self, msg: RawMessage) -> None:
         """ 特殊消息处理 """
@@ -158,6 +160,7 @@ class WxHelper(WxBot):
 
 def main():
     from config import CONFIG
+
     host, port = CONFIG['wcf-host'], CONFIG['wcf-port']
     FERRY: WxHelper = WxHelper(host, port, remote_storage_path=CONFIG['remote-storage-path'],
                                remote_server_prefix=CONFIG['remote-server-prefix'], reply_delay_coefficient=0.2)
