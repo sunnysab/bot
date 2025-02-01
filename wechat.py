@@ -204,7 +204,11 @@ class WxBot:
 
         async def parse_record(wxid: str, record: dict) -> Tuple[str, str, int] | None:
             is_group: bool = wxid.endswith('@chatroom')
-            sender_wxid: str = decode_sender_name(record['BytesExtra']) if is_group else wxid
+            is_self: bool = record['IsSender'] == 1
+            if is_group:
+                sender_wxid: str = decode_sender_name(record['BytesExtra'])
+            else:
+                sender_wxid: str = self.wxid if is_self else wxid
             # 如果是群聊，get_display_name 可以获取发送者的群昵称
             sender_name: str = await self.get_display_name(sender_wxid, wxid)
 
@@ -234,5 +238,5 @@ class WxBot:
         for record in records:
             if parsed := await try_parse_record(wxid, record):
                 result.append(*parsed)
-
+        result.sort()
         return result
