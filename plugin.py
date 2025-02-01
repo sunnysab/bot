@@ -18,21 +18,7 @@ class Plugin:
         return None, True
 
 
-class WeatherPlugin(Plugin):
-    def handle(self, msg: RawMessage, **kwargs):
-        if "天气" in msg.content:
-            return f"天气情况为：晴天"
-        return None, True
-
-
-class IdiomPlugin(Plugin):
-    def handle(self, msg: RawMessage, **kwargs):
-        if "成语" in msg.content:
-            return f"成语解释：百闻不如一见"
-        return None, True
-
-
-class DoNothingPlugin(Plugin):
+class EndProcessingPlugin(Plugin):
     def handle(self, msg: RawMessage, **kwargs):
         return None, False
 
@@ -71,6 +57,9 @@ class RepeatPlugin(Plugin):
 
     def handle(self, msg: RawMessage, **kwargs):
         """ 跟队形回复。 如果去掉中文英文标点及表情后的消息连续重复特定数量，则凑个热闹跟着回复一句。 """
+        if msg.type != 1:  # 只处理文本消息
+            return None, True
+
         context: ChatWindow = kwargs['context'].latest_n(self.context_length)
         if len(context) < self.repeat_count:
             return None, True
@@ -126,6 +115,9 @@ class ChatPlugin(Plugin):
         self.prompt_template = Template(template_file)
 
     def handle(self, msg: RawMessage, **kwargs):
+        if msg.type != 1:  # 只处理文本消息
+            return None, True
+
         # rate limit
         now = time.time()
         if msg.roomid in self.last_check_time:
@@ -147,8 +139,3 @@ class ChatPlugin(Plugin):
         response = [x.lstrip(prefix) for x in response]
 
         return response, response is not None
-
-
-class DefaultPlugin(Plugin):
-    def handle(self, msg: RawMessage, **kwargs):
-        return None, False
