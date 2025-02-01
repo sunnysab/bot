@@ -59,7 +59,7 @@ class WxHelper(WxBot):
         count_loaded = 0
         sessions = await self.get_recent_sessions(session_count)
         for contact in sessions:
-            window = self.fetch_history(contact, window_size)
+            window = await self.fetch_history(contact, window_size)
             count_loaded += len(window)
             self._context.get_context(contact).extend(window)
 
