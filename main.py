@@ -4,7 +4,7 @@ from typing import override
 import requests
 from loguru import logger
 
-from chat import Deepseek, ChatGLM
+from ai import Deepseek, ChatGLM
 from config import CONFIG
 from context import ContextManager
 from message import parse_reference_message
@@ -174,7 +174,7 @@ def main():
 
     # 设置插件
     # ai_provider: ChatAI = ChatGLM(key=CONFIG['chatglm-key'])
-    ai_provider: ChatAI = Deepseek(key=CONFIG['deepseek-key'], model='deepseek-reasoner', temperature=1.3)
+    ai_provider: AiProvider = Deepseek(key=CONFIG['deepseek-key'], model='deepseek-chat', temperature=1.3)
     chat_plugin = ChatPlugin(ai_provider, max_ignore=2, frequency=10, context_length=10)
     repeater = RepeatPlugin()
 
