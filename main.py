@@ -49,16 +49,18 @@ class WxHelper(WxBot):
             plugins = [plugins]
         self._plugin_mappings[contact] = plugins
 
-    def load_context(self) -> None:
-        """ 加载上下文 """
+    def load_context(self, session_count: int = 10, window_size: int = 30) -> None:
+        """ 可以在启动时加载最近的若干聊天记录, 如果想提高启动速度, 可以不调用它.
 
+        :param session_count: 加载的最近会话数量
+        :param window_size: 每个会话加载的消息数量
+        """
         count_loaded = 0
-        sessions = self.get_recent_sessions(10)
+        sessions = self.get_recent_sessions(session_count)
         for contact in sessions:
-            messages = self.fetch_history(contact)
-            count_loaded += len(messages)
-            for user, text in messages:
-                self._context.push_message(contact, text, user)
+            window = self.fetch_history(contact, window_size)
+            count_loaded += len(window)
+            self._context.get_context(contact).extend(window)
 
         logger.info(f'{len(sessions)} sessions, {count_loaded} messages loaded.')
 
@@ -113,24 +115,23 @@ class WxHelper(WxBot):
 
         if self._context.get_context(msg.roomid).empty():
             # 如果收到某人的消息，但是没有上下文，则尝试加载历史消息
-            messages = self.fetch_history(msg.roomid)
-            for user, text in messages:
-                self._context.push_message(msg.roomid, text, user)
-
-        # 加入聊天记录缓存
-        self._context.push_message(msg.roomid, msg.content, self.all_contacts.get(msg.sender, msg.sender))
+            window = self.fetch_history(msg.roomid)
+            self._context.get_context(msg.roomid).extend(window)
 
         # 自己的名字
         self_name = self.get_display_name(self.wxid, msg.roomid)
-
         # 消息来源。如果是群消息，则为群名称；否则为联系人备注
         name = lambda x: self.all_contacts.get(x, x)
         source = name(msg.roomid)
+        sender = name(msg.sender)
         logger.info(f'new message from {name(msg.roomid)}: {repr(msg.content)}')
 
-        # 不回复表情
+        # TODO: 回复或记录表情消息
         if msg.type == 47:
             return
+
+        # 加入聊天记录缓存
+        self._context.push_message(msg.roomid, sender, msg.content, msg.ts)
 
         # 消息处理
         response_back: list[str] | None = []
@@ -147,15 +148,12 @@ class WxHelper(WxBot):
             return  # 没有回复内容
 
         # 回复消息
-        # TODO: 改成异步发送
         for text in response_back:
             if self.delay_coefficient:
                 time.sleep(len(text) * self.delay_coefficient)
+            now = int(time.time())
             self.send_text_msg(text, msg.roomid)
-            if msg.from_group():
-                self._context.push_message(msg.roomid, text, self_name)
-            else:
-                self._context.push_message(msg.sender, text)
+            self._context.push_message(msg.roomid, sender, text, now)
 
 
 def main():

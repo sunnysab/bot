@@ -1,11 +1,14 @@
 import re
+import time
 from collections.abc import Callable
 from queue import Empty
 from threading import Thread
+from typing import Tuple
 
 from loguru import logger
 from wcferry import Wcf, WxMsg as RawMessage
 
+from context import ChatWindow
 from message import decode_sender_name, decode_compress_content
 
 
@@ -164,10 +167,10 @@ class WxBot:
         SQL = f'SELECT Username FROM ChatInfo ORDER BY LastReadedCreateTime DESC LIMIT {count};'
         records = self.wcf.query_sql('MicroMsg.db', SQL)
 
-        def filter(wxid: str) -> bool:
+        def filter_wxid(wxid: str) -> bool:
             return wxid.startswith('wxid_') or wxid.endswith('@chatroom')
 
-        return [x['Username'] for x in records if filter(x['Username'])]
+        return [x['Username'] for x in records if filter_wxid(x['Username'])]
 
     def get_display_name(self, wxid: str, chatroom: str = '') -> str:
         """ 获取联系人的显示名称. 对于群友，优先使用本地的备注，其次使用群昵称，最后使用微信昵称 """
@@ -188,46 +191,48 @@ class WxBot:
         # 使用兜底方案：在 contacts 表中查找昵称
         return self.all_contacts.get(wxid, wxid)
 
-    def fetch_history(self, wxid: str, count: int = 50) -> list[tuple]:
+    def fetch_history(self, wxid: str, count: int = 50) -> ChatWindow:
         """ 获取群或联系人的聊天记录
 
-        返回一个列表。每个元素为一个元组，格式为 (发送者名称, 消息内容)
+        返回一个列表。每个元素为一个元组，格式为 (发送者名称, 消息内容, 创建时间)
         """
-        SQL = '''SELECT IsSender, BytesExtra, CompressContent, StrContent, Type, SubType FROM msg ''' \
+        # 注意在 SQL 的结尾补一个空格.
+        SQL = '''SELECT IsSender, BytesExtra, CompressContent, StrContent, Type, SubType, CreateTime FROM msg ''' \
               f'''WHERE StrTalker = "{wxid}" AND (Type = 1 OR (Type = 49 AND SubType = 57)) ''' \
               f'''ORDER BY CreateTime DESC LIMIT {count};'''
         records = self.wcf.query_sql('MSG0.db', SQL)
 
-        def process_record(wxid: str, record: dict) -> tuple | None:
-            is_me = record['IsSender'] == 1
-
-            if is_me:
-                sender_name = self.self_info['name']
-            else:
-                is_group = wxid.endswith('@chatroom')
-                sender_name = decode_sender_name(record['BytesExtra']) if is_group else wxid
-                sender_name = self.get_display_name(sender_name, wxid if is_group else '')
+        def parse_record(wxid: str, record: dict) -> Tuple[str, str, int] | None:
+            is_group: bool = wxid.endswith('@chatroom')
+            sender_wxid: str = decode_sender_name(record['BytesExtra']) if is_group else wxid
+            # 如果是群聊，get_display_name 可以获取发送者的群昵称
+            sender_name: str = self.get_display_name(sender_wxid, wxid)
 
             content = ''
             if record['Type'] == 1:  # 纯文本消息
                 content = record['StrContent']
+            elif record['Type'] == 3:  # 图片消息
+                # TODO: 加载缓存的图片描述信息
+                pass
             elif record['Type'] == 49 and record['SubType'] == 57:  # 引用消息
                 content = decode_compress_content(record['CompressContent'])
 
-            # 不知道为什么有的 StrContent 中的消息还是 xml 格式的. 这里直接过滤掉
+            # 不知道为什么有的 StrContent 中的消息还是 xml 格式的.
+            # Type == 1 时 StrContent 应该就是纯文本。而对于引用消息，它为空.
+            # 这里直接过滤掉吧.
             if not content.startswith('<'):
-                content = content.replace('\n', ' ')
-                return sender_name, content
+                return sender_name, content, record['CreateTime']
 
-        result = []
-        for record in records:
+        def try_parse_record(wxid: str, record: dict) -> Tuple[str, str, int] | None:
             try:
-                parsed_tuple = process_record(wxid, record)
-                if parsed_tuple:
-                    result.append(parsed_tuple)
+                return parse_record(wxid, record)
             except Exception as e:
                 # logger.error(f'Error on processing record: {e}')
-                pass
+                return None
 
-        result.reverse()
+        result = ChatWindow()
+        for record in records:
+            if parsed := try_parse_record(wxid, record):
+                result.append(*parsed)
+
         return result
