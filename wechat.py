@@ -18,7 +18,7 @@ class WxBot:
         self.wcf = Wcf(host, port)
         logger.info('connected to wechatferry.')
 
-        self.remote_storage_path = remote_storage_path
+        self.remote_storage_path = remote_storage_path.replace('\\', '/')
         self.remote_server_prefix = remote_server_prefix
         self.dry_run = dry_run
         self.self_info = self.get_myself()

@@ -6,8 +6,8 @@ __DEFAULT_CHATGLM_KEY = 'your-chatglm-key'
 __DEFAULT_OLLAMA_HOST = 'http://localhost:11434'
 __WCF_HOST = '192.168.2.105'
 __WCF_PORT = 5000
-__REMOTE_STORAGE_PATH = '.'
-__REMOTE_SERVER_PREFIX = 'http://192.168.2.105:5001'
+__REMOTE_STORAGE_PATH = r'C:\Users\sunnysab\Desktop\v39\static'
+__REMOTE_SERVER_PREFIX = 'http://192.168.2.105:5002/static/'
 
 CONFIG = {
     'deepseek-key': os.getenv('DEEPSEEK_KEY', __DEFAULT_DEEPSEEK_KEY),
