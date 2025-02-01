@@ -3,7 +3,7 @@ from abc import abstractmethod
 from typing import override
 
 from ai import AiProvider
-from context import ChatWindow
+from context import ChatWindow, SingleRecord
 from wechat import RawMessage
 
 
@@ -67,8 +67,8 @@ class RepeatPlugin(Plugin):
             return None, True
 
         # 找一条别人说过的队形，跟上
-        text = context[max_repeat[-1]]
-        text = text.split(':', 1)[1]
+        record: SingleRecord = context[max_repeat[-1]]
+        text: str = record.text
         # 太长不跟
         if len(text) > self.max_length:
             return None, True
