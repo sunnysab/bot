@@ -65,6 +65,7 @@ class ChatWindow:
             self._history = self._history[-(self.max_history - len(other._history)):]
         else:
             self._history.extend(other._history)
+        self.sort()
 
     def empty(self):
         """ 是否为空 """
