@@ -104,6 +104,13 @@ class ChatGLM(OpenAI):
         return response_text
 
 
+class Doubao(OpenAI):
+    """ Doubao """
+
+    def __init__(self, key: str, model: str = 'doubao-chat', **kwargs):
+        super().__init__(url='https://ark.cn-beijing.volces.com/api/v3', key=key, model=model, **kwargs)
+
+
 class Ollama(AiProvider):
     """ Ollama """
 

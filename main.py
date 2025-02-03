@@ -1,8 +1,11 @@
 import signal
 import asyncio
+from typing import override
+
 import requests
 from loguru import logger
-from ai import Deepseek, ChatGLM
+
+from ai import Deepseek, ChatGLM, OpenAI, Doubao
 from config import CONFIG
 from context import ContextManager
 from message import parse_reference_message
@@ -11,6 +14,7 @@ from wechat import WxBot, RawMessage
 
 logger.add(sink='bot.log', rotation='1 week', retention='7 days', level='DEBUG')
 
+
 class WxHelper(WxBot):
     """ 微信机器人助手 """
 
@@ -18,16 +22,8 @@ class WxHelper(WxBot):
     _plugin_mappings: dict[str, list[Plugin]]
     """ 插件映射表. 键为联系人名称，值为插件列表 """
 
-    def __init__(
-            self,
-            host: str,
-            port: int,
-            remote_storage_path: str,
-            remote_server_prefix: str,
-            dry_run: bool = False,
-            _default_plugin: Plugin | list[Plugin] = EndProcessingPlugin(),
-            reply_delay_coefficient: float = 0
-    ):
+    def __init__(self, host: str, port: int, remote_storage_path: str, remote_server_prefix: str, dry_run: bool = False,
+                 _default_plugin: Plugin | list[Plugin] = EndProcessingPlugin(), reply_delay_coefficient: float = 0):
         # TODO: 用 kwargs 传参，简化代码
         super().__init__(host, port, remote_storage_path=remote_storage_path, remote_server_prefix=remote_server_prefix,
                          dry_run=dry_run)
@@ -79,7 +75,7 @@ class WxHelper(WxBot):
         except Exception as e:
             logger.error(f'Error on parsing reference message: {e}')
             raise e
-        msg.content = parsed_message['content'] + f'引用了消息（{parsed_message['referred_message']}）'
+        msg.content = parsed_message['content'] + f'（引用了前文的消息，内容：{parsed_message['referred_message']}）'
 
     async def _parse_image_message(self, msg: RawMessage) -> None:
         """ 解析图片消息 """
@@ -140,8 +136,8 @@ class WxHelper(WxBot):
 
         # 消息处理
         response_back: list[str] | None = []
+        chat_context = self._context.get_context(msg.roomid)
         for plugin in self._plugin_mappings.get(source, self._default_plugins):
-            chat_context = self._context.get_context(msg.roomid)
             current_round, _continue = await plugin.handle(msg, context=chat_context, self_name=self_name, contact=source)
             if not _continue:
                 break
@@ -178,9 +174,8 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
 
     # 设置插件
-    # ai_provider: ChatAI = ChatGLM(key=CONFIG['chatglm-key'])
-    ai_provider: AiProvider = Deepseek(key=CONFIG['deepseek-key'], model='deepseek-chat', temperature=1.3)
-    chat_plugin = ChatPlugin(ai_provider, max_ignore=2, frequency=10, context_length=10)
+    ai_provider = Doubao(model=CONFIG['doubao-model'], key=CONFIG['doubao-key'])
+    chat_plugin = ChatPlugin(ai_provider, max_ignore=0, frequency=1, context_length=10)
     repeater = RepeatPlugin()
 
     FERRY.set_default_plugin([repeater, chat_plugin])
