@@ -1,6 +1,6 @@
 import time
 from abc import abstractmethod
-from typing import override
+from typing import override, Dict, Tuple
 
 from ai import AiProvider
 from context import ChatWindow, SingleRecord
@@ -76,11 +76,11 @@ class RepeatPlugin(Plugin):
         if msg.roomid in self.last_repeat and self.last_repeat[msg.roomid] == text:
             return None, True
         self.last_repeat[msg.roomid] = text
-        return [text], True
+        return [text], False
 
 
 class ChatPlugin(Plugin):
-    def __init__(self, ai_provider: AiProvider, max_ignore: int = 5, frequency: int = 10, context_length: int = 10):
+    def __init__(self, ai_provider: AiProvider, max_ignore: int = 1, frequency: int = 10, context_length: int = 10):
         """ 聊天插件
 
         :param ai_provider: AI 服务提供者
@@ -89,9 +89,9 @@ class ChatPlugin(Plugin):
         """
         self.ai = ai_provider
         # 记录不同会话的最后一次调用模型时间, 以及模型从上次调用起忽略的消息数量
-        self.last_check_time = {}
-        if max_ignore < 1:
-            self.max_ignore = 1
+        self.last_check_time: Dict[str, Tuple[int, int]] = {}
+        if max_ignore < 0:
+            self.max_ignore = 0
         elif max_ignore > 50:
             self.max_ignore = 50
         else:
@@ -109,11 +109,12 @@ class ChatPlugin(Plugin):
             return None, True
 
         # rate limit
-        now = time.time()
+        now = int(time.time())
         if msg.roomid in self.last_check_time:
-            last_check_time, ignored = self.last_check_time[msg.roomid]
-            if now - last_check_time < self.frequency or ignored < self.max_ignore:
-                self.last_check_time[msg.roomid] = last_check_time, ignored + 1
+            last_reply_time, ignored = self.last_check_time[msg.roomid]
+            # 如果距离上次调用时间不足 frequency 秒，或者忽略的消息数量超过 max_ignore，则不回复当前消息
+            if now - last_reply_time < self.frequency or ignored < self.max_ignore:
+                self.last_check_time[msg.roomid] = last_reply_time, ignored + 1
                 return None, True
         self.last_check_time[msg.roomid] = now, 0
 
