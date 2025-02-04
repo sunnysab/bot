@@ -17,6 +17,7 @@ from proto.bytes_extra_pb2 import BytesExtra
 def decode_bytes_extra(data: str | bytes) -> Dict[str, Any]:
     """解码 MSGi.db 中 msg 表的扩展字节数据"""
     # 解码 Base64
+    assert isinstance(data, (str, bytes)), 'data must be str or bytes'
     if isinstance(data, str):  # 如果是字符串
         binary: bytes = base64.b64decode(data)
     elif isinstance(data, bytes):  # 如果是字节串
@@ -68,7 +69,7 @@ def decode_compress_content(data: str | bytes) -> str:
 
 def fix_xml(xml: str) -> str:
     """修复 XML 格式"""
-    replacement = [('&lt;', '<'), ('&gt;', '>'), ('&amp;', '&'),
+    replacement = [('&lt;', '<'), ('&gt;', '>'),
                    ('<content><?xml version="1.0"?>', '<content><![CDATA[<?xml version="1.0"?>'),
                    ('</msg>\n</content>', '</msg>]]>\n</content>')]
     for old, new in replacement:
