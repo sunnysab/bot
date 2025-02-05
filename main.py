@@ -1,6 +1,8 @@
 import signal
 import asyncio
 
+import requests
+
 from ai import Deepseek, ChatGLM, OpenAI, Doubao
 from context import ContextManager
 from plugin import *
@@ -33,7 +35,8 @@ class ImageProcessor(Preprocessor):
             return msg
 
         prompt = self.get_image_prompt()
-        description = await self.descriptor.describe_image(prompt, msg.resource_url)
+        image = requests.get(msg.resource_url).content
+        description = await self.descriptor.describe_image(prompt, image)
         description = description.replace('\n', '')
         logger.info(f'image description: {description}')
         msg.content = f'图片（文字描述：{description}）'
