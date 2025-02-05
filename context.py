@@ -28,7 +28,7 @@ class SingleRecord:
         # 去掉英文标点
         text = re.sub(r'[,.!?;:(){}"\'\[\]<>]', '', text)
         # 去掉表情（由英文方括号括起，中间是中英的文字）
-        text = re.sub(r'\[[a-zA-Z]{2-9}\]', '', text)
+        text = re.sub(r'$[a-zA-Z]{2,9}$', '', text)
         return text
 
     def pure_text(self):
@@ -72,7 +72,7 @@ class ChatWindow:
         return not self._history
 
     def latest_n(self, n: int):
-        return ChatWindow(self._history[-n:]) if n < len(self._history) else self
+        return ChatWindow(self._history[-n:], max_history=n) if n < len(self._history) else self
 
     def __str__(self):
         return '\n'.join([str(x) for x in self._history])

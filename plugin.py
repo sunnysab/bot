@@ -1,28 +1,65 @@
 import time
-from abc import abstractmethod
-from typing import override, Dict, Tuple
+from abc import abstractmethod, ABC
+from typing import override, Dict, Tuple, List
+
+from loguru import logger
 
 from ai import AiProvider
 from context import ChatWindow, SingleRecord
-from wechat import RawMessage
+from wechat import Message
 
 
-class Plugin:
+class Plugin(ABC):
     @abstractmethod
-    async def handle(self, msg: RawMessage, **kwargs) -> tuple[list[str] | None, bool]:
+    async def handle(self, msg: Message, **kwargs) -> tuple[list[str] | None, bool]:
         """ 处理消息
 
         :param msg: 消息对象
         :return: 回复内容和一个布尔值。 如果阻止后续插件处理，则返回 False
         """
-        return None, True
+        pass
 
 
-class EndProcessingPlugin(Plugin):
+class PluginManager:
+    """Manages plugin registration and execution"""
+
+    def __init__(self):
+        self._defaults: List[Plugin] = []
+        self._contact_mappings: Dict[str, List[Plugin]] = {}
+
+    def register(self, plugin: Plugin) -> None:
+        """Register a plugin for all contacts"""
+        self._defaults.append(plugin)
+        logger.info(f'Registered plugin: {plugin.__class__.__name__}')
+
+    def map_plugin_to_contact(self, contact: str, plugin: Plugin) -> None:
+        """Map a specific plugin to a contact"""
+        if contact not in self._contact_mappings:
+            self._contact_mappings[contact] = []
+        self._contact_mappings[contact].append(plugin)
+        logger.info(f'Mapped plugin {plugin.__class__.__name__} to contact {contact}')
+
+    def get_plugins_for_contact(self, contact: str) -> List[Plugin]:
+        """Get plugins for a specific contact"""
+        return self._contact_mappings.get(contact, self._defaults)
+
+
+class EndProcessing(Plugin):
     @override
-    async def handle(self, msg: RawMessage, **kwargs):
+    async def handle(self, msg: Message, **kwargs):
         return None, False
 
+class MessageTypeFilter(Plugin):
+    @override
+    async def handle(self, msg: Message, **kwargs):
+        if msg.type != 1 and msg.type != 3 and msg.type != 47:
+            return None, False
+
+class ImagePlugin(Plugin):
+    @override
+    async def handle(self, msg: Message, **kwargs):
+        if msg.type != 3:
+            return None, True
 
 class RepeatPlugin(Plugin):
     def __init__(self, repeat_count: int = 2, context_length: int = 10, max_length: int = 20):
@@ -44,37 +81,44 @@ class RepeatPlugin(Plugin):
         self.last_repeat = {}
 
     @override
-    async def handle(self, msg: RawMessage, **kwargs):
+    async def handle(self, msg: Message, **kwargs):
         """ 跟队形回复。 如果去掉中文英文标点及表情后的消息连续重复特定数量，则凑个热闹跟着回复一句。 """
         if msg.type != 1:  # 只处理文本消息
             return None, True
 
-        context: ChatWindow = kwargs['context'].latest_n(self.context_length)
-        if len(context) < self.repeat_count:
+        history: ChatWindow = kwargs['history']
+        if history.empty():
+            window = await kwargs['wechat'].fetch_history(msg.roomid)
+            history.extend(window)
+
+        history: ChatWindow = history.latest_n(self.context_length)
+        if len(history) < self.repeat_count:
             return None, True
 
         # 对历史消息去除昵称、标点等操作
-        clear_context: list[str] = [x.pure_text() for x in context]
-        count_dict = {}
+        myself = kwargs['self_name']
+        # 队形跟过了就不要再跟了
+        blocked_set = set(map(lambda x: x.pure_text(), filter(lambda x: x.sender == myself, history)))
+        clear_context: list[str] = [x.pure_text() for x in history if x.pure_text() and x.pure_text() not in blocked_set]
+        count_dict = dict()
         for pos, text in enumerate(clear_context):
             if text not in count_dict:
                 count_dict[text] = [pos]
             else:
                 count_dict[text].append(pos)
+
         # 找到最多的重复元素及次数, 其实就是找 count_dict 中 value 最长的.
         max_repeat = max(count_dict.values(), key=len)
         if len(max_repeat) < self.repeat_count:
             return None, True
 
         # 找一条别人说过的队形，跟上
-        record: SingleRecord = context[max_repeat[-1]]
+        record: SingleRecord = history[max_repeat[-1]]
         text: str = record.text
         # 太长不跟
         if len(text) > self.max_length:
             return None, True
-        # 队形跟过了就不要再跟了
-        if msg.roomid in self.last_repeat and self.last_repeat[msg.roomid] == text:
-            return None, True
+
         self.last_repeat[msg.roomid] = text
         return [text], False
 
@@ -104,7 +148,7 @@ class ChatPlugin(Plugin):
         self.prompt_template = Template(template_file, enable_async=True)
 
     @override
-    async def handle(self, msg: RawMessage, **kwargs):
+    async def handle(self, msg: Message, **kwargs):
         if msg.type != 1:  # 只处理文本消息
             return None, True
 
@@ -115,14 +159,20 @@ class ChatPlugin(Plugin):
             # 如果距离上次调用时间不足 frequency 秒，或者忽略的消息数量超过 max_ignore，则不回复当前消息
             if now - last_reply_time < self.frequency or ignored < self.max_ignore:
                 self.last_check_time[msg.roomid] = last_reply_time, ignored + 1
+                logger.debug(f'ignore message. roomid: {msg.roomid}, ignored: {ignored + 1}')
                 return None, True
         self.last_check_time[msg.roomid] = now, 0
 
-        history = str(kwargs['context'].latest_n(self.context_length))
+        history: ChatWindow = kwargs['history']
+        if history.empty():
+            window = await kwargs['wechat'].fetch_history(msg.roomid)
+            history.extend(window)
+
+        history: ChatWindow = history.latest_n(self.context_length)
         prompt = await self.prompt_template.render_async(self_name=kwargs['self_name'], contact=kwargs['contact'],
                                              is_group=msg.from_group())
 
-        text = '回复你扮演的角色所要说的话。以下聊天记录供你参考：\n\n' + history
+        text = '回复你扮演的角色所要说的话。以下聊天记录供你参考：\n\n' + str(history)
         response = await self.ai.chat(prompt.strip(), text)
         if not response:
             return None, False
