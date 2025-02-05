@@ -1,5 +1,6 @@
 import asyncio
 import re
+import time
 from collections.abc import Callable
 from queue import Empty
 from threading import Thread
@@ -30,8 +31,10 @@ class Message(RawMessage):
 class Wechat:
     """ 微信机器人组件 """
 
+    AsyncMessageCb = Callable[[Message], Coroutine[Any, Any, None]]
+
     def __init__(self, host: str, port: int, remote_storage_path: str, remote_server_prefix: str,
-                 callback: Callable[[Message], Coroutine[Any, Any, None]] = None, dry_run: bool = False):
+                 callback: AsyncMessageCb = None, dry_run: bool = False):
         logger.info('starting robot...')
         self.wcf = Wcf(host, port)
         logger.info('connected to wechatferry.')
@@ -44,6 +47,7 @@ class Wechat:
         self._cached_display_name = dict()
         self.all_contacts = self.get_all_contacts()
         self._message_callback = callback or self._on_message
+        self._daemon_running = False
 
     def cleanup(self):
         self.wcf.cleanup()
@@ -54,21 +58,6 @@ class Wechat:
         """
         contacts = self.wcf.query_sql('MicroMsg.db', 'SELECT UserName, NickName FROM Contact;')
         return {contact['UserName']: contact['NickName'] for contact in contacts}
-
-    async def _auto_accept_friend_request(self, msg: RawMessage) -> None:
-        """ 自动通过好友请求 """
-        import xml.etree.ElementTree as et
-
-        try:
-            xml = et.fromstring(msg.content)
-            v3 = xml.attrib['encryptusername']
-            v4 = xml.attrib['ticket']
-            scene = int(xml.attrib['scene'])
-            logger.info(f'Accepting friend request from {v3} (ticket: {v4})')
-            self.wcf.accept_new_friend(v3, v4, scene)
-            logger.info(f'Accepted friend request from {v3}')
-        except Exception as e:
-            logger.error(f'Failed to accept friend: {e}')
 
     async def _say_hi_to_new_friend(self, msg: RawMessage) -> None:
         """ 自动发送欢迎消息给新好友 """
@@ -125,8 +114,6 @@ class Wechat:
                 msg.resource_url = await self._fetch_image(msg)
                 await self._message_callback(msg)
             case 37:  # 好友请求
-                # self._auto_accept_friend_request(msg)
-                # disabled because wcf is not working
                 pass
             case 49:  # 引用消息
                 msg.content = self._process_reference(msg)
@@ -138,22 +125,34 @@ class Wechat:
                 logger.warning(f'Unknown message type: {msg.type}')
 
     def start_receiving_message(self) -> None:
-        def inner_process_msg(wcf: Wcf):
+        async def f(wcf: Wcf):
+            loop = asyncio.get_event_loop()
             while wcf.is_receiving_msg():
                 try:
-                    msg = wcf.get_msg()
-                    asyncio.run(self._process_message(msg))
+                    msg = await loop.run_in_executor(None, wcf.get_msg, True)
+                    await self._process_message(msg)
                 except Empty:
                     continue  # Empty message
                 except Exception as e:
-                    logger.error(f'Error on receiving: {e}')
+                    logger.error(f'processing message error: {e}')
+
+            self._daemon_running = False
+
+        def thread(wcf: Wcf):
+            asyncio.run(f(wcf))
 
         self.wcf.enable_receiving_msg()
-        Thread(target=inner_process_msg, name='GetMessage', args=(self.wcf,), daemon=True).start()
+        self._daemon_running = True
+        Thread(target=thread, name='GetMessage', args=(self.wcf,), daemon=True).start()
 
     def stop_receiving_message(self) -> None:
         """ 停止接收消息 """
         self.wcf.disable_recv_msg()
+
+        logger.info('waiting for message receiving thread to stop...')
+        while self._daemon_running:
+            time.sleep(0.1)
+        logger.info('message receiving thread stopped.')
 
     def get_myself(self) -> dict:
         """ 获取自己的微信信息
