@@ -1,8 +1,7 @@
 import base64
 import re
-from abc import abstractmethod
-from typing import Optional
 
+from typing import Optional
 from loguru import logger
 
 
@@ -14,15 +13,13 @@ class AiProvider:
         """ 本轮不发言 """
         return '本轮不发言' in s
 
-    @abstractmethod
     async def chat(self, prompt: str, message: str) -> Optional[list[str]]:
         """ 聊天 """
-        pass
+        raise NotImplementedError
 
-    @abstractmethod
     async def describe_image(self, prompt: str, image: bytes | str) -> Optional[str]:
         """ 图像描述 """
-        pass
+        raise NotImplementedError
 
 
 class OpenAI(AiProvider):
@@ -77,10 +74,6 @@ class ChatGLM(OpenAI):
     def __init__(self, key: str, model: str = 'glm-4-flash', **kwargs):
         super().__init__(url='https://open.bigmodel.cn/api/paas/v4', key=key, model=model, **kwargs)
 
-    @staticmethod
-    def get_image_prompt() -> str:
-        """ 获取图片描述的提示 """
-        return '尽可能少的字数描述图片主体是什么, 里面物品有什么. 给人的感觉如何. 不要描述物品放置的目的.'
 
     async def describe_image(self, prompt: str, image: bytes | str) -> Optional[str]:
         """ 图像描述 """

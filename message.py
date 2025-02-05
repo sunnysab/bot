@@ -8,20 +8,20 @@
 """
 
 import base64
-from typing import Any, Dict
-from xml.etree import ElementTree as ET
 
+from typing import Any, Dict
+from xml.etree import ElementTree as et
 from proto.bytes_extra_pb2 import BytesExtra
 
 
 def decode_bytes_extra(data: str | bytes) -> Dict[str, Any]:
     """解码 MSGi.db 中 msg 表的扩展字节数据"""
-    # 解码 Base64
-    assert isinstance(data, (str, bytes)), 'data must be str or bytes'
     if isinstance(data, str):  # 如果是字符串
         binary: bytes = base64.b64decode(data)
     elif isinstance(data, bytes):  # 如果是字节串
         binary = data
+    else:
+        raise ValueError('data must be str or bytes')
 
     # 解析 Protobuf
     message = BytesExtra()
@@ -90,7 +90,7 @@ def parse_reference_message(xml_data: str) -> dict:
     referred_message_sender = root.find('.//refermsg/chatusr').text
     referred_message = root.find('.//refermsg/content').text or root.find('.//refermsg//title').text or ''
     if referred_message.startswith('<'):
-        referred_content_root = ET.fromstring(referred_message)
+        referred_content_root = et.fromstring(referred_message)
         referred_message = referred_content_root.find('.//title').text
 
     return {

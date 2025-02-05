@@ -3,14 +3,13 @@ import ctypes
 import os
 import signal
 from http.server import HTTPServer, SimpleHTTPRequestHandler
-from typing import override
 
 
 class Wcf:
     DEFAULT_SDK_PATH = 'binary/sdk.dll'
 
     def __init__(self):
-        pass
+        self.sdk = None
 
     def load(self, debug: bool = False, port: int = 10086):
         if not os.path.exists(self.DEFAULT_SDK_PATH):
@@ -69,7 +68,7 @@ if __name__ == '__main__':
     wcf.load(debug=args.debug, port=args.wcf_port)
     print('WCF SDK loaded.')
 
-    def signal_handler(sig, frame):
+    def signal_handler(_sig, _frame):
         print('Ctrl+C pressed. Exit.')
         wcf.cleanup()
         exit(0)

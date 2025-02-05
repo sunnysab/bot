@@ -5,3 +5,4 @@ loguru
 protobuf
 requests
 wcferry
+lz4

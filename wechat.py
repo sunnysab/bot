@@ -3,7 +3,7 @@ import re
 from collections.abc import Callable
 from queue import Empty
 from threading import Thread
-from typing import Tuple
+from typing import Tuple, Optional, Coroutine, Any
 
 from loguru import logger
 from wcferry import Wcf, WxMsg as RawMessage
@@ -12,11 +12,26 @@ from context import ChatWindow
 from message import decode_sender_name, decode_compress_content
 
 
-class WxBot:
+class Message(RawMessage):
+
+    def __init__(self, raw: RawMessage):
+        for key, value in raw.__dict__.items():
+            setattr(self, key, value)
+
+        # 图片或语音的音频文件的 URL
+        self.resource_url: Optional[str] = None
+
+    def __repr__(self):
+        if self.roomid != self.sender:  # 群消息
+            return f'<Message from {self.sender} in {self.roomid}: {self.content}>'
+        return f'<Message from {self.sender}: {self.content}>'
+
+
+class Wechat:
     """ 微信机器人组件 """
 
     def __init__(self, host: str, port: int, remote_storage_path: str, remote_server_prefix: str,
-                 callback: Callable[[RawMessage], None] = None, dry_run: bool = False):
+                 callback: Callable[[Message], Coroutine[Any, Any, None]] = None, dry_run: bool = False):
         logger.info('starting robot...')
         self.wcf = Wcf(host, port)
         logger.info('connected to wechatferry.')
@@ -28,7 +43,7 @@ class WxBot:
         self.wxid = self.wcf.get_self_wxid()
         self._cached_display_name = dict()
         self.all_contacts = self.get_all_contacts()
-        self._message_callback = callback or self.on_message
+        self._message_callback = callback or self._on_message
 
     def cleanup(self):
         self.wcf.cleanup()
@@ -42,10 +57,10 @@ class WxBot:
 
     async def _auto_accept_friend_request(self, msg: RawMessage) -> None:
         """ 自动通过好友请求 """
-        import xml.etree.ElementTree as ET
+        import xml.etree.ElementTree as et
 
         try:
-            xml = ET.fromstring(msg.content)
+            xml = et.fromstring(msg.content)
             v3 = xml.attrib['encryptusername']
             v4 = xml.attrib['ticket']
             scene = int(xml.attrib['scene'])
@@ -62,9 +77,9 @@ class WxBot:
         nick_name = re.findall(PATTERN_1, msg.content) or re.findall(PATTERN_2, msg.content)
         if nick_name:
             self.all_contacts[msg.sender] = nick_name[0]
-            await self.send_text_msg(f'[Doge] {nick_name[0]}你终于加我了！！', msg.sender)
+            await self.send_text(f'[Doge] {nick_name[0]}你终于加我了！！', msg.sender)
 
-        raise Exception('Failed to get new friend\'s nickname.')
+        raise Exception('fail to get new friend\'s nickname.')
 
     async def _fetch_image(self, msg: RawMessage) -> str:
         message_id, extra = msg.id, msg.extra
@@ -77,40 +92,50 @@ class WxBot:
         url = f'{self.remote_server_prefix}/{relative_path}'
         return url
 
+    def _process_reference(self, msg: RawMessage) -> RawMessage:
+        """ Process reference message by parsing content """
+        if msg.type != 49:  # Not a reference message
+            return msg
+
+        from message import parse_reference_message
+        try:
+            parsed_message = parse_reference_message(msg.content)
+            msg.content = parsed_message['content'] + \
+                          f'（引用前文的消息：{parsed_message['referred_message']}）'
+            return msg
+        except Exception as e:
+            logger.error(f'parsing reference message: {e}')
+            return msg
+
+    @staticmethod
+    async def _on_message(msg: Message) -> None:
+        """ Default message handler """
+        logger.info(f'{msg.sender}: {msg.content}')
+
     async def _process_message(self, msg: RawMessage) -> None:
         """ 处理消息. 将消息放入回调函数中处理 """
 
         logger.debug(msg)
+        msg = Message(msg)
+
         match msg.type:
-            case 1 | 49:  # 文本消息
-                await self._message_callback(msg)
-            case 47:  # 表情
-                msg.content = '[表情]'
+            case 1:  # 文本消息
                 await self._message_callback(msg)
             case 3:  # 图片
-                try:
-                    await self._fetch_image(msg)
-                except Exception as e:
-                    logger.error(e)
-
+                msg.resource_url = await self._fetch_image(msg)
                 await self._message_callback(msg)
             case 37:  # 好友请求
                 # self._auto_accept_friend_request(msg)
                 # disabled because wcf is not working
                 pass
+            case 49:  # 引用消息
+                msg.content = self._process_reference(msg)
+                await self._message_callback(msg)
             case 10000:  # 系统信息
                 # self._say_hi_to_new_friend(msg)
                 pass
             case _:
                 logger.warning(f'Unknown message type: {msg.type}')
-
-    @staticmethod
-    async def on_message(msg: RawMessage):
-        """ 默认的文本消息处理方法, 输出消息内容 """
-        try:
-            logger.info(msg)
-        except Exception as e:
-            logger.error(e)
 
     def start_receiving_message(self) -> None:
         def inner_process_msg(wcf: Wcf):
@@ -136,7 +161,7 @@ class WxBot:
         """
         return self.wcf.get_user_info()
 
-    async def send_text_msg(self, msg: str, receiver: str, at_list: str = '') -> None:
+    async def send_text(self, msg: str, receiver: str, at_list: str = '') -> None:
         """ 发送消息
         :param msg: 消息字符串
         :param receiver: 接收人wxid或者群id
