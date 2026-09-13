@@ -1,3 +1,4 @@
+import base64
 from abc import ABC, abstractmethod
 from typing import override
 
@@ -138,7 +139,7 @@ class ChatPlugin(Plugin):
 
     @override
     async def handle(self, msg: Message, **kwargs):
-        if msg.msg_type != 1:  # 只处理文本消息
+        if msg.msg_type not in (1, 3):  # 只处理文本和图片消息
             return None, True
 
         # 群聊只在被 @ 时回复；私聊始终回复
@@ -155,7 +156,7 @@ class ChatPlugin(Plugin):
                                              is_group=msg.is_chatroom)
 
         text = '回复你扮演的角色所要说的话。以下聊天记录供你参考：\n\n' + str(history)
-        response = await self.ai.chat(prompt.strip(), text)
+        response = await self.ai.chat(prompt.strip(), await self._build_message(msg, text))
         if not response:
             return None, False
 
@@ -164,3 +165,19 @@ class ChatPlugin(Plugin):
         response = [x.lstrip(prefix) for x in response]
 
         return response, response is not None
+
+    @staticmethod
+    async def _build_message(msg: Message, transcript: str) -> str | list:
+        """ 文本消息直接发送；图片消息把真实图片作为 content block 附在文本后（DeepSeek 原生识图）。 """
+        if msg.msg_type != 3:
+            return transcript
+
+        image = await msg.get_media_bytes()
+        if not image:
+            return transcript
+
+        encoded = base64.b64encode(image).decode()
+        return [
+            {'type': 'text', 'text': transcript},
+            {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{encoded}'}},
+        ]

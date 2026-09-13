@@ -4,7 +4,7 @@ from abc import abstractmethod
 
 from loguru import logger
 
-from ai import AiProvider, ChatGLM, Doubao
+from ai import Deepseek
 from context import ContextManager
 from plugin import ChatPlugin, EndProcessing, Plugin, PluginManager, RepeatPlugin
 from wechat import Message, Wechat
@@ -21,35 +21,14 @@ class Preprocessor:
         pass
 
 
-class ImageProcessor(Preprocessor):
-    def __init__(self, descriptor: AiProvider):
-        self.descriptor = descriptor
-
-    @staticmethod
-    def get_image_prompt() -> str:
-        """ 获取图片描述的提示 """
-        return '尽可能少的字数描述图片主体是什么, 里面物品有什么. 给人的感觉如何. 不要描述物品放置的目的.'
+class MediaProcessor(Preprocessor):
+    """ 把图片/表情消息的正文替换为文字标记，真实图片在回复时随请求直接发送给模型。 """
 
     async def process(self, msg: Message, **ctx) -> Message:
-        """ Process image message by generating description """
-        if msg.msg_type != 3:  # Not an image message
-            return msg
-
-        prompt = self.get_image_prompt()
-        image = await msg.get_media_bytes()
-        description = await self.descriptor.describe_image(prompt, image)
-        description = description.replace('\n', '')
-        logger.info(f'image description: {description}')
-        msg.content = f'图片（文字描述：{description}）'
-        return msg
-
-
-class StickerProcessor(Preprocessor):
-    async def process(self, msg: Message, **ctx) -> Message:
-        if msg.msg_type != 47:
-            return msg
-
-        msg.content = '[表情]'
+        if msg.msg_type == 3:
+            msg.content = msg.clean_text = '[图片]'
+        elif msg.msg_type == 47:
+            msg.content = msg.clean_text = '[表情]'
         return msg
 
 
@@ -186,10 +165,9 @@ def main():
     bot = Bot(CONFIG['relay-host'], CONFIG['relay-port'], unix_path=CONFIG['relay-unix'], x_delay=0.2)
 
     # 初始化预处理器和插件
-    chatglm = ChatGLM(key=CONFIG['chatglm-key'])
-    bot.add_preprocessor([ImageProcessor(chatglm), StickerProcessor()])
+    bot.add_preprocessor(MediaProcessor())
 
-    ai_provider = Doubao(model=CONFIG['doubao-model'], key=CONFIG['doubao-key'], temperature=0.85)
+    ai_provider = Deepseek(key=CONFIG['deepseek-key'], model=CONFIG['deepseek-model'], temperature=0.85)
     repeater = RepeatPlugin()
     chat_plugin = ChatPlugin(ai_provider, context_length=30)
 

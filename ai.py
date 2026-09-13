@@ -1,6 +1,3 @@
-import base64
-import re
-
 from loguru import logger
 
 
@@ -12,12 +9,8 @@ class AiProvider:
         """ 本轮不发言 """
         return '本轮不发言' in s
 
-    async def chat(self, prompt: str, message: str) -> list[str] | None:
-        """ 聊天 """
-        raise NotImplementedError
-
-    async def describe_image(self, prompt: str, image: bytes | str) -> str | None:
-        """ 图像描述 """
+    async def chat(self, prompt: str, message: str | list) -> list[str] | None:
+        """ 聊天。message 为字符串，或 OpenAI content block 数组（含图片）。 """
         raise NotImplementedError
 
 
@@ -34,7 +27,7 @@ class OpenAI(AiProvider):
         self.top_p = top_p
         self.client = AsyncOpenAI(base_url=url, api_key=key)
 
-    async def chat(self, prompt: str, message: str) -> list[str] | None:
+    async def chat(self, prompt: str, message: str | list) -> list[str] | None:
         """ 聊天 """
         response = await self.client.chat.completions.create(
             model=self.model,
@@ -63,37 +56,8 @@ class OpenAI(AiProvider):
 class Deepseek(OpenAI):
     """ Deepseek """
 
-    def __init__(self, key: str, model: str = 'deepseek-chat', **kwargs):
+    def __init__(self, key: str, model: str = 'deepseek-flash', **kwargs):
         super().__init__(url='https://api.deepseek.com', key=key, model=model, **kwargs)
-
-
-class ChatGLM(OpenAI):
-    """ 智谱清言 """
-
-    def __init__(self, key: str, model: str = 'glm-4-flash', **kwargs):
-        super().__init__(url='https://open.bigmodel.cn/api/paas/v4', key=key, model=model, **kwargs)
-
-
-    async def describe_image(self, prompt: str, image: bytes | str) -> str | None:
-        """ 图像描述 """
-        encoded_image = base64.b64encode(image).decode('utf-8')
-
-        response = await self.client.chat.completions.create(
-            model='glm-4v-flash', # TODO: 支持修改.
-            temperature=0.95,
-            top_p=0.70,
-            messages=[{'role': 'user', 'content': [
-                {'type': 'image_url', 'image_url': {'url': encoded_image}},
-                {'type': 'text', 'text': prompt},
-            ]}],
-        )
-
-        completion_message = response.choices[0].message
-        response_text: str = completion_message.content
-        logger.debug(f'ChatGLM image description. response: {repr(response_text)}')
-
-        response_text = re.sub(r'\s\S\n', '', response_text)
-        return response_text
 
 
 class Doubao(OpenAI):
@@ -113,7 +77,7 @@ class Ollama(AiProvider):
         self.model = model
         self.client = AsyncClient(url)
 
-    async def chat(self, prompt: str, message: str) -> list[str] | None:
+    async def chat(self, prompt: str, message: str | list) -> list[str] | None:
         """ 聊天 """
         response = await self.client.chat(
             model=self.model,
@@ -139,16 +103,15 @@ class Ollama(AiProvider):
 
 
 async def main():
-    chatglm = ChatGLM(key='your-key')
-    prompt = chatglm.get_image_prompt()
+    import base64
 
-    image = open('image/dog.jpg', 'rb').read()
-    description = await chatglm.describe_image(prompt, image)
-    print('dog: ', description)
-
-    image = open('image/lunch.jpg', 'rb').read()
-    description = await chatglm.describe_image(prompt, image)
-    print('lunch: ', description)
+    ds = Deepseek(key='your-key')
+    image = base64.b64encode(open('image/dog.jpg', 'rb').read()).decode()
+    response = await ds.chat('描述这张图片', [
+        {'type': 'text', 'text': '描述这张图片'},
+        {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image}'}},
+    ])
+    print('dog: ', response)
 
 if __name__ == '__main__':
     import asyncio
