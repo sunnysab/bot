@@ -52,13 +52,13 @@ class EndProcessing(Plugin):
 class MessageTypeFilter(Plugin):
     @override
     async def handle(self, msg: Message, **kwargs):
-        if msg.type != 1 and msg.type != 3 and msg.type != 47:
+        if msg.msg_type != 1 and msg.msg_type != 3 and msg.msg_type != 47:
             return None, False
 
 class ImagePlugin(Plugin):
     @override
     async def handle(self, msg: Message, **kwargs):
-        if msg.type != 3:
+        if msg.msg_type != 3:
             return None, True
 
 class RepeatPlugin(Plugin):
@@ -83,12 +83,12 @@ class RepeatPlugin(Plugin):
     @override
     async def handle(self, msg: Message, **kwargs):
         """ 跟队形回复。 如果去掉中文英文标点及表情后的消息连续重复特定数量，则凑个热闹跟着回复一句。 """
-        if msg.type != 1:  # 只处理文本消息
+        if msg.msg_type != 1:  # 只处理文本消息
             return None, True
 
         history: ChatWindow = kwargs['history']
         if history.empty():
-            window = await kwargs['wechat'].fetch_history(msg.roomid)
+            window = await kwargs['wechat'].fetch_history(msg.reply_target)
             history.extend(window)
 
         history: ChatWindow = history.latest_n(self.context_length)
@@ -119,7 +119,7 @@ class RepeatPlugin(Plugin):
         if len(text) > self.max_length:
             return None, True
 
-        self.last_repeat[msg.roomid] = text
+        self.last_repeat[msg.reply_target] = text
         return [text], False
 
 
@@ -149,28 +149,28 @@ class ChatPlugin(Plugin):
 
     @override
     async def handle(self, msg: Message, **kwargs):
-        if msg.type != 1:  # 只处理文本消息
+        if msg.msg_type != 1:  # 只处理文本消息
             return None, True
 
         # rate limit
         now = int(time.time())
-        if msg.roomid in self.last_check_time:
-            last_reply_time, ignored = self.last_check_time[msg.roomid]
+        if msg.reply_target in self.last_check_time:
+            last_reply_time, ignored = self.last_check_time[msg.reply_target]
             # 如果距离上次调用时间不足 frequency 秒，或者忽略的消息数量超过 max_ignore，则不回复当前消息
             if now - last_reply_time < self.frequency or ignored < self.max_ignore:
-                self.last_check_time[msg.roomid] = last_reply_time, ignored + 1
-                logger.debug(f'ignore message. roomid: {msg.roomid}, ignored: {ignored + 1}')
+                self.last_check_time[msg.reply_target] = last_reply_time, ignored + 1
+                logger.debug(f'ignore message. roomid: {msg.reply_target}, ignored: {ignored + 1}')
                 return None, True
-        self.last_check_time[msg.roomid] = now, 0
+        self.last_check_time[msg.reply_target] = now, 0
 
         history: ChatWindow = kwargs['history']
         if history.empty():
-            window = await kwargs['wechat'].fetch_history(msg.roomid)
+            window = await kwargs['wechat'].fetch_history(msg.reply_target)
             history.extend(window)
 
         history: ChatWindow = history.latest_n(self.context_length)
         prompt = await self.prompt_template.render_async(self_name=kwargs['self_name'], contact=kwargs['contact'],
-                                             is_group=msg.from_group())
+                                             is_group=msg.is_chatroom)
 
         text = '回复你扮演的角色所要说的话。以下聊天记录供你参考：\n\n' + str(history)
         response = await self.ai.chat(prompt.strip(), text)

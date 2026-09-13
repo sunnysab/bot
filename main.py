@@ -1,12 +1,14 @@
-import signal
 import asyncio
+import time
+from abc import abstractmethod
+from typing import List
 
-import requests
+from loguru import logger
 
-from ai import Deepseek, ChatGLM, OpenAI, Doubao
+from ai import AiProvider, ChatGLM, Doubao
 from context import ContextManager
-from plugin import *
-from wechat import Wechat, Message
+from plugin import ChatPlugin, EndProcessing, Plugin, PluginManager, RepeatPlugin
+from wechat import Message, Wechat
 
 logger.add(sink='bot.log', level='DEBUG')
 
@@ -31,20 +33,21 @@ class ImageProcessor(Preprocessor):
 
     async def process(self, msg: Message, **ctx) -> Message:
         """ Process image message by generating description """
-        if msg.type != 3:  # Not an image message
+        if msg.msg_type != 3:  # Not an image message
             return msg
 
         prompt = self.get_image_prompt()
-        image = requests.get(msg.resource_url).content
+        image = await msg.get_media_bytes()
         description = await self.descriptor.describe_image(prompt, image)
         description = description.replace('\n', '')
         logger.info(f'image description: {description}')
         msg.content = f'图片（文字描述：{description}）'
         return msg
 
+
 class StickerProcessor(Preprocessor):
     async def process(self, msg: Message, **ctx) -> Message:
-        if msg.type != 47:
+        if msg.msg_type != 47:
             return msg
 
         msg.content = '[表情]'
@@ -54,21 +57,18 @@ class StickerProcessor(Preprocessor):
 class Bot:
     """ 微信机器人助手 """
 
-    def __init__(self, host: str, port: int, remote_storage_path: str, remote_server_prefix: str, dry_run: bool = False,
+    def __init__(self, host: str, port: int, unix_path: str = '', dry_run: bool = False,
                  x_delay: float = 0, preprocessors: List[Preprocessor] = None):
         """ 初始化机器人
 
-        @param host: WCFerry 服务器地址
-        @param port: WCFerry 服务器端口
-        @param remote_storage_path: 远程存储路径
-        @param remote_server_prefix: 远程服务器前缀
+        @param host: weixin-rs relay 服务器地址
+        @param port: weixin-rs relay 服务器端口
+        @param unix_path: relay 的 Unix domain socket 路径，非空时优先于 host/port
         @param dry_run: 是否为测试模式
         @param x_delay: 每条消息回复的延迟时间系数（将根据消息长度乘此系数）
         """
         callback = lambda msg: self.on_message(msg)
-        self._wechat = Wechat(host, port, remote_storage_path, remote_server_prefix, callback=callback, dry_run=dry_run)
-        self.self_info = self._wechat.self_info
-        self.wxid = self.self_info['wxid']
+        self._wechat = Wechat(host, port, callback=callback, dry_run=dry_run, unix_path=unix_path)
 
         # 聊天上下文记录
         self._history = ContextManager()
@@ -79,14 +79,20 @@ class Bot:
 
         assert x_delay >= 0
         self.delay_coefficient = x_delay
-        logger.info(f'Hello, {self._wechat.self_info["name"]}!')
 
-    def start(self):
-        self._wechat.start_receiving_message()
+    @property
+    def wxid(self) -> str:
+        return self._wechat.wxid
 
-    def stop(self):
-        self._wechat.stop_receiving_message()
-        self._wechat.cleanup()
+    async def start(self):
+        await self._wechat.start()
+
+    async def stop(self):
+        await self._wechat.stop()
+
+    def register_ready(self, func) -> None:
+        """ 注册连接就绪后的回调（如加载历史上下文） """
+        self._wechat.on_ready(func)
 
     def add_preprocessor(self, preprocessor: Preprocessor | List[Preprocessor]):
         if isinstance(preprocessor, list):
@@ -124,14 +130,14 @@ class Bot:
         """ 消息处理函数 """
 
         # 自己的消息不用回复，也不用存储。在发送的时候会自动存储。
-        if msg.from_self():
+        if msg.is_self:
             return
 
         # 自己的名字
-        self_name: str = await self._wechat.get_display_name(self.wxid, msg.roomid)
+        self_name: str = await self._wechat.get_display_name(self.wxid, msg.reply_target)
         # 消息来源。如果是群消息，则为群名称；否则为联系人备注
         name = lambda x: self._wechat.all_contacts.get(x, x)
-        source = name(msg.roomid)
+        source = name(msg.reply_target)
         logger.debug(msg)
 
         # 预处理消息
@@ -142,11 +148,11 @@ class Bot:
                 logger.warning(f'Preprocessor {preprocessor.name()} refuse to process, return.')
                 return
 
-        self._history.push_message(msg.roomid, name(msg.sender), msg.content, msg.ts)
+        self._history.push_message(msg.reply_target, msg.sender_name, msg.content, msg.create_time)
 
         # 处理消息
         response_back: list[str] | None = []
-        chat_context = self._history.get_context(msg.roomid)
+        chat_context = self._history.get_context(msg.reply_target)
         plugins = self._plugins.get_plugins_for_contact(source)
         for plugin in plugins:
             current_round, _continue = await plugin.handle(msg, wechat=self._wechat, history=chat_context,
@@ -165,8 +171,8 @@ class Bot:
             if self.delay_coefficient:
                 await asyncio.sleep(len(text) * self.delay_coefficient)
             now = int(time.time())
-            await self._wechat.send_text(text, msg.roomid)
-            self._history.push_message(msg.roomid, self_name, text, now)
+            await self._wechat.send_text(text, msg.reply_target)
+            self._history.push_message(msg.reply_target, self_name, text, now)
         else:
             logger.debug('all responses sent.')
 
@@ -174,17 +180,7 @@ class Bot:
 def main():
     from config import CONFIG
 
-    host, port = CONFIG['wcf-host'], CONFIG['wcf-port']
-    bot: Bot = Bot(host, port, remote_storage_path=CONFIG['remote-storage-path'],
-                          remote_server_prefix=CONFIG['remote-server-prefix'], x_delay=0.2)
-
-    # 捕获 Ctrl+C 信号
-    def signal_handler(_sig, _frame):
-        logger.warning('Ctrl+C pressed. Exit.')
-        bot.stop()
-        exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
+    bot = Bot(CONFIG['relay-host'], CONFIG['relay-port'], unix_path=CONFIG['relay-unix'], x_delay=0.2)
 
     # 初始化预处理器和插件
     chatglm = ChatGLM(key=CONFIG['chatglm-key'])
@@ -197,12 +193,20 @@ def main():
     bot.set_default_plugin([repeater, chat_plugin])
     bot.attach('研究生摆烂群', EndProcessing())
 
-    asyncio.run(bot.load_context())
+    # 连接就绪后加载最近的聊天记录
+    bot.register_ready(lambda _bot: bot.load_context())
+
+    async def run():
+        try:
+            await bot.start()
+        finally:
+            await bot.stop()
 
     # 开始接收消息
-    bot.start()
-    while True:
-        time.sleep(1)
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        logger.warning('Ctrl+C pressed. Exit.')
 
 
 if __name__ == '__main__':
