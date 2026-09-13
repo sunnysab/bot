@@ -113,9 +113,11 @@ class Wechat:
 
     async def get_recent_sessions(self, count: int = 10) -> list[str]:
         """ 获取最近的聊天会话 """
-        conversations = await self._bot.get_conversations(limit=count)
-        return [c.peer for c in conversations
-                if c.peer.startswith('wxid_') or c.peer.endswith('@chatroom')]
+        # 公众号推送会占满会话列表，多取一些再过滤掉
+        conversations = await self._bot.get_conversations(limit=max(count * 5, 50))
+        sessions = [c.peer for c in conversations
+                    if c.peer.startswith('wxid_') or c.peer.endswith('@chatroom')]
+        return sessions[:count]
 
     async def get_display_name(self, wxid: str, chatroom: str = '') -> str:
         """ 获取联系人的显示名称. 对于群友，优先使用本地的备注，其次使用群昵称，最后使用微信昵称 """

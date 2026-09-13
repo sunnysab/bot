@@ -30,6 +30,7 @@ class FakeBot:
         return [types.SimpleNamespace(username='wxid_alice', name='Alice')]
 
     async def get_conversations(self, limit):
+        self.requested_limit = limit
         return [types.SimpleNamespace(peer='456@chatroom'), types.SimpleNamespace(peer='gh_news'),
                 types.SimpleNamespace(peer='wxid_bob')]
 
@@ -81,6 +82,8 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
     async def test_get_recent_sessions_filters_non_contacts(self):
         sessions = await self.wechat.get_recent_sessions(3)
         self.assertEqual(sessions, ['456@chatroom', 'wxid_bob'])
+        # 公众号会占满会话列表，必须多取一批再过滤
+        self.assertGreater(self.wechat._bot.requested_limit, 3)
 
     async def test_send_text_with_at(self):
         await self.wechat.send_text('你好', '456@chatroom', at_list='wxid_alice')
