@@ -72,12 +72,13 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
 
     async def test_fetch_history_maps_and_filters(self):
         window = await self.wechat.fetch_history('456@chatroom', count=10)
-        # 图片被跳过，只剩文本和引用
-        self.assertEqual(len(window), 2)
+        # 文本、图片标记、引用都在
+        self.assertEqual(len(window), 3)
         self.assertEqual(window[0].sender, 'Alice')
         self.assertEqual(window[0].text, '第一条')
-        self.assertEqual(window[1].text, '回复内容（引用前文的消息：被引用的内容）')
-        self.assertEqual([r.t for r in window], [200, 202])
+        self.assertEqual(window[1].text, '[图片]')
+        self.assertEqual(window[2].text, '回复内容（引用前文的消息：被引用的内容）')
+        self.assertEqual([r.t for r in window], [200, 201, 202])
 
     async def test_get_recent_sessions_filters_non_contacts(self):
         sessions = await self.wechat.get_recent_sessions(3)

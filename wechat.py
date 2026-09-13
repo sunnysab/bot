@@ -60,6 +60,8 @@ class Wechat:
                 await self._message_callback(msg)
             case 37:  # 好友请求
                 pass
+            case 47:  # 表情
+                await self._message_callback(msg)
             case 49:  # 引用消息
                 self._process_reference(msg)
                 await self._message_callback(msg)
@@ -156,9 +158,10 @@ class Wechat:
                     content = parsed['content'] + f'（引用前文的消息：{parsed["referred_message"]}）'
                 except Exception:
                     continue
-            elif msg.msg_type == 3:  # 图片消息
-                # TODO: 加载缓存的图片描述信息
-                continue
+            elif msg.msg_type == 3:  # 图片消息（历史只留标记，真实图片在回复时随请求发送）
+                content = '[图片]'
+            elif msg.msg_type == 47:  # 表情消息
+                content = '[表情]'
 
             # 不知道为什么有的消息还是 xml 格式的，这里直接过滤掉吧
             if content and not content.startswith('<'):
