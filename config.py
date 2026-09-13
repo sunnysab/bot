@@ -6,10 +6,8 @@ __DEFAULT_CHATGLM_KEY = 'your-chatglm-key'
 __DEFAULT_DOUBAO_MODEL = ''
 __DEFAULT_DOUBAO_KEY = ''
 __DEFAULT_OLLAMA_HOST = 'http://localhost:11434'
-__WCF_HOST = '192.168.2.105'
-__WCF_PORT = 5000
-__REMOTE_STORAGE_PATH = r'C:\Users\sunnysab\Desktop\v39\static'
-__REMOTE_SERVER_PREFIX = 'http://192.168.2.105:5002/static/'
+__RELAY_HOST = '127.0.0.1'
+__RELAY_PORT = 9099
 
 CONFIG = {
     'deepseek-key': os.getenv('DEEPSEEK_KEY', __DEFAULT_DEEPSEEK_KEY),
@@ -17,8 +15,8 @@ CONFIG = {
     'doubao-model': os.getenv('DOUBAO_MODEL', __DEFAULT_DOUBAO_MODEL),
     'doubao-key': os.getenv('DOUBAO_KEY', __DEFAULT_DOUBAO_KEY),
     'ollama-host': os.getenv('OLLAMA_HOST', __DEFAULT_OLLAMA_HOST),
-    'wcf-host': os.getenv('WCF_HOST', __WCF_HOST),
-    'wcf-port': int(os.getenv('WCF_PORT', __WCF_PORT)),
-    'remote-storage-path': os.getenv('REMOTE_STORAGE_PATH', __REMOTE_STORAGE_PATH),
-    'remote-server-prefix': os.getenv('REMOTE_SERVER_PREFIX', __REMOTE_SERVER_PREFIX),
+    'relay-host': os.getenv('RELAY_HOST', __RELAY_HOST),
+    'relay-port': int(os.getenv('RELAY_PORT', __RELAY_PORT)),
+    # 走 Unix domain socket 时填写（如 /tmp/weixin-relay.sock），否则留空走 TCP
+    'relay-unix': os.getenv('RELAY_UNIX', ''),
 }
