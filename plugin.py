@@ -134,7 +134,8 @@ class ChatPlugin(Plugin):
         self.context_length = context_length
 
         from jinja2 import Template
-        template_file = open('prompt.txt', encoding='utf-8').read()
+        with open('prompt.txt', encoding='utf-8') as f:
+            template_file = f.read()
         self.prompt_template = Template(template_file, enable_async=True)
 
     @override
