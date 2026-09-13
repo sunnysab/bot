@@ -1,4 +1,3 @@
-import time
 from abc import ABC, abstractmethod
 from typing import override
 
@@ -124,23 +123,13 @@ class RepeatPlugin(Plugin):
 
 
 class ChatPlugin(Plugin):
-    def __init__(self, ai_provider: AiProvider, max_ignore: int = 1, frequency: int = 10, context_length: int = 10):
+    def __init__(self, ai_provider: AiProvider, context_length: int = 10):
         """ 聊天插件
 
         :param ai_provider: AI 服务提供者
-        :param max_ignore: 最大忽略消息数量
-        :param frequency: 最小调用频率
+        :param context_length: 送入模型的上下文消息条数
         """
         self.ai = ai_provider
-        # 记录不同会话的最后一次调用模型时间, 以及模型从上次调用起忽略的消息数量
-        self.last_check_time: dict[str, tuple[int, int]] = {}
-        if max_ignore < 0:
-            self.max_ignore = 0
-        elif max_ignore > 50:
-            self.max_ignore = 50
-        else:
-            self.max_ignore = max_ignore
-        self.frequency = frequency  # 最快情况每 frequency 秒调用一次模型
         self.context_length = context_length
 
         from jinja2 import Template
@@ -152,16 +141,9 @@ class ChatPlugin(Plugin):
         if msg.msg_type != 1:  # 只处理文本消息
             return None, True
 
-        # rate limit
-        now = int(time.time())
-        if msg.reply_target in self.last_check_time:
-            last_reply_time, ignored = self.last_check_time[msg.reply_target]
-            # 如果距离上次调用时间不足 frequency 秒，或者忽略的消息数量超过 max_ignore，则不回复当前消息
-            if now - last_reply_time < self.frequency or ignored < self.max_ignore:
-                self.last_check_time[msg.reply_target] = last_reply_time, ignored + 1
-                logger.debug(f'ignore message. roomid: {msg.reply_target}, ignored: {ignored + 1}')
-                return None, True
-        self.last_check_time[msg.reply_target] = now, 0
+        # 群聊只在被 @ 时回复；私聊始终回复
+        if msg.is_chatroom and not msg.is_at_me:
+            return None, True
 
         history: ChatWindow = kwargs['history']
         if history.empty():

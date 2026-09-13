@@ -191,7 +191,7 @@ def main():
 
     ai_provider = Doubao(model=CONFIG['doubao-model'], key=CONFIG['doubao-key'], temperature=0.85)
     repeater = RepeatPlugin()
-    chat_plugin = ChatPlugin(ai_provider, max_ignore=0, frequency=1, context_length=30)
+    chat_plugin = ChatPlugin(ai_provider, context_length=30)
 
     bot.set_default_plugin([repeater, chat_plugin])
     bot.attach('研究生摆烂群', EndProcessing())
