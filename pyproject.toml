@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bot"
+version = "0.1.0"
+description = "WeChat bot backed by LLM providers"
+requires-python = ">=3.10"
+dependencies = [
+    "openai",
+    "ollama",
+    "jinja2",
+    "loguru",
+    "protobuf",
+    "requests",
+    "wcferry",
+    "lz4",
+]
+
+[dependency-groups]
+dev = ["ruff"]
+
+[tool.setuptools]
+py-modules = [
+    "ai",
+    "config",
+    "context",
+    "injector",
+    "main",
+    "message",
+    "plugin",
+    "wechat",
+]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
