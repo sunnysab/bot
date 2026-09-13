@@ -1,7 +1,6 @@
 import base64
 import re
 
-from typing import Optional
 from loguru import logger
 
 
@@ -13,11 +12,11 @@ class AiProvider:
         """ 本轮不发言 """
         return '本轮不发言' in s
 
-    async def chat(self, prompt: str, message: str) -> Optional[list[str]]:
+    async def chat(self, prompt: str, message: str) -> list[str] | None:
         """ 聊天 """
         raise NotImplementedError
 
-    async def describe_image(self, prompt: str, image: bytes | str) -> Optional[str]:
+    async def describe_image(self, prompt: str, image: bytes | str) -> str | None:
         """ 图像描述 """
         raise NotImplementedError
 
@@ -35,7 +34,7 @@ class OpenAI(AiProvider):
         self.top_p = top_p
         self.client = AsyncOpenAI(base_url=url, api_key=key)
 
-    async def chat(self, prompt: str, message: str) -> Optional[list[str]]:
+    async def chat(self, prompt: str, message: str) -> list[str] | None:
         """ 聊天 """
         response = await self.client.chat.completions.create(
             model=self.model,
@@ -75,7 +74,7 @@ class ChatGLM(OpenAI):
         super().__init__(url='https://open.bigmodel.cn/api/paas/v4', key=key, model=model, **kwargs)
 
 
-    async def describe_image(self, prompt: str, image: bytes | str) -> Optional[str]:
+    async def describe_image(self, prompt: str, image: bytes | str) -> str | None:
         """ 图像描述 """
         encoded_image = base64.b64encode(image).decode('utf-8')
 
@@ -114,7 +113,7 @@ class Ollama(AiProvider):
         self.model = model
         self.client = AsyncClient(url)
 
-    async def chat(self, prompt: str, message: str) -> Optional[list[str]]:
+    async def chat(self, prompt: str, message: str) -> list[str] | None:
         """ 聊天 """
         response = await self.client.chat(
             model=self.model,

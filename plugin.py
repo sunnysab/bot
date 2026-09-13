@@ -1,6 +1,6 @@
 import time
-from abc import abstractmethod, ABC
-from typing import override, Dict, Tuple, List
+from abc import ABC, abstractmethod
+from typing import override
 
 from loguru import logger
 
@@ -24,8 +24,8 @@ class PluginManager:
     """Manages plugin registration and execution"""
 
     def __init__(self):
-        self._defaults: List[Plugin] = []
-        self._contact_mappings: Dict[str, List[Plugin]] = {}
+        self._defaults: list[Plugin] = []
+        self._contact_mappings: dict[str, list[Plugin]] = {}
 
     def register(self, plugin: Plugin) -> None:
         """Register a plugin for all contacts"""
@@ -39,7 +39,7 @@ class PluginManager:
         self._contact_mappings[contact].append(plugin)
         logger.info(f'Mapped plugin {plugin.__class__.__name__} to contact {contact}')
 
-    def get_plugins_for_contact(self, contact: str) -> List[Plugin]:
+    def get_plugins_for_contact(self, contact: str) -> list[Plugin]:
         """Get plugins for a specific contact"""
         return self._contact_mappings.get(contact, self._defaults)
 
@@ -133,7 +133,7 @@ class ChatPlugin(Plugin):
         """
         self.ai = ai_provider
         # 记录不同会话的最后一次调用模型时间, 以及模型从上次调用起忽略的消息数量
-        self.last_check_time: Dict[str, Tuple[int, int]] = {}
+        self.last_check_time: dict[str, tuple[int, int]] = {}
         if max_ignore < 0:
             self.max_ignore = 0
         elif max_ignore > 50:

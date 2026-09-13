@@ -1,5 +1,4 @@
 import re
-from typing import Optional, List
 
 
 class SingleRecord:
@@ -38,10 +37,10 @@ class SingleRecord:
 class ChatWindow:
     """ 维护单个聊天会话（群或联系人）的状态 """
 
-    def __init__(self, history: Optional[List[SingleRecord]]=None, max_history: int = 100):
+    def __init__(self, history: list[SingleRecord] | None=None, max_history: int = 100):
         self.max_history = max_history
 
-        history: List[SingleRecord] = history or []
+        history: list[SingleRecord] = history or []
         self._history = history[:max_history]
 
     def append(self, sender: str, text: str, t: int = 0):

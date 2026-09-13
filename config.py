@@ -1,6 +1,5 @@
 import os
 
-
 __DEFAULT_DEEPSEEK_KEY = 'your-deepseek-key'
 __DEFAULT_CHATGLM_KEY = 'your-chatglm-key'
 __DEFAULT_DOUBAO_MODEL = ''

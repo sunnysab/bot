@@ -1,7 +1,6 @@
 import asyncio
 import time
 from abc import abstractmethod
-from typing import List
 
 from loguru import logger
 
@@ -58,7 +57,7 @@ class Bot:
     """ 微信机器人助手 """
 
     def __init__(self, host: str, port: int, unix_path: str = '', dry_run: bool = False,
-                 x_delay: float = 0, preprocessors: List[Preprocessor] = None):
+                 x_delay: float = 0, preprocessors: list[Preprocessor] = None):
         """ 初始化机器人
 
         @param host: weixin-rs relay 服务器地址
@@ -67,7 +66,9 @@ class Bot:
         @param dry_run: 是否为测试模式
         @param x_delay: 每条消息回复的延迟时间系数（将根据消息长度乘此系数）
         """
-        callback = lambda msg: self.on_message(msg)
+        async def callback(msg: Message) -> None:
+            await self.on_message(msg)
+
         self._wechat = Wechat(host, port, callback=callback, dry_run=dry_run, unix_path=unix_path)
 
         # 聊天上下文记录
@@ -75,7 +76,7 @@ class Bot:
         # 消息处理插件
         self._plugins = PluginManager()
         # 消息预处理插件
-        self._preprocessors: List[Preprocessor] = preprocessors or []
+        self._preprocessors: list[Preprocessor] = preprocessors or []
 
         assert x_delay >= 0
         self.delay_coefficient = x_delay
@@ -94,19 +95,19 @@ class Bot:
         """ 注册连接就绪后的回调（如加载历史上下文） """
         self._wechat.on_ready(func)
 
-    def add_preprocessor(self, preprocessor: Preprocessor | List[Preprocessor]):
+    def add_preprocessor(self, preprocessor: Preprocessor | list[Preprocessor]):
         if isinstance(preprocessor, list):
             self._preprocessors.extend(preprocessor)
         else:
             self._preprocessors.append(preprocessor)
 
-    def set_default_plugin(self, plugin: Plugin | List[Plugin]):
+    def set_default_plugin(self, plugin: Plugin | list[Plugin]):
         plugins = [plugin] if isinstance(plugin, Plugin) else plugin
 
         for p in plugins:
             self._plugins.register(p)
 
-    def attach(self, contact: str, plugin: Plugin | List[Plugin]):
+    def attach(self, contact: str, plugin: Plugin | list[Plugin]):
         plugins = [plugin] if isinstance(plugin, Plugin) else plugin
         for p in plugins:
             self._plugins.map_plugin_to_contact(contact, p)
@@ -136,7 +137,9 @@ class Bot:
         # 自己的名字
         self_name: str = await self._wechat.get_display_name(self.wxid, msg.reply_target)
         # 消息来源。如果是群消息，则为群名称；否则为联系人备注
-        name = lambda x: self._wechat.all_contacts.get(x, x)
+        def name(wxid: str) -> str:
+            return self._wechat.all_contacts.get(wxid, wxid)
+
         source = name(msg.reply_target)
         logger.debug(msg)
 
