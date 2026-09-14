@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
@@ -41,16 +42,13 @@ SYSTEM_KINDS = frozenset({MessageKind.FRIEND_REQUEST, MessageKind.HANDOFF,
                           MessageKind.SYSTEM, MessageKind.SYS_RECOMMEND})
 
 
-def _human_delta(seconds: float) -> str:
-    """ 把秒差转成人话，供 transcript 展示时间远近。 """
-    seconds = max(0, int(seconds))
-    if seconds < 60:
-        return '刚刚'
-    if seconds < 3600:
-        return f'{seconds // 60}分钟前'
-    if seconds < 86400:
-        return f'{seconds // 3600}小时前'
-    return f'{seconds // 86400}天前'
+def _format_time(t: int) -> str:
+    """ 绝对时间，如 '09-14 14:32'。
+
+    用绝对时间而非相对时间：历史消息的文本必须跨轮稳定，否则前缀会变，
+    击穿 KV cache 的前缀复用，每轮都要重新计算全部 token。
+    """
+    return datetime.fromtimestamp(t).strftime('%m-%d %H:%M')
 
 
 class SingleRecord:
@@ -144,16 +142,14 @@ class ChatWindow:
     def __str__(self):
         """ 渲染给模型看的 transcript。
 
-        带相对时间（相对最后一条）和「我」标记：模型据此判断消息远近、以及自己说过什么。
+        每条带绝对时间（如 [09-14 14:32]）和「我」标记：模型据此判断消息时间、
+        以及自己说过什么。历史行的文本跨轮不变，保住 KV cache 前缀。
         """
-        if not self._history:
-            return ''
-        newest = max(r.t for r in self._history)
         lines = []
         for record in self._history:
             who = '我' if record.is_self else record.sender
             body = record.text.replace('\n', ' ')
-            prefix = f'[{_human_delta(newest - record.t)}] ' if record.t else ''
+            prefix = f'[{_format_time(record.t)}] ' if record.t else ''
             lines.append(f'{prefix}{who}: {body}')
         return '\n'.join(lines)
 
@@ -235,15 +231,13 @@ if __name__ == '__main__':
     assert MessageKind.of(-1) is MessageKind.OTHER
     assert MessageKind.HANDOFF in SYSTEM_KINDS
 
-    # 自检：transcript 带相对时间和「我」标记
+    # 自检：transcript 带绝对时间（跨轮稳定）和「我」标记
     window = ChatWindow()
     window.append('张三', '在吗', 1000)
     window.append('Bot', '在', 1060, is_self=True)
     window.append('张三', '帮我看看', 4600)
-    assert str(window) == '[1小时前] 张三: 在吗\n[59分钟前] 我: 在\n[刚刚] 张三: 帮我看看', repr(str(window))
-
-    assert _human_delta(30) == '刚刚'
-    assert _human_delta(120) == '2分钟前'
-    assert _human_delta(7200) == '2小时前'
-    assert _human_delta(172800) == '2天前'
+    lines = str(window).split('\n')
+    assert lines[0].endswith('张三: 在吗'), lines
+    assert lines[1].endswith('我: 在'), lines
+    assert all(re.match(r'\[\d\d-\d\d \d\d:\d\d\] ', line) for line in lines), lines
     print('ok')

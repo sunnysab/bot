@@ -1,4 +1,5 @@
 import base64
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -118,15 +119,50 @@ class RepeatPlugin(Plugin):
         return Reply(texts=[text], stop=True)
 
 
+class ReplyPolicy:
+    """ 决定一条消息是否值得交给模型。便宜的规则先筛，模型只负责表达。
+
+    - 私聊：始终回复
+    - 群聊：被 @ 回复；昵称被提及且不在冷却期内也回复
+    - 冷却：刚回过话的会话，短时间内不因「提及昵称」再次插话（@ 不受限）
+    """
+
+    def __init__(self, cooldown: float = 30.0):
+        self.cooldown = cooldown
+        self._last_reply: dict[str, float] = {}
+
+    def should_reply(self, ctx: MessageContext, now: float) -> bool:
+        msg = ctx.msg
+        if not msg.is_chatroom:
+            return True
+        if msg.is_at_me:
+            return True
+        if self._in_cooldown(ctx.contact, now):
+            return False
+        return self._mentions_me(ctx)
+
+    def note_reply(self, contact: str, now: float) -> None:
+        self._last_reply[contact] = now
+
+    def _mentions_me(self, ctx: MessageContext) -> bool:
+        return bool(ctx.self_name) and ctx.self_name in ctx.msg.content
+
+    def _in_cooldown(self, contact: str, now: float) -> bool:
+        last = self._last_reply.get(contact)
+        return last is not None and now - last < self.cooldown
+
+
 class ChatPlugin(Plugin):
-    def __init__(self, ai_provider: AiProvider, context_length: int = 10):
+    def __init__(self, ai_provider: AiProvider, context_length: int = 10, policy: ReplyPolicy | None = None):
         """ 聊天插件
 
         :param ai_provider: AI 服务提供者
         :param context_length: 送入模型的上下文消息条数
+        :param policy: 是否回复的策略；不传则用默认（@ 或提昵称，带冷却）
         """
         self.ai = ai_provider
         self.context_length = context_length
+        self.policy = policy or ReplyPolicy()
 
         from jinja2 import Template
         template_file = (Path(__file__).parent / 'prompt.txt').read_text(encoding='utf-8')
@@ -138,9 +174,10 @@ class ChatPlugin(Plugin):
         if not (ctx.is_text or ctx.is_image):  # 只处理文本和图片消息
             return None
 
-        # 群聊只在被 @ 时回复；私聊始终回复
-        if msg.is_chatroom and not msg.is_at_me:
+        now = time.monotonic()
+        if not self.policy.should_reply(ctx, now):
             return None
+        self.policy.note_reply(ctx.contact, now)
 
         history: ChatWindow = ctx.history.latest_n(self.context_length)
         prompt = await self.prompt_template.render_async(self_name=ctx.self_name, contact=ctx.contact,

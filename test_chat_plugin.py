@@ -1,11 +1,12 @@
 """ 插件自检：群聊 @ 门禁、私聊直通、图片直传，以及复读机不跟媒体占位标记。 """
 
 import base64
+import time
 import types
 import unittest
 
 from context import ChatWindow, MessageContext
-from plugin import ChatPlugin, RepeatPlugin
+from plugin import ChatPlugin, RepeatPlugin, ReplyPolicy
 
 
 class FakeAi:
@@ -17,9 +18,9 @@ class FakeAi:
         return ['收到']
 
 
-def make_msg(msg_type=1, is_chatroom=False, is_at_me=False, media=b''):
+def make_msg(msg_type=1, is_chatroom=False, is_at_me=False, media=b'', content=''):
     msg = types.SimpleNamespace(msg_type=msg_type, is_chatroom=is_chatroom, is_at_me=is_at_me,
-                                reply_target='456@chatroom')
+                                content=content, reply_target='456@chatroom')
 
     async def get_media_bytes():
         return media
@@ -68,6 +69,48 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(content[1]['type'], 'image_url')
         expected = 'data:image/jpeg;base64,' + base64.b64encode(image).decode()
         self.assertEqual(content[1]['image_url']['url'], expected)
+
+    async def test_group_name_mention_replies_without_at(self):
+        reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=True, content='Bot 在吗')))
+        self.assertEqual(reply.texts, ['收到'])
+
+    async def test_cooldown_suppresses_name_mention(self):
+        self.plugin.policy.note_reply('测试群', time.monotonic())
+        reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=True, content='Bot 在吗')))
+        self.assertIsNone(reply)
+        self.assertEqual(self.ai.calls, [])
+
+    async def test_at_bypasses_cooldown(self):
+        self.plugin.policy.note_reply('测试群', time.monotonic())
+        reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=True, is_at_me=True, content='Bot')))
+        self.assertEqual(reply.texts, ['收到'])
+
+    async def test_private_bypasses_cooldown(self):
+        self.plugin.policy.note_reply('测试群', time.monotonic())
+        reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
+        self.assertEqual(reply.texts, ['收到'])
+
+
+class TestReplyPolicy(unittest.TestCase):
+    def setUp(self):
+        self.policy = ReplyPolicy(cooldown=30)
+
+    def should(self, is_chatroom, is_at_me, content=''):
+        ctx = make_ctx(make_msg(is_chatroom=is_chatroom, is_at_me=is_at_me, content=content))
+        return self.policy.should_reply(ctx, now=1000.0)
+
+    def test_private_always(self):
+        self.assertTrue(self.should(is_chatroom=False, is_at_me=False))
+
+    def test_group_requires_at_or_mention(self):
+        self.assertFalse(self.should(is_chatroom=True, is_at_me=False, content='大家好啊'))
+        self.assertTrue(self.should(is_chatroom=True, is_at_me=True))
+        self.assertTrue(self.should(is_chatroom=True, is_at_me=False, content='@Bot 帮个忙'))
+
+    def test_cooldown_only_blocks_mentions(self):
+        self.policy.note_reply('测试群', 990.0)
+        self.assertFalse(self.should(is_chatroom=True, is_at_me=False, content='Bot 在吗'))
+        self.assertTrue(self.should(is_chatroom=True, is_at_me=True))
 
 
 class TestRepeatPlugin(unittest.IsolatedAsyncioTestCase):
