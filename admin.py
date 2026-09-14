@@ -22,18 +22,21 @@ import asyncio
 import json
 import threading
 import time
+from dataclasses import MISSING, replace
 from dataclasses import fields as dataclass_fields
-from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from dotenv import load_dotenv
 from loguru import logger
 
+from config import DOTENV_PATH, Config, update_dotenv
 from context import SYSTEM_KINDS, MessageKind
 from events import Status, bus
 from media import render
 from reply_trace import find as find_trace
+from runtime import HOT_FIELDS, RESTART_FIELDS
 
 PAGE = Path(__file__).parent / 'admin.html'
 DEFAULT_PORT = 8099          # 8080 在本机被 iptv 占了，别用
@@ -42,12 +45,77 @@ MESSAGES_LIMIT = 300         # v1 一次拉满，relay 的 get_messages 还不�
 RPC_TIMEOUT = 15.0
 LOG_TAIL_BYTES = 256 * 1024  # 只看日志尾巴，不把整份读进内存
 
+# 不回显的字段：表单里留空 = 保持原值
+SECRET_FIELDS = frozenset({'deepseek_key', 'planner_key'})
+
+# 面板上的分组。没列进来的字段会被自检抓出来（新加配置不能忘了放进面板）
+CONFIG_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ('模型', ('deepseek_key', 'deepseek_model', 'deepseek_url', 'request_timeout')),
+    ('门控（值不值得让模型看一眼）', (
+        'reply_necessity_threshold', 'reply_activity_window',
+        'backoff_start_after', 'backoff_base_seconds', 'backoff_max_seconds',
+        'backoff_bypass_messages')),
+    ('专注模式', ('enable_focus', 'focus_enter_activity', 'focus_idle_seconds', 'focus_max_seconds')),
+    ('人格与表达', ('personality', 'reply_style', 'behavior_style', 'reply_styles', 'style_probability')),
+    ('决策者', ('enable_planner', 'planner_url', 'planner_key', 'planner_model', 'planner_temperature',
+                'planner_max_tokens', 'planner_thinking', 'planner_json_schema', 'enable_tools',
+                'planner_rounds')),
+    ('出站', ('send_interval', 'typo_rate', 'dry_run')),
+    ('观测', ('trace_path',)),
+    ('改了要重启进程', ('relay_host', 'relay_port', 'relay_unix', 'admin_port', 'log_path', 'log_level',
+                    'describe_media', 'media_cache_path', 'describe_concurrency', 'describe_timeout',
+                    'describe_max_tokens', 'describe_history_limit', 'profile_path', 'habit_path',
+                    'moment_path', 'emoji_path', 'moment_batch')),
+)
+
+
+_FIELDS = {field.name: field for field in dataclass_fields(Config)}
+
+
+def _type_name(ftype) -> str:
+    return {bool: 'bool', int: 'int', float: 'float', str: 'str'}.get(ftype, 'str')
+
+
+def _parse(field, raw):
+    """ 表单送来的都是字符串（也可能是 JSON 的 bool），按字段类型转。
+
+    留空 = 恢复默认值（面板里把一个输入框清空的直觉就是「回默认」）。
+    """
+    if field.type is bool:
+        return raw if isinstance(raw, bool) else str(raw).strip().lower() not in ('0', 'false', 'no', '')
+    text = str(raw).strip()
+    if not text:
+        if field.default is not MISSING:
+            return field.default
+        raise ValueError(f'{field.name} 不能为空')
+    try:
+        return field.type(text)
+    except ValueError as e:
+        raise ValueError(f'{field.name} 要 {_type_name(field.type)}，收到 {text!r}') from e
+
+
+def _dotenv_value(value) -> str:
+    return ('1' if value else '0') if isinstance(value, bool) else str(value)
+
+
+def _readable(changed: dict) -> dict:
+    """ 给日志和响应看的变更集；密钥不回显内容。 """
+    return {name: ('（已更新）' if name in SECRET_FIELDS else str(value))
+            for name, value in changed.items()}
+
+
+def _stale(new: Config, old: Config) -> list[str]:
+    """ 改了、但热重载管不着的字段：得重启进程。 """
+    return [f.name for f in dataclass_fields(Config)
+            if f.name in RESTART_FIELDS and getattr(new, f.name) != getattr(old, f.name)]
+
 
 class Admin:
     def __init__(self, runtime, host: str = '127.0.0.1', port: int = DEFAULT_PORT):
         self.runtime = runtime
         self.host = host
         self.port = port
+        self.dotenv = DOTENV_PATH      # 自检里会换成临时文件
         self.server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -273,6 +341,76 @@ class Admin:
             self.runtime.bot.unmute(chat)
         return {'muted': self.runtime.bot.is_muted(chat)}
 
+    # ---------- 配置 ----------
+
+    def read_config(self) -> dict:
+        """ 面板要的分组表单。密钥不回显，只告诉面板「设过没有」。 """
+        config = self.runtime.config
+        groups = []
+        for title, names in CONFIG_GROUPS:
+            items = []
+            for name in names:
+                field = _FIELDS[name]
+                value = getattr(config, name)
+                items.append({
+                    'name': name,
+                    'type': _type_name(field.type),
+                    'value': '' if name in SECRET_FIELDS else value,
+                    'secret': name in SECRET_FIELDS,
+                    'isset': bool(value) if name in SECRET_FIELDS else True,
+                    'default': field.default if field.default is not MISSING else None,
+                    'hot': name in HOT_FIELDS,
+                })
+            groups.append({'group': title, 'items': items})
+        return {'groups': groups, 'dotenv': str(self.dotenv)}
+
+    def write_config(self, updates: dict) -> dict:
+        """ 校验 → 写回 .env。校验不过**一个字都不写**（一个笔误不能让 bot 下次起不来）。 """
+        updates = {str(key).strip().lower(): value for key, value in updates.items()}
+        unknown = sorted(set(updates) - set(_FIELDS))
+        if unknown:
+            raise ValueError(f'不认识的配置项：{", ".join(unknown)}')
+
+        current = {f.name: getattr(self.runtime.config, f.name) for f in dataclass_fields(Config)}
+        candidate = dict(current)
+        for name, raw in updates.items():
+            if name in SECRET_FIELDS and not str(raw).strip():
+                continue                       # 留空 = 保持原值
+            candidate[name] = _parse(_FIELDS[name], raw)
+
+        try:
+            config = Config(**candidate)       # 先验一遍再落盘
+        except (TypeError, ValueError) as e:
+            raise ValueError(f'配置不合法：{e}') from e
+
+        changed = {name: candidate[name] for name in updates if candidate[name] != current[name]}
+        if changed:
+            update_dotenv(self.dotenv, {name.upper(): _dotenv_value(value)
+                                       for name, value in changed.items()})
+        return {'changed': _readable(changed), 'stale': _stale(config, self.runtime.config)}
+
+    def reload_config(self) -> dict:
+        """ 重新读 .env 并热重载。
+
+        override=True：面板上改的就是最终值。跟启动时的「真实环境变量优先」相反，
+        但只能这样——不然在面板上改了不生效。
+        """
+        before = self.runtime.config
+        load_dotenv(self.dotenv, override=True)
+        config = Config.from_env()
+        changed = {f.name: getattr(config, f.name) for f in dataclass_fields(Config)
+                   if getattr(config, f.name) != getattr(before, f.name)
+                   and f.name not in SECRET_FIELDS}
+        stale = self.runtime.apply(config)
+        logger.warning(f'管理后台热重载：改了 {_readable(changed) or "（无）"}；'
+                       f'需要重启进程的：{stale or "（无）"}')
+        return {'changed': _readable(changed), 'stale': stale}
+
+    def restart(self) -> dict:
+        """ 整进程重启。先把要停的停掉，再从循环退出后的回调里 execv。 """
+        self.runtime.restart_process()
+        return {'restarting': True}
+
     # ---------- HTTP ----------
 
     def handle_get(self, handler: BaseHTTPRequestHandler) -> None:
@@ -303,6 +441,8 @@ class Admin:
                 return self._json(handler, {'lines': self.log_tail(tail, only)})
             if route.startswith('/api/trace/'):
                 return self._json(handler, self.trace(unquote(route[len('/api/trace/'):])))
+            if route == '/api/config':
+                return self._json(handler, self.read_config())
             self._json(handler, {'error': 'not found'}, 404)
         except Exception as e:  # noqa: BLE001 —— 后台出错不能冒泡到 bot
             logger.warning(f'管理后台 GET {route} 出错: {e}')
@@ -328,6 +468,12 @@ class Admin:
             if route == '/api/mute':
                 return self._json(handler, self.set_mute(payload.get('chat', ''),
                                                          bool(payload.get('on'))))
+            if route == '/api/config':
+                return self._json(handler, self.write_config(payload.get('updates') or {}))
+            if route == '/api/reload':
+                return self._json(handler, self.reload_config())
+            if route == '/api/restart':
+                return self._json(handler, self.restart())
             self._json(handler, {'error': 'not found'}, 404)
         except ValueError as e:
             self._json(handler, {'error': str(e)}, 400)
@@ -408,7 +554,7 @@ def _self_check() -> None:
 
     runtime = types.SimpleNamespace(
         loop=None, media_cache=None,
-        config=types.SimpleNamespace(log_path='/no/such/bot.log', trace_path='/no/such/trace.jsonl'),
+        config=Config(log_path='/no/such/bot.log', trace_path='/no/such/trace.jsonl'),
         focus=FakeFocus(), backoff=FakeBackoff(), emojis=FakeEmojis(), memories=FakeMemories(),
         bot=types.SimpleNamespace(
             dry_run=False, typo_rate=0.08, reply_count=3, emoji_count=1, typo_count=0,
@@ -489,10 +635,59 @@ def _self_check() -> None:
     state = admin.state()
     assert state['nickname'] == 'Bot' and state['dry_run'] is False and state['seq'] > 0
 
-    # dataclass 字段自检：Config 里每个字段都得在 HOT 或 RESTART 里，不能漏
-    from config import Config
-    from runtime import HOT_FIELDS, RESTART_FIELDS
+    # 配置面板：每个 Config 字段都得在某个分组里，不能漏（新加配置忘了入面板会被抓）
+    grouped = {name for _, names in CONFIG_GROUPS for name in names}
+    ungrouped = [f.name for f in dataclass_fields(Config) if f.name not in grouped]
+    assert not ungrouped, f'这些配置字段没进面板分组: {ungrouped}'
 
+    flat = {item['name']: item for group in admin.read_config()['groups'] for item in group['items']}
+    assert flat['deepseek_key']['secret'] and flat['deepseek_key']['value'] == ''
+    assert flat['deepseek_key']['isset'] is False        # Config() 默认 key 是空
+    assert flat['typo_rate']['hot'] and not flat['relay_port']['hot']
+
+    # 写回 .env：先校验 → 原子写 → 保留注释 → 报出要重启的字段
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        admin.dotenv = Path(tmp) / '.env'
+        admin.dotenv.write_text('# 注释\nTYPO_RATE=0.08\n', encoding='utf-8')
+        out = admin.write_config({'typo_rate': '0', 'relay_port': '9999'})
+        assert out['changed'] == {'typo_rate': '0.0', 'relay_port': '9999'}, out
+        assert out['stale'] == ['relay_port'], out
+        written = admin.dotenv.read_text(encoding='utf-8')
+        assert '# 注释' in written and 'TYPO_RATE=0' in written and 'RELAY_PORT=9999' in written
+
+        # 坏值：一个字都不能写（否则下次启动直接起不来）
+        try:
+            admin.write_config({'typo_rate': 'abc'})
+            raise AssertionError('坏值应该被拒')
+        except ValueError as e:
+            assert 'typo_rate' in str(e), e
+        assert admin.dotenv.read_text(encoding='utf-8') == written
+
+        try:
+            admin.write_config({'没这个': '1'})
+            raise AssertionError('未知键应该被拒')
+        except ValueError:
+            pass
+
+        # 密钥留空 = 保持原值（不回显的东西就不该被覆盖）
+        assert admin.write_config({'deepseek_key': ''})['changed'] == {}
+        assert 'DEEPSEEK_KEY' not in admin.dotenv.read_text(encoding='utf-8')
+
+        # 布尔在 .env 里存 1/0
+        admin.write_config({'enable_focus': False})
+        assert 'ENABLE_FOCUS=0' in admin.dotenv.read_text(encoding='utf-8')
+
+        # 热重载：重读 .env 并交给 runtime.apply（真 apply 在 test_runtime.py 里测）
+        applied: list[Config] = []
+        runtime.apply = lambda cfg: (applied.append(cfg), [])[1]
+        admin.dotenv.write_text('TYPO_RATE=0.25\n', encoding='utf-8')
+        result = admin.reload_config()
+        assert applied and applied[0].typo_rate == 0.25, applied
+        assert result['changed']['typo_rate'] == '0.25', result
+
+    # dataclass 字段自检：Config 里每个字段都得在 HOT 或 RESTART 里，不能漏
     known = HOT_FIELDS | RESTART_FIELDS
     missing = [f.name for f in dataclass_fields(Config) if f.name not in known]
     assert not missing, f'这些配置字段没归类（热重载还是重启）: {missing}'

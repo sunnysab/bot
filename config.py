@@ -4,6 +4,9 @@ from pathlib import Path
 
 from persona import Persona
 
+# .env 就是配置的落盘位置（启动时读它，管理后台写它）
+DOTENV_PATH = Path(__file__).parent / '.env'
+
 
 def update_dotenv(path: str | Path, updates: dict[str, str]) -> None:
     """ 只改给定的键，其余行原样保留，原子替换。

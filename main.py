@@ -1,18 +1,16 @@
 """ 入口：读配置、起 Runtime、起管理后台、开收消息。 """
-
 import asyncio
-from pathlib import Path
 
 from dotenv import load_dotenv
 from loguru import logger
 
 from admin import Admin
-from config import Config
+from config import DOTENV_PATH, Config
 from runtime import Runtime
 
 
 def main():
-    load_dotenv(Path(__file__).parent / '.env')  # 先读 .env，已存在的环境变量优先
+    load_dotenv(DOTENV_PATH)  # 先读 .env，已存在的环境变量优先
     config = Config.from_env()
     logger.add(sink=config.log_path, level=config.log_level)
 

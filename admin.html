@@ -69,7 +69,14 @@
   .logline{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;white-space:pre-wrap;
            border-bottom:1px solid #f0f2f4;padding:3px 0;word-break:break-all}
   .logline.warn{background:#fffaf0} .logline.err{background:#fdf2f2}
-  .tabs{display:flex;gap:6px;margin-bottom:10px}
+  .tabs{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}
+  .cfg .cfg-row{display:flex;gap:8px;align-items:center;margin-bottom:5px;font-size:12px}
+  .cfg .cfg-row span{width:190px;color:var(--dim);flex:none;text-align:right}
+  .cfg .cfg-row input[type=text],.cfg .cfg-row input[type=number],.cfg .cfg-row input[type=password]{
+    flex:1;min-width:0;padding:3px 7px;border:1px solid var(--line);border-radius:6px}
+  .cfg .cfg-row input[type=checkbox]{width:16px;height:16px}
+  .cfg-actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+  .cfg textarea{width:100%;min-height:60px;padding:6px;border:1px solid var(--line);border-radius:6px;font:inherit}
 </style>
 </head>
 <body>
@@ -101,10 +108,12 @@
       <button data-tab="trace" class="on">这条消息</button>
       <button data-tab="health">健康</button>
       <button data-tab="log">日志</button>
+      <button data-tab="config">配置</button>
     </div>
     <div id="panel-trace"></div>
     <div id="panel-health" style="display:none"></div>
     <div id="panel-log" style="display:none"></div>
+    <div id="panel-config" style="display:none"></div>
   </div>
 </main>
 <script>
@@ -254,9 +263,61 @@ function pickedRow(){
   return el ? el.querySelector('.body').textContent : '';
 }
 
+const TABS = ['trace','health','log','config'];
+
+function cfgInput(item){
+  const label = esc(item.name) + (item.hot ? '' : ' ⚠');
+  if(item.type === 'bool')
+    return `<label class="cfg-row"><span>${label}</span>
+      <input type="checkbox" data-name="${item.name}" ${item.value ? 'checked' : ''}></label>`;
+  const val = item.secret ? '' : esc(item.value);
+  const ph = item.secret ? (item.isset ? '已设置（留空不变）' : '未设置') : '';
+  const type = item.secret ? 'password' : (item.type === 'str' ? 'text' : 'number');
+  const step = item.type === 'int' ? '1' : 'any';
+  const long = ['personality','reply_style','behavior_style','reply_styles'].includes(item.name);
+  const field = long
+    ? `<textarea data-name="${item.name}" placeholder="${ph}">${val}</textarea>`
+    : `<input type="${type}" step="${step}" data-name="${item.name}" value="${val}" placeholder="${ph}">`;
+  return `<label class="cfg-row" ${long ? 'style="align-items:flex-start"' : ''}><span>${label}</span>${field}</label>`;
+}
+
+async function config(){
+  const d = await get('/api/config');
+  $('#panel-config').innerHTML = d.groups.map(g =>
+      `<h3>${esc(g.group)}</h3><div class="cfg">${g.items.map(cfgInput).join('')}</div>`).join('')
+    + `<div class="cfg-actions">
+         <button onclick="saveConfig(false,false)">保存</button>
+         <button onclick="saveConfig(true,false)">保存并热重载</button>
+         <button onclick="saveConfig(true,true)">保存并重启进程</button>
+       </div>
+       <div class="detail" id="cfgmsg" style="margin-top:8px">带 �️ 的字段要重启进程才生效；清空一个框 = 回默认值。</div>`;
+}
+
+async function saveConfig(reload, restart){
+  const msg = t => { $('#cfgmsg').innerHTML = t; };
+  const updates = {};
+  document.querySelectorAll('#panel-config [data-name]').forEach(el => {
+    updates[el.dataset.name] = el.type === 'checkbox' ? el.checked : el.value;
+  });
+  const r = await post('/api/config', {updates});
+  if(r.error) return msg('保存失败：' + esc(r.error));
+  const changed = Object.entries(r.changed || {});
+  let text = changed.length ? '已写回 .env：' + changed.map(([k,v]) => `${k}=${esc(v)}`).join('，')
+                            : '没有改动';
+  if(r.stale.length) text += `<br>⚠ 要重启进程才生效：${esc(r.stale.join('，'))}`;
+  msg(text);
+  if(restart){ msg(text + '<br>正在重启进程…'); await post('/api/restart', {}); return; }
+  if(reload){
+    const g = await post('/api/reload', {});
+    if(g.error) return msg(text + '<br>热重载失败：' + esc(g.error));
+    msg(text + `<br>已热重载；生效的改动：${esc(JSON.stringify(g.changed))}`);
+    state();
+  }
+}
+
 async function showPanel(){
   if(!tab) return;
-  for(const t of ['trace','health','log']) $('#panel-'+t).style.display = t===tab ? '' : 'none';
+  for(const t of TABS) $('#panel-'+t).style.display = t===tab ? '' : 'none';
   document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab===tab));
   if(tab==='trace'){
     if(!selected){ $('#panel-trace').innerHTML = '<div class="empty">点一条消息看它为什么被跳过</div>'; return; }
@@ -279,7 +340,8 @@ async function showPanel(){
     }
     $('#panel-trace').innerHTML = html;
   } else if(tab==='health') await health();
-  else await logs();
+  else if(tab==='log') await logs();
+  else if(tab==='config') await config();
 }
 
 $('#drybtn').onclick = async () => {
