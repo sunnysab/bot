@@ -1,7 +1,7 @@
-""" 微信媒体消息（图片 / 表情）XML 载荷解析。
+""" 微信消息 XML 载荷解析：图片 / 表情 / 位置 / 引用 / 链接 / 文件 / 小程序。
 
 表情消息（msg_type=47）的 desc 属性是 base64 编码的 protobuf，结构为 { locale: 描述 }，
-locale 形如 zh_cn / zh_tw / default。实测能解出「摊倒」「啧啧」「哇」这类中文含义，无需调模型。
+实测能解出「摊倒」「啧啧」「哇」这类中文含义，无需调模型。
 拿不到 desc 的表情（以及所有图片）只能靠 vision 描述，见 describer.py。
 """
 
@@ -29,15 +29,21 @@ class Media:
         return not self.description and bool(self.md5)
 
 
-def _strip_prefix(content: str) -> str:
+def strip_prefix(content: str) -> str:
     """ relay 有时在 XML 前拼一行 'wxid_xxx:'，截到第一个 '<'。 """
     start = content.find('<')
     return content[start:] if start > 0 else content
 
 
-def _attr(xml: str, name: str) -> str:
+def attr(xml: str, name: str) -> str:
     m = re.search(rf'{name}\s*=\s*"(.*?)"', xml)
     return m.group(1) if m else ''
+
+
+def tag(xml: str, name: str) -> str:
+    """ 取第一个 <name>...</name> 的文本（appmsg 顶层字段在前，refermsg 在后）。 """
+    m = re.search(rf'<{name}[^>]*>(.*?)</{name}>', xml, re.S)
+    return m.group(1).strip() if m else ''
 
 
 def _varint(buf: bytes, i: int) -> tuple[int, int]:
@@ -56,8 +62,8 @@ def _pb_fields(buf: bytes) -> list[bytes]:
     fields: list[bytes] = []
     i = 0
     while i < len(buf):
-        tag, i = _varint(buf, i)
-        wire = tag & 7
+        tag_, i = _varint(buf, i)
+        wire = tag_ & 7
         if wire == 2:
             length, i = _varint(buf, i)
             fields.append(buf[i:i + length])
@@ -73,7 +79,7 @@ def parse_emoji_description(content: str) -> str | None:
     """ 取表情消息的中文描述，如 '摊倒'。取不到返回 None。 """
     if '<emoji' not in content:
         return None
-    desc = _attr(_strip_prefix(content), 'desc')
+    desc = attr(strip_prefix(content), 'desc')
     if not desc:
         return None
     try:
@@ -89,10 +95,67 @@ def parse_emoji_description(content: str) -> str | None:
 def parse_media(content: str) -> Media | None:
     """ 解析图片 / 表情消息的 XML 载荷。非媒体消息返回 None。 """
     if '<emoji' in content:
-        return Media('emoji', _attr(_strip_prefix(content), 'md5'), parse_emoji_description(content))
+        return Media('emoji', attr(strip_prefix(content), 'md5'), parse_emoji_description(content))
     if '<img' in content:
-        return Media('image', _attr(_strip_prefix(content), 'md5'))
+        return Media('image', attr(strip_prefix(content), 'md5'))
     return None
+
+
+def parse_location(content: str) -> str:
+    """ 位置消息 → '[位置：海淀区京新高速]'。 """
+    xml = strip_prefix(content)
+    label = attr(xml, 'label') or attr(xml, 'poiname') or attr(xml, 'poiCategoryTips')
+    return f'[位置：{label}]' if label else '[位置]'
+
+
+def parse_appmsg(content: str) -> str:
+    """ appmsg（msg_type=49）→ 引用 / 链接 / 文件 / 小程序 的可读文本。
+
+    历史上这里只处理引用(type=57)，遇到链接会把原始 XML 漏进历史，故统一收敛到此处。
+    """
+    from message import parse_reference_message  # message.py 是叶子模块，无循环
+
+    xml = strip_prefix(content)
+    appmsg_type = tag(xml, 'type')
+    title = tag(xml, 'title')
+    if appmsg_type == '57':
+        try:
+            parsed = parse_reference_message(content)
+            return parsed['content'] + f'（引用前文的消息：{parsed["referred_message"]}）'
+        except Exception:
+            return '[引用消息]'
+    if appmsg_type == '6':
+        return f'[文件] {title}' if title else '[文件]'
+    if appmsg_type in ('33', '36'):
+        return f'[小程序] {title}' if title else '[小程序]'
+    label = tag(xml, 'appname') or '链接'
+    return f'[{label}] {title}' if title else '[分享消息]'
+
+
+def render(msg_type: int, content: str, text: str) -> tuple[str, Media | None]:
+    """ 把一条消息渲染成历史记录文本（+ 可选媒体描述）。
+
+    统一 live 与 history 两条路径的载荷处理，避免一边丢弃一边漏 XML。
+    """
+    from context import MessageKind
+
+    kind = MessageKind.of(msg_type)
+    if kind is MessageKind.TEXT:
+        return text, None
+    if kind is MessageKind.APPMSG:
+        return parse_appmsg(content), None
+    if kind in (MessageKind.IMAGE, MessageKind.EMOJI):
+        media = parse_media(content)
+        if media:
+            return media.placeholder, media
+        return ('[图片]' if kind is MessageKind.IMAGE else '[表情]'), None
+    if kind is MessageKind.LOCATION:
+        return parse_location(content), None
+    if kind is MessageKind.VIDEO:
+        return '[视频]', None
+    if kind is MessageKind.VOICE:
+        return '[语音]', None
+    return '', None
 
 
 if __name__ == '__main__':
@@ -106,7 +169,6 @@ if __name__ == '__main__':
     assert parse_emoji_description('not xml') is None
     assert parse_emoji_description('<msg><img md5="abc" /></msg>') is None
 
-    # parse_media：图片、带/不带 desc 的表情、非媒体
     image = parse_media('wxid_x:\n<msg><img md5="f9bfba97" /></msg>')
     assert image == Media('image', 'f9bfba97') and image.placeholder == '[图片]', image
     assert image.needs_description
@@ -116,5 +178,22 @@ if __name__ == '__main__':
     blank = parse_media('<msg><emoji md5="m" desc="" /></msg>')
     assert blank.placeholder == '[表情]' and blank.needs_description, blank
     assert parse_media('hello world') is None
-    assert parse_media('<msg><img /></msg>').needs_description is False  # 没有 md5 就无法缓存，不描述
+    assert parse_media('<msg><img /></msg>').needs_description is False
+
+    # 位置 / 视频 / 语音 / 链接 / 文件 / 引用
+    assert parse_location('<msg><location label="海淀区京新高速" poiname="海淀·上郡" /></msg>') == '[位置：海淀区京新高速]'
+    assert parse_location('<msg><location /></msg>') == '[位置]'
+    assert parse_appmsg('<msg><appmsg><title>一篇文章</title><type>5</type><appname>某公众号</appname></appmsg></msg>') \
+        == '[某公众号] 一篇文章'
+    assert parse_appmsg('<msg><appmsg><title>报告.pdf</title><type>6</type></appmsg></msg>') == '[文件] 报告.pdf'
+    assert parse_appmsg('<msg><appmsg><title>小程序名</title><type>33</type></appmsg></msg>') == '[小程序] 小程序名'
+    quote = ('<msg><appmsg><title>回复内容</title><type>57</type><fromusername>wxid_me</fromusername>'
+             '<refermsg><type>49</type><chatusr>wxid_alice</chatusr>'
+             '<content>&lt;msg&gt;&lt;appmsg&gt;&lt;title&gt;被引用的内容&lt;/title&gt;'
+             '&lt;/appmsg&gt;&lt;/msg&gt;</content></refermsg></appmsg></msg>')
+    assert parse_appmsg(quote) == '回复内容（引用前文的消息：被引用的内容）', parse_appmsg(quote)
+    assert render(34, '', '') == ('[语音]', None)
+    assert render(43, '', '') == ('[视频]', None)
+    assert render(1, 'ignored', '你好') == ('你好', None)
+    assert render(2, 'x', 'x') == ('', None)
     print('ok')

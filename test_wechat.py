@@ -59,12 +59,9 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
     async def _collect(self, msg):
         self.dispatched.append(msg)
 
-    async def test_dispatch_quote_rewrites_content(self):
+    async def test_dispatch_forwards_appmsg(self):
         await self.wechat._dispatch(make_message(msg_type=49, content=QUOTE_XML, clean_text=QUOTE_XML))
         self.assertEqual(len(self.dispatched), 1)
-        msg = self.dispatched[0]
-        self.assertEqual(msg.content, '回复内容（引用前文的消息：被引用的内容）')
-        self.assertEqual(msg.text, msg.content)
 
     async def test_dispatch_ignores_unknown_type(self):
         await self.wechat._dispatch(make_message(msg_type=10000))

@@ -18,10 +18,15 @@ class MessageKind(IntEnum):
     OTHER = 0
     TEXT = 1
     IMAGE = 3
+    VOICE = 34
     FRIEND_REQUEST = 37
+    VIDEO = 43
     EMOJI = 47
-    QUOTE = 49
+    LOCATION = 48
+    APPMSG = 49  # 链接 / 引用 / 文件 / 小程序
+    HANDOFF = 51  # HandOffMaster 设备同步
     SYSTEM = 10000
+    SYS_RECOMMEND = 10002  # 表情推荐等系统消息
 
     @classmethod
     def of(cls, msg_type: int) -> MessageKind:
@@ -31,11 +36,28 @@ class MessageKind(IntEnum):
             return cls.OTHER
 
 
+# 不应进入业务逻辑的消息类型（系统 / 同步类）
+SYSTEM_KINDS = frozenset({MessageKind.FRIEND_REQUEST, MessageKind.HANDOFF,
+                          MessageKind.SYSTEM, MessageKind.SYS_RECOMMEND})
+
+
+def _human_delta(seconds: float) -> str:
+    """ 把秒差转成人话，供 transcript 展示时间远近。 """
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return '刚刚'
+    if seconds < 3600:
+        return f'{seconds // 60}分钟前'
+    if seconds < 86400:
+        return f'{seconds // 3600}小时前'
+    return f'{seconds // 86400}天前'
+
+
 class SingleRecord:
     """ 单条记录 """
 
     def __init__(self, sender: str, text: str, t: int, media: Media | None = None,
-                 download: Callable[[], Awaitable[bytes]] | None = None):
+                 download: Callable[[], Awaitable[bytes]] | None = None, is_self: bool = False):
         """ 维护单个会话中的记录.
 
         :param sender: 发送者的群昵称或者联系人昵称
@@ -43,12 +65,14 @@ class SingleRecord:
         :param t: 时间戳（精确到秒，来源于微信消息中的 CreateTime 参数以及 WxMsg 的 ts 字段）
         :param media: 媒体描述（图片/表情），可为 None
         :param download: 媒体下载入口，供 describer 后台识图；描述就绪后原地回写 text
+        :param is_self: 是否为机器人自己发的消息，transcript 里标记为「我」
         """
         self.sender = sender
         self.text = text
         self.t = t
         self.media = media
         self.download = download
+        self.is_self = is_self
 
     def __str__(self):
         text = self.text.replace('\n', ' ')
@@ -79,7 +103,7 @@ class ChatWindow:
         self._history = history[:max_history]
 
     def append(self, sender: str, text: str, t: int = 0, media: Media | None = None,
-               download: Callable[[], Awaitable[bytes]] | None = None) -> SingleRecord:
+               download: Callable[[], Awaitable[bytes]] | None = None, is_self: bool = False) -> SingleRecord:
         """ 添加消息
 
         :param sender: 发送者的昵称
@@ -87,10 +111,11 @@ class ChatWindow:
         :param t: 时间戳
         :param media: 图片/表情描述
         :param download: 媒体下载入口
+        :param is_self: 是否为机器人自己发的消息
         """
         if len(self._history) >= self.max_history:
             self._history.pop(0)
-        record = SingleRecord(sender, text, t, media, download)
+        record = SingleRecord(sender, text, t, media, download, is_self)
         self._history.append(record)
         return record
 
@@ -117,7 +142,20 @@ class ChatWindow:
         return ChatWindow(self._history[-n:], max_history=n)
 
     def __str__(self):
-        return '\n'.join([str(x) for x in self._history])
+        """ 渲染给模型看的 transcript。
+
+        带相对时间（相对最后一条）和「我」标记：模型据此判断消息远近、以及自己说过什么。
+        """
+        if not self._history:
+            return ''
+        newest = max(r.t for r in self._history)
+        lines = []
+        for record in self._history:
+            who = '我' if record.is_self else record.sender
+            body = record.text.replace('\n', ' ')
+            prefix = f'[{_human_delta(newest - record.t)}] ' if record.t else ''
+            lines.append(f'{prefix}{who}: {body}')
+        return '\n'.join(lines)
 
     def __len__(self):
         return len(self._history)
@@ -142,7 +180,8 @@ class ContextManager:
         return self._contexts[key]
 
     def push_message(self, contact: str, sender: str, text: str, t: int, media: Media | None = None,
-                     download: Callable[[], Awaitable[bytes]] | None = None) -> SingleRecord:
+                     download: Callable[[], Awaitable[bytes]] | None = None,
+                     is_self: bool = False) -> SingleRecord:
         """ 存储消息
 
         :param contact: 联系人或群聊的 wxid
@@ -151,9 +190,10 @@ class ContextManager:
         :param t: 时间戳（精确到秒，来源于微信消息中的 CreateTime 参数以及 WxMsg 的 ts 字段）
         :param media: 图片/表情描述
         :param download: 媒体下载入口
+        :param is_self: 是否为机器人自己发的消息
         :return: 新插入的记录对象，可后续原地更新（如媒体描述就绪后回写）
         """
-        return self.get_context(contact).append(sender, text, t, media, download)
+        return self.get_context(contact).append(sender, text, t, media, download, is_self)
 
 
 @dataclass(slots=True)
@@ -185,9 +225,25 @@ if __name__ == '__main__':
     # 自检：已知类型映射到语义，未知类型落到 OTHER
     assert MessageKind.of(1) is MessageKind.TEXT
     assert MessageKind.of(3) is MessageKind.IMAGE
+    assert MessageKind.of(34) is MessageKind.VOICE
+    assert MessageKind.of(43) is MessageKind.VIDEO
     assert MessageKind.of(47) is MessageKind.EMOJI
-    assert MessageKind.of(49) is MessageKind.QUOTE
+    assert MessageKind.of(48) is MessageKind.LOCATION
+    assert MessageKind.of(49) is MessageKind.APPMSG
     assert MessageKind.of(10000) is MessageKind.SYSTEM
     assert MessageKind.of(2) is MessageKind.OTHER
     assert MessageKind.of(-1) is MessageKind.OTHER
+    assert MessageKind.HANDOFF in SYSTEM_KINDS
+
+    # 自检：transcript 带相对时间和「我」标记
+    window = ChatWindow()
+    window.append('张三', '在吗', 1000)
+    window.append('Bot', '在', 1060, is_self=True)
+    window.append('张三', '帮我看看', 4600)
+    assert str(window) == '[1小时前] 张三: 在吗\n[59分钟前] 我: 在\n[刚刚] 张三: 帮我看看', repr(str(window))
+
+    assert _human_delta(30) == '刚刚'
+    assert _human_delta(120) == '2分钟前'
+    assert _human_delta(7200) == '2小时前'
+    assert _human_delta(172800) == '2天前'
     print('ok')

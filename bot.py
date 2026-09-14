@@ -7,7 +7,7 @@ from loguru import logger
 
 from context import ChatWindow, ContextManager, MessageContext, MessageKind
 from describer import MediaDescriber
-from media import Media, parse_media
+from media import parse_media, render
 from outbound import Outbound, OutboundQueue
 from plugin import Plugin, PluginManager, Reply
 from wechat import Message, Wechat
@@ -29,13 +29,13 @@ class Preprocessor:
         pass
 
 
-class MediaProcessor(Preprocessor):
-    """ 把图片/表情消息的正文替换为文字标记；缺描述的媒体由 describer 在后台补上。 """
+class PayloadProcessor(Preprocessor):
+    """ 把非文本消息的正文替换成可读标记：图片/表情/位置/视频/语音/链接/文件/引用。 """
 
-    async def process(self, msg: Message, media: Media | None = None, **ctx) -> Message:
-        media = media or parse_media(msg.content)
-        if media:
-            msg.content = msg.clean_text = media.placeholder
+    async def process(self, msg: Message, **ctx) -> Message:
+        text, _ = render(msg.msg_type, msg.content, msg.text)
+        if text:
+            msg.content = msg.clean_text = text
         return msg
 
 
@@ -145,7 +145,7 @@ class Bot:
     async def _deliver(self, item: Outbound) -> None:
         """ 真正发送并写入上下文，由 OutboundQueue 串行调用。 """
         await self._wechat.send_text(item.text, item.receiver)
-        self._history.push_message(item.receiver, item.sender, item.text, int(time.time()))
+        self._history.push_message(item.receiver, item.sender, item.text, int(time.time()), is_self=True)
 
     async def _preprocess(self, msg: Message, **ctx) -> Message | None:
         """ 依次跑预处理器。任一预处理器返回空则放弃这条消息。 """

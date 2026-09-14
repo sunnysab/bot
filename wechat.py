@@ -4,9 +4,8 @@ from typing import Any
 from loguru import logger
 from weixin_bot import Message, WeChatBot
 
-from context import ChatWindow, MessageKind
-from media import parse_media
-from message import parse_reference_message
+from context import SYSTEM_KINDS, ChatWindow, MessageKind
+from media import render
 
 
 class Wechat:
@@ -51,28 +50,16 @@ class Wechat:
         logger.info(f'Hello, {self.nickname}! ({len(self.all_contacts)} contacts)')
 
     async def _dispatch(self, msg: Message) -> None:
-        """ 分发消息到回调函数 """
+        """ 分发消息到回调函数。载荷渲染统一交给上层 PayloadProcessor。 """
         logger.debug(msg)
 
         kind = MessageKind.of(msg.msg_type)
-        if kind is MessageKind.QUOTE:  # 引用消息：先把被引用的正文拼进 content
-            self._process_reference(msg)
-        if kind in (MessageKind.FRIEND_REQUEST, MessageKind.SYSTEM):  # 好友请求 / 系统信息
+        if kind in SYSTEM_KINDS:  # 好友请求 / 设备同步 / 系统消息
             return
         if kind is MessageKind.OTHER:
             logger.warning(f'Unknown message type: {msg.msg_type}')
             return
         await self._message_callback(msg)
-
-    @staticmethod
-    def _process_reference(msg: Message) -> None:
-        """ 解析引用消息，把被引用的正文拼进 content """
-        try:
-            parsed = parse_reference_message(msg.content)
-            text = parsed['content'] + f'（引用前文的消息：{parsed["referred_message"]}）'
-            msg.content = msg.clean_text = text
-        except Exception as e:
-            logger.error(f'parsing reference message: {e}')
 
     @staticmethod
     async def _on_message(msg: Message) -> None:
@@ -143,25 +130,13 @@ class Wechat:
 
         result = ChatWindow()
         for msg in messages:
-            kind = MessageKind.of(msg.msg_type)
-            content = ''
-            media = None
-            if kind is MessageKind.TEXT:  # 纯文本消息
-                content = msg.text
-            elif kind is MessageKind.QUOTE:  # 引用消息
-                try:
-                    parsed = parse_reference_message(msg.content)
-                    content = parsed['content'] + f'（引用前文的消息：{parsed["referred_message"]}）'
-                except Exception:
-                    continue
-            elif kind in (MessageKind.IMAGE, MessageKind.EMOJI):  # 图片 / 表情
-                media = parse_media(msg.content)
-                content = media.placeholder if media else ('[图片]' if kind is MessageKind.IMAGE else '[表情]')
-
+            content, media = render(msg.msg_type, msg.content, msg.text)
             # 不知道为什么有的消息还是 xml 格式的，这里直接过滤掉吧
-            if content and not content.startswith('<'):
-                download = msg.get_media_bytes if (media and media.needs_description) else None
-                result.append(msg.sender_name, content, msg.create_time, media=media, download=download)
+            if not content or content.startswith('<'):
+                continue
+            download = msg.get_media_bytes if (media and media.needs_description) else None
+            result.append(msg.sender_name, content, msg.create_time, media=media, download=download,
+                          is_self=msg.is_self)
 
         result.sort()
         return result

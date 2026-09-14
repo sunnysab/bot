@@ -4,7 +4,7 @@ import asyncio
 import types
 import unittest
 
-from bot import Bot, MediaProcessor
+from bot import Bot, PayloadProcessor
 from context import ChatWindow
 from media import Media
 from plugin import EndProcessing, Plugin, Reply
@@ -36,7 +36,7 @@ class FakePlugin(Plugin):
 
 
 def make_msg(text='hello', is_self=False, msg_type=1):
-    return types.SimpleNamespace(msg_type=msg_type, content=text, clean_text=text, is_self=is_self,
+    return types.SimpleNamespace(msg_type=msg_type, content=text, clean_text=text, text=text, is_self=is_self,
                                  reply_target='456@chatroom', sender_name='Alice', create_time=100,
                                  is_chatroom=True, is_at_me=True)
 
@@ -121,24 +121,39 @@ class TestHistoryMediaScheduling(unittest.IsolatedAsyncioTestCase):
         self.bot._schedule_history_media(window)  # 不报错即可
 
 
-class TestMediaProcessor(unittest.IsolatedAsyncioTestCase):
+class TestPayloadProcessor(unittest.IsolatedAsyncioTestCase):
     async def test_image_becomes_marker(self):
         msg = make_msg(msg_type=3)
         msg.content = msg.clean_text = '<?xml version="1.0"?><msg><img md5="abc" /></msg>'
-        out = await MediaProcessor().process(msg)
+        out = await PayloadProcessor().process(msg)
         self.assertEqual(out.content, '[图片]')
 
     async def test_emoji_keeps_description(self):
         msg = make_msg(msg_type=47)
         msg.content = msg.clean_text = '<msg><emoji desc="ChEKB2RlZmF1bHQSBuWVp+WVpw==" /></msg>'
-        out = await MediaProcessor().process(msg)
+        out = await PayloadProcessor().process(msg)
         self.assertEqual(out.content, '[表情：啧啧]')
 
     async def test_emoji_without_description_falls_back(self):
         msg = make_msg(msg_type=47)
         msg.content = msg.clean_text = '<msg><emoji desc="" /></msg>'
-        out = await MediaProcessor().process(msg)
+        out = await PayloadProcessor().process(msg)
         self.assertEqual(out.content, '[表情]')
+
+    async def test_link_does_not_leak_xml(self):
+        msg = make_msg(msg_type=49)
+        msg.content = msg.clean_text = ('<msg><appmsg><title>一篇文章</title><type>5</type>'
+                                        '<appname>某公众号</appname></appmsg></msg>')
+        out = await PayloadProcessor().process(msg)
+        self.assertEqual(out.content, '[某公众号] 一篇文章')
+
+    async def test_location_and_video(self):
+        msg = make_msg(msg_type=48)
+        msg.content = msg.clean_text = '<msg><location label="海淀区京新高速" /></msg>'
+        self.assertEqual((await PayloadProcessor().process(msg)).content, '[位置：海淀区京新高速]')
+        video = make_msg(msg_type=43)
+        video.content = video.clean_text = '<msg><videomsg /></msg>'
+        self.assertEqual((await PayloadProcessor().process(video)).content, '[视频]')
 
 
 if __name__ == '__main__':

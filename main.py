@@ -3,7 +3,7 @@ import asyncio
 from loguru import logger
 
 from ai import Deepseek
-from bot import Bot, MediaProcessor
+from bot import Bot, PayloadProcessor
 from config import Config
 from describer import MediaCache, MediaDescriber
 from plugin import ChatPlugin, EndProcessing, RepeatPlugin
@@ -29,7 +29,7 @@ def main():
               describe_history_limit=config.describe_history_limit)
 
     # 初始化预处理器和插件
-    bot.add_preprocessor(MediaProcessor())
+    bot.add_preprocessor(PayloadProcessor())
 
     repeater = RepeatPlugin()
     chat_plugin = ChatPlugin(ai_provider, context_length=30)
