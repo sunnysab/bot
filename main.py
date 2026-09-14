@@ -4,6 +4,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from loguru import logger
 
+from admin import start as start_admin
 from ai import Deepseek, OpenAI
 from bot import Bot
 from config import Config
@@ -41,9 +42,12 @@ def main():
         logger.info(f'Planner 使用本地模型: {config.planner_url} / {config.planner_model} '
                     f'(thinking={config.planner_thinking}, json_schema={config.planner_json_schema})')
 
+    # media_cache 建一份：识图往里写，管理后台从里读（md5 -> 描述）
+    media_cache = MediaCache(config.media_cache_path)
+
     describer = None
     if config.describe_media:
-        describer = MediaDescriber(ai_provider, MediaCache(config.media_cache_path),
+        describer = MediaDescriber(ai_provider, media_cache,
                                    model=config.deepseek_model, concurrency=config.describe_concurrency,
                                    timeout=config.describe_timeout, max_tokens=config.describe_max_tokens)
 
@@ -64,7 +68,10 @@ def main():
               describe_history_limit=config.describe_history_limit,
               keeper=MomentKeeper(ai_provider, memory_store, batch=config.moment_batch),
               emojis=emojis, emoji_path=config.emoji_path,
-              emoji_describer=emoji_describer, typo_rate=config.typo_rate)
+              emoji_describer=emoji_describer, typo_rate=config.typo_rate,
+              dry_run=config.dry_run)
+    if config.dry_run:
+        logger.warning('演习模式：全链路照跑，但不真的发消息（DRY_RUN=1 关掉）')
     if emoji_describer:
         emoji_describer.on_update = bot.save_emojis
 
@@ -109,9 +116,13 @@ def main():
     bot.register_ready(lambda _bot: bot.load_context())
 
     async def run():
+        panel = start_admin(bot, bot.wechat, media_cache, asyncio.get_running_loop(),
+                            port=config.admin_port) if config.admin_port else None
         try:
             await bot.start()
         finally:
+            if panel:
+                panel.stop()
             await bot.stop()
 
     # 开始接收消息

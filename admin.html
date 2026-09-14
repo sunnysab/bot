@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>bot 管理后台</title>
+<style>
+  :root{
+    --bg:#f5f6f8; --panel:#fff; --line:#e3e6ea; --fg:#1c1f23; --dim:#8b939c;
+    --pending:#9aa4af; --replied:#2f9e6b; --skipped:#d9a825; --warn:#e08a2b;
+    --failed:#d9534f; --phone:#4a86c8; --dry:#9b6dd6;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+       color:var(--fg);background:var(--bg);height:100vh;display:flex;flex-direction:column}
+  header{padding:8px 14px;background:var(--panel);border-bottom:1px solid var(--line);
+         display:flex;gap:16px;align-items:center;font-size:13px;flex-wrap:wrap}
+  header b{font-weight:600}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--replied);display:inline-block;margin-right:5px}
+  .dry-badge{background:var(--dry);color:#fff;padding:1px 8px;border-radius:10px;font-size:12px;display:none}
+  main{flex:1;display:flex;min-height:0}
+  aside{width:240px;background:var(--panel);border-right:1px solid var(--line);overflow:auto;flex:none}
+  .chat{padding:9px 12px;border-bottom:1px solid var(--line);cursor:pointer}
+  .chat:hover{background:#f0f3f6}
+  .chat.on{background:#e8f1fb;box-shadow:inset 3px 0 0 #4a86c8}
+  .chat .n{font-weight:600;display:flex;justify-content:space-between;gap:6px}
+  .chat .n span{color:var(--dim);font-weight:400;font-size:12px}
+  .chat .l{color:var(--dim);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  section{flex:1;overflow:auto;padding:14px 18px;min-width:0}
+  .row{display:flex;margin-bottom:12px}
+  .row.out{justify-content:flex-end}
+  .bubble{max-width:min(680px,78%);background:var(--panel);border:1px solid var(--line);
+          border-radius:10px;padding:7px 11px;position:relative}
+  .row.out .bubble{background:#e7f3ff;border-color:#cfe4f7}
+  .who{font-size:12px;color:var(--dim);margin-bottom:2px}
+  .body{white-space:pre-wrap;word-break:break-word}
+  .meta{margin-top:5px;font-size:12px;color:var(--dim);display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .chip{padding:0 7px;border-radius:9px;font-size:11px;color:#fff;background:var(--pending);white-space:nowrap}
+  .chip.replied{background:var(--replied)} .chip.skipped{background:var(--skipped)}
+  .chip.warn{background:var(--warn)} .chip.failed{background:var(--failed)}
+  .chip.phone{background:var(--phone)} .chip.dry_run{background:var(--dry)}
+  .detail{font-size:11px;color:var(--dim)}
+  .spin{display:inline-block;animation:sp 1s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .empty{color:var(--dim);text-align:center;margin-top:60px}
+  .dry-text{color:var(--dry);font-style:italic}
+</style>
+</head>
+<body>
+<header>
+  <b id="who">…</b>
+  <span><span class="dot"></span><span id="conn">relay</span></span>
+  <span id="counts"></span>
+  <span class="dry-badge" id="dry">演习模式</span>
+  <span style="margin-left:auto;color:var(--dim)" id="seq"></span>
+</header>
+<main>
+  <aside id="chats"></aside>
+  <section id="stream"><div class="empty">左边选一个会话</div></section>
+</main>
+<script>
+const LABEL = {
+  received:'已接收', stale:'积压·只记不回', phone:'手机发的', muted:'已静音',
+  unsupported:'类型不处理', gated:'跳过·门控', backoff:'跳过·退避',
+  deciding:'决策中', planner_silent:'不发言', planner_failed:'决策调用失败',
+  expressing:'生成回复中', express_failed:'表达失败', empty_reply:'回复为空',
+  placeholder_blocked:'占位符已拦', queued:'已排队', typing:'输入中',
+  sent:'已回复', dry_run:'演习回复', failed:'发送报错'
+};
+const GROUP = {
+  received:'pending', deciding:'pending', expressing:'pending', queued:'pending', typing:'pending',
+  sent:'replied', phone:'phone', dry_run:'dry_run',
+  stale:'skipped', muted:'skipped', unsupported:'skipped', gated:'skipped', backoff:'skipped',
+  planner_silent:'skipped', empty_reply:'skipped', placeholder_blocked:'skipped',
+  planner_failed:'warn', express_failed:'failed', failed:'failed'
+};
+const SPIN = new Set(['deciding','expressing','queued','typing']);
+const $ = s => document.querySelector(s);
+const esc = s => (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const get = async u => (await fetch(u)).json();
+
+let since = 0, current = null, reloading = false;
+
+function chip(status, detail){
+  if(!status) return '';
+  const spin = SPIN.has(status) ? '<span class="spin">◌</span> ' : '';
+  return `<span class="chip ${GROUP[status]||''}">${spin}${LABEL[status]||status}</span>`
+       + (detail ? `<span class="detail">${esc(detail)}</span>` : '');
+}
+
+function row(r){
+  const m = r.reply_status ? `<div class="meta" data-reply="${r.msg_id}">${chip(r.reply_status, r.reply_detail)}</div>` : '';
+  const dry = r.dry_text ? `<div class="body dry-text">${esc(r.dry_text)}</div>` : '';
+  const t = new Date(r.ts*1000).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});
+  return `<div class="row ${r.outgoing?'out':''}" data-id="${r.msg_id}">
+    <div class="bubble">
+      <div class="who">${esc(r.sender)} · ${t}</div>
+      <div class="body">${esc(r.text)}</div>${dry}
+      <div class="meta" data-own="${r.msg_id}">${chip(r.status, r.status_detail)}</div>
+      ${m}
+    </div></div>`;
+}
+
+async function loadChats(){
+  const {chats} = await get('/api/chats');
+  $('#chats').innerHTML = chats.map(c =>
+    `<div class="chat ${c.chat_id===current?'on':''}" data-chat="${esc(c.chat_id)}">
+       <div class="n">${esc(c.name)}${c.is_group?' <span>群</span>':''}</div>
+       <div class="l">${esc(c.last)}</div></div>`).join('') || '<div class="empty">没有会话</div>';
+  document.querySelectorAll('.chat').forEach(el => el.onclick = () => {
+    current = el.dataset.chat; loadChats(); loadMessages();
+  });
+}
+
+async function loadMessages(){
+  if(!current) return;
+  reloading = true;
+  const {messages} = await get(`/api/messages?chat=${encodeURIComponent(current)}&limit=300`);
+  $('#stream').innerHTML = messages.length ? messages.map(row).join('')
+    : '<div class="empty">这个会话没有消息</div>';
+  $('#stream').scrollTop = $('#stream').scrollHeight;
+  reloading = false;
+}
+
+function patch(msgId, status, detail, target){
+  const el = document.querySelector(`[data-${target}="${CSS.escape(msgId)}"]`);
+  if(el) el.innerHTML = chip(status, detail);
+}
+
+async function poll(){
+  try{
+    const {seq, events} = await get(`/api/events?since=${since}`);
+    since = seq;
+    let stale = false;
+    for(const e of events){
+      // 出站事件靠 reply_to 挂在被回复的那条上（relay 要发出去才有出站的身份）
+      if(e.reply_to) patch(e.reply_to, e.status, e.detail, 'reply');
+      if(e.msg_id) patch(e.msg_id, e.status, e.detail, 'own');
+      if(e.chat_id === current && (e.status==='received' || e.status==='phone')) stale = true;
+    }
+    if(stale && !reloading) loadMessages();
+    $('#seq').textContent = '事件 #' + seq;
+  }catch(err){ $('#conn').textContent = '管理后台断开'; }
+}
+
+async function state(){
+  const s = await get('/api/state');
+  $('#who').textContent = (s.nickname||s.wxid||'?') + ' · bot';
+  $('#dry').style.display = s.dry_run ? 'inline' : 'none';
+  const g = s.groups||{};
+  $('#counts').textContent = Object.entries(g).map(([k,v]) => `${k} ${v}`).join(' · ');
+}
+
+(async function(){
+  await state(); await loadChats();
+  setInterval(poll, 1000);
+  setInterval(state, 5000);
+})();
+</script>
+</body>
+</html>

@@ -67,6 +67,10 @@ class Config:
     planner_json_schema: bool = False
     # 单次模型调用超时（秒），避免一次 API 抽风拖死消息处理链
     request_timeout: float = 60.0
+    # 管理后台（本地网页）：只绑 127.0.0.1，不做鉴权；设 0 就不起
+    admin_port: int = 8099
+    # 演习模式：全链路照跑（门控/决策/表达/状态都有），但不真发、自己的回复不进历史
+    dry_run: bool = False
     # 回复轨迹 JSONL（攒数据给以后做效果评估）
     trace_path: str = 'reply_trace.jsonl'
     log_path: str = 'bot.log'
@@ -98,4 +102,9 @@ if __name__ == '__main__':
     os.environ.update(ENABLE_FOCUS='0', TYPO_RATE='0')
     off = Config.from_env()
     assert not off.enable_focus and off.typo_rate == 0.0, off
+    # 管理后台端口和演习开关也能从环境变量调
+    assert base.admin_port == 8099 and base.dry_run is False, base
+    os.environ.update(ADMIN_PORT='0', DRY_RUN='1')
+    panel = Config.from_env()
+    assert panel.admin_port == 0 and panel.dry_run is True, panel
     print('ok')

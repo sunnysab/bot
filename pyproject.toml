@@ -24,6 +24,7 @@ dev = ["ruff"]
 [tool.setuptools]
 py-modules = [
     "ai",
+    "admin",
     "bot",
     "build_habits",
     "build_profiles",
@@ -31,6 +32,7 @@ py-modules = [
     "context",
     "describer",
     "emojis",
+    "events",
     "focus",
     "habits",
     "main",
