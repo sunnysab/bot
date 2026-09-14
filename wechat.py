@@ -1,3 +1,4 @@
+import base64
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -124,6 +125,23 @@ class Wechat:
         """ relay 的连接 / 登录状态。管理后台的健康卡用。 """
         return await self._bot.get_status()
 
+    async def media_bytes(self, msg: Message) -> bytes:
+        """ 取一条消息附件的原始字节。
+
+        **不走 SDK 的 `msg.get_media_bytes()`**：那条路走 PKT_DL_OPEN 分块流，
+        而 relay 的 DL_OPEN 分支按 `RelayRequest`（action + params）解包，SDK 只塞了
+        params，解不出就被 `unwrap_or_default()` 吞掉，最后报 400「缺少 msg_id」——
+        报错和真实原因（图片的 XML 里没有 cdnurl）完全无关，查半天。
+
+        这里走普通 RPC 的 `get_media_bytes`（形状是对的），拿 base64 再解回来，
+        失败时的报错就是 relay 的原始报错。
+        """
+        data = await self._bot.call('get_media_bytes', {'msg_id': msg.msg_id})
+        encoded = (data or {}).get('data_base64') if isinstance(data, dict) else None
+        if not encoded:
+            raise ValueError(f'relay 没返回附件内容（msg_id={msg.msg_id}）')
+        return base64.b64decode(encoded)
+
     async def messages(self, peer: str, limit: int = 300, exclude_system: bool = True):
         """ 管理后台用：某个会话的历史。
 
@@ -216,7 +234,7 @@ class Wechat:
             # 不知道为什么有的消息还是 xml 格式的，这里直接过滤掉吧
             if not content or content.startswith('<'):
                 continue
-            download = msg.get_media_bytes if (media and media.needs_description) else None
+            download = (lambda m=msg: self.media_bytes(m)) if (media and media.describable) else None
             result.append(msg.sender_name, content, msg.create_time, media=media, download=download,
                           is_self=msg.is_self)
 

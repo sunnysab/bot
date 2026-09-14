@@ -719,11 +719,24 @@ class ChatPlugin(Plugin):
 
     @staticmethod
     async def _build_message(ctx: MessageContext, transcript: str, image: bool = False) -> str | list:
-        """ 文本消息直接发送；图片消息把真实图片作为 content block 附在文本后（DeepSeek 原生识图）。 """
+        """ 文本消息直接发送；图片消息把真实图片作为 content block 附在文本后（DeepSeek 原生识图）。
+
+        图片拉不下来就退回纯文本：附件取不到是常事（这套 relay 下的图片 XML 里
+        根本没有可下载的 cdnurl，只有加密 fileid），它不该把整轮回复带崩——
+        更不该让用户看到一条和真实原因无关的报错。历史里本来就有 `[图片]` 占位符。
+        """
         if not image:
             return transcript
 
-        raw = await ctx.msg.get_media_bytes()
+        if ctx.download is None:
+            # 拿不到可下载的地址（图片的 XML 里只有加密 fileid）。不去试：
+            # 每次尝试都是一次注定失败的 RPC，历史里本来就有 `[图片]` 占位符
+            return transcript
+        try:
+            raw = await ctx.download()
+        except Exception as e:
+            logger.warning(f'取图片失败，这一轮只发文字（{ctx.contact}）: {e}')
+            return transcript
         if not raw:
             return transcript
 

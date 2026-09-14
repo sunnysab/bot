@@ -113,7 +113,9 @@ def sample_history():
 
 def make_ctx(msg, history=None):
     history = history if history is not None else sample_history()
-    return MessageContext(msg=msg, history=history, self_name='Bot', contact='测试群')
+    # 注入下载入口，跟 Bot 生产路径一致（插件不直接碰传输层）
+    return MessageContext(msg=msg, history=history, self_name='Bot', contact='测试群',
+                          download=getattr(msg, 'get_media_bytes', None))
 
 
 def history_with(others: int, now: float) -> ChatWindow:
@@ -324,6 +326,41 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         reply = await plugin.handle(make_ctx(make_msg(is_chatroom=False)))
         self.assertEqual(reply.texts, [])
         self.assertTrue(reply.stop)
+
+    async def test_image_fetch_failure_degrades_to_text(self):
+        """ 图片拉不下来不能把整轮回复带崩。
+
+        真实场景：这套 relay 下的图片 XML 里只有加密 fileid、没有 cdnurl，
+        下载永远失败。以前这个异常会一路冒到 SDK 的 dispatch，那一轮就没人回了。
+        """
+        ctx = make_ctx(make_msg(msg_type=3))
+
+        async def boom():
+            raise RuntimeError('下载附件失败: 消息 123 无 cdnurl')
+
+        ctx.download = boom
+        self.assertEqual(await ChatPlugin._build_message(ctx, '记录', image=True), '记录')
+
+    async def test_image_is_attached_when_download_works(self):
+        ctx = make_ctx(make_msg(msg_type=3))
+
+        async def ok():
+            return b'\xff\xd8\xff\xe0'
+
+        ctx.download = ok
+        out = await ChatPlugin._build_message(ctx, '记录', image=True)
+        self.assertIsInstance(out, list)
+        self.assertEqual(out[0], {'type': 'text', 'text': '记录'})
+        self.assertTrue(out[1]['image_url']['url'].startswith('data:image/jpeg;base64,'))
+
+    async def test_text_message_never_touches_the_downloader(self):
+        ctx = make_ctx(make_msg())
+
+        async def boom():
+            raise AssertionError('文本消息不该去下载附件')
+
+        ctx.download = boom
+        self.assertEqual(await ChatPlugin._build_message(ctx, '记录'), '记录')
 
     async def test_tracer_records_the_round(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -190,7 +190,18 @@ class OpenAI(AiProvider):
             ]}],
         )
         usage.add(response.usage, self.model)
-        text = (response.choices[0].message.content or '').strip()
+        choice = response.choices[0]
+        text = (choice.message.content or '').strip()
+        if not text:
+            # 与 chat() 一样回退到 reasoning（有些供应商把答案放那里）
+            text = ((choice.message.model_extra or {}).get('reasoning_content') or '').strip()
+        if not text:
+            # 不说清楚的话，调用方只看到「描述失败」。实测最常见的原因是**推理把生成预算吃完了**：
+            # thinking 模型要先想再答，finish_reason=length 时 content 就是空的，
+            # 而 completion_tokens 会全部算成 reasoning_tokens（识图 prompt 实测要 ~754）
+            logger.warning(f'识图没拿到内容（finish_reason={choice.finish_reason}，'
+                           f'max_tokens={max_tokens}）：thinking 模型的推理也算在生成预算里，'
+                           f'调大 DESCRIBE_MAX_TOKENS（实测 1024 够）；若一直如此再看模型是否支持图片')
         return text or None
 
     async def summarize(self, prompt: str, text: str, max_tokens: int = 400) -> str | None:

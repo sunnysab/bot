@@ -66,7 +66,14 @@ class Config:
     media_cache_path: str = 'media_cache.db'
     describe_concurrency: int = 2
     describe_timeout: float = 30.0
-    describe_max_tokens: int = 64
+    # 识图的生成上限（不是上下文）。**thinking 模型会先推理再回答，推理也算在这个上限里**——
+    # 实测（deepseek-v4.1-flash，识图 prompt + 9094 字节真表情图）：
+    #   64 → finish=length，reasoning=64，content 空
+    #   256/512 → 同理，预算多大就烧多大，一个字不吐
+    #   1024 → finish=stop，reasoning=754，拿到「兴奋|对方说有瓜…」
+    #   2048 → finish=stop，reasoning=1137（它想得更多，但答案一样）
+    # 给不思考的模型给大了也没代价（上限不是目标值），所以直接定 1024
+    describe_max_tokens: int = 1024
     describe_history_limit: int = 3
     # 群聊参与：必要性打分阈值（越高越沉默）与活跃度统计窗口
     reply_necessity_threshold: int = 60
@@ -154,6 +161,7 @@ if __name__ == '__main__':
     os.environ.update(BACKOFF_START_AFTER='3', BACKOFF_MAX_SECONDS='60')
     tuned = Config.from_env()
     assert tuned.backoff_start_after == 3 and tuned.backoff_max_seconds == 60.0, tuned
+    assert base.describe_max_tokens == 1024, base     # thinking 模型的推理也算进生成预算
     # 管理后台端口和演习开关也能从环境变量调
     assert base.admin_port == 8099 and base.dry_run is False, base
     os.environ.update(ADMIN_PORT='0', DRY_RUN='1')

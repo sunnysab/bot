@@ -60,6 +60,9 @@ class FakeBot:
 
 
 class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
+    async def _call(self, action, params):
+        self.calls.append((action, params))
+        return self.reply
     def setUp(self):
         self.wechat = Wechat('127.0.0.1', 9999)
         self.wechat._bot = FakeBot()  # type: ignore[assignment]
@@ -127,6 +130,28 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
             await self.wechat.get_display_name('wxid_alice', '456@chatroom')
         self.assertEqual(self.wechat._bot.contact_calls, ['456@chatroom'])   # 群里那个人走群名片
         self.assertEqual(await self.wechat.get_display_name('456@chatroom'), '一起哈啤')
+
+    async def test_media_bytes_goes_through_plain_rpc(self):
+        """ 附件走普通 RPC `get_media_bytes`，不走坏的 DL_OPEN 分块流。
+
+        分块流那条路：relay 的 DL_OPEN 分支按 RelayRequest（action + params）解包，
+        而 SDK 只塞了 params，解不出就被 unwrap_or_default() 吞掉，最后报 400
+        「缺少 msg_id」——那个报错和真实原因（图片没有 cdnurl）完全无关。
+        """
+        import base64
+
+        self.wechat._bot.call = self._call
+        self.calls: list[tuple[str, dict]] = []
+        self.reply = {'filename': 'msg_1.jpg', 'size': 4, 'ext': 'jpg',
+                      'data_base64': base64.b64encode(b'\xff\xd8\xff\xe0').decode()}
+        raw = await self.wechat.media_bytes(make_message(msg_id=777))
+        self.assertEqual(raw, b'\xff\xd8\xff\xe0')
+        self.assertEqual(self.calls, [('get_media_bytes', {'msg_id': 777})])
+
+        # relay 说没内容时要报得诚实，而不是拿一个空字节流充数
+        self.reply = {'filename': 'x', 'size': 0}
+        with self.assertRaises(ValueError):
+            await self.wechat.media_bytes(make_message(msg_id=778))
 
     async def test_unknown_name_stays_wxid(self):
         self.wechat._bot.group_card = ''

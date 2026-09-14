@@ -8,7 +8,7 @@ from context import ChatWindow, ContextManager, MessageContext, MessageKind, Sin
 from describer import MediaDescriber
 from emojis import Emoji, EmojiLibrary, parse_emoji_xml
 from events import Status, bus
-from media import is_placeholder, render
+from media import PLAIN_URL, is_placeholder, render
 from moments import MomentKeeper
 from outbound import Outbound, OutboundQueue
 from plugin import EndProcessing, Plugin, PluginManager, Reply
@@ -154,9 +154,15 @@ class Bot:
             # 落盘不用每条都做，攒一会儿再写；stop() 里还会再存一次
             if time.time() - self._emoji_saved_at >= EMOJI_SAVE_INTERVAL:
                 self.save_emojis()
-        if self.emoji_describer:
+        if self.emoji_describer and PLAIN_URL.search(msg.content or ''):
+            # 附件走 Wechat.media_bytes（普通 RPC），不用 SDK 的 msg.get_media_bytes——
+            # 那条分块流是坏的，所以「表情使用场景」一直没补上过（scene_count 永远是 0）。
+            #
+            # 能不能下载得看 relay 能不能在 XML 里找到**字面量** `cdnurl="`（它的
+            # find_attr 不容空格）——实测群里 19 条带 cdnurl 的表情里 15 条写的是
+            # `cdnurl = "…`，下了也白下。所以条件跟 media.PLAIN_URL 同标准
             self.emoji_describer.schedule(self.emojis.get(emoji.md5),
-                                          getattr(msg, 'get_media_bytes', None))
+                                          lambda m=msg: self._wechat.media_bytes(m))
 
     def save_emojis(self) -> None:
         if not (self.emojis and self.emoji_path):
@@ -290,7 +296,8 @@ class Bot:
     async def _run_plugins(self, msg: Message, self_name: str, source: str) -> Reply:
         """ 把当前消息交给该会话的插件链，收集要回复的文本和表情。 """
         ctx = MessageContext(msg=msg, history=self._history.get_context(msg.reply_target),
-                             self_name=self_name, contact=source)
+                             self_name=self_name, contact=source,
+                             download=lambda: self._wechat.media_bytes(msg))
         texts: list[str] = []
         emoji = None
         for plugin in self._plugins.get_plugins_for_contact(source):
@@ -322,7 +329,10 @@ class Bot:
         text, media = render(msg.msg_type, msg.content, msg.text)
         if text:
             msg.content = msg.clean_text = text
-        download = msg.get_media_bytes if (media and media.needs_description) else None
+        # 只在「字节真拿得到」时才排下载：图片的 XML 里没有明文 cdnurl，
+        # 硬试也是一次注定失败的 RPC（见 media.Media.downloadable）
+        download = ((lambda m=msg: self._wechat.media_bytes(m))
+                    if (media and media.describable) else None)
 
         # 手机上自己发的消息：写进上下文让模型看见，但**不触发任何插件**。
         # 从群里看人设确实在说话（transcript 里渲染成「我」），所以存在感统计也算数

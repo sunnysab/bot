@@ -24,6 +24,8 @@ class FakeWechat:
         self.fail = fail
         self.all_contacts: dict[str, str] = {}
         self.emojis_sent: list[tuple[str, str]] = []    # (receiver, md5)
+        self.downloads: list[int] = []
+        self.image: bytes | None = None
         self.emoji_queries: list[str] = []
         self.online: list = []                          # 假线上搜索结果
         self.names = {'wxid_bot': 'Bot'}                # wxid -> 显示名，查不到就回 wxid
@@ -46,6 +48,16 @@ class FakeWechat:
             raise RuntimeError('解析长链 newsendmsg 响应失败: invalid data: unsupported wiretype 7')
         self.sent.append((receiver, text))
         return {'sent': True, 'msg_id': RELAY_MSG_ID}
+
+    async def media_bytes(self, msg):
+        """ 附件下载。默认拉不下来——这套 relay 下的图片就是拉不下来。
+
+        要测成功的路径就往 FakeWechat.image 里塞字节。
+        """
+        self.downloads.append(msg.msg_id)
+        if self.image is None:
+            raise RuntimeError('下载附件失败: invalid data: 消息无 cdnurl')
+        return self.image
 
     async def get_display_name(self, wxid, chatroom=''):
         return self.names.get(wxid, wxid)
@@ -382,7 +394,8 @@ class TestEmojiStealing(unittest.IsolatedAsyncioTestCase):
 
         msg = make_msg(msg_type=47)
         msg.content = msg.clean_text = make_sticker()
-        msg.get_media_bytes = _fake_image
+        # 附件现在走 Wechat.media_bytes（普通 RPC），不再用 SDK 的 msg.get_media_bytes
+        self.bot._wechat.image = await _fake_image()
         await self.bot.on_message(msg)
         await self.bot.emoji_describer.join()
 
@@ -393,7 +406,6 @@ class TestEmojiStealing(unittest.IsolatedAsyncioTestCase):
     async def test_no_describer_means_no_scene_work(self):
         msg = make_msg(msg_type=47)
         msg.content = msg.clean_text = make_sticker()
-        msg.get_media_bytes = _fake_image
         await self.bot.on_message(msg)          # 不能抛
         self.assertEqual(self.bot.emojis.get('a' * 32).scene, '')
 

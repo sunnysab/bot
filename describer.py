@@ -63,6 +63,7 @@ class MediaDescriber:
         self._sem = asyncio.Semaphore(concurrency)
         self._inflight: dict[str, asyncio.Task] = {}
         self._tasks: set[asyncio.Task] = set()
+        self._warned: set[str] = set()
 
     def schedule(self, record: SingleRecord) -> None:
         """ 只处理需要 vision 的媒体（无 desc 且有下载入口）。 """
@@ -89,11 +90,23 @@ class MediaDescriber:
         try:
             description = self._cache.get(media.md5) or await self._describe_once(media, record.download)
         except Exception as e:
-            logger.warning(f'描述媒体失败 md5={media.md5}: {e}')
+            self._warn_once(f'{media.kind}:{e}', f'描述媒体失败 md5={media.md5}: {e}')
             return
         if description:
             label = '图片' if media.kind == 'image' else '表情'
             record.text = f'[{label}：{description}]'
+
+    def _warn_once(self, key: str, message: str) -> None:
+        """ 同一类失败只警告一次。
+
+        图片在这套 relay 下**永远**下不下来（XML 里只有加密 fileid、没有 cdnurl），
+        每张都刷一条 warning 会把日志冲掉，真正要看的东西反而找不着。
+        """
+        if key in self._warned:
+            logger.debug(message)
+            return
+        self._warned.add(key)
+        logger.warning(f'{message}（同类失败后续只记 debug）')
 
     async def _describe_once(self, media: Media, download) -> str | None:
         """ 同一 md5 的并发请求合流，只下载 / 描述一次。 """

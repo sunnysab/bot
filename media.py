@@ -17,6 +17,13 @@ class Media:
     kind: str  # 'image' | 'emoji'
     md5: str
     description: str | None = None
+    # 源 XML 里有没有**明文可下载的 URL**。
+    #
+    # 为什么要先判这个：relay 的 `download_message` 只认 `cdnurl`/`cdnurlbigimg` 里的
+    # 明文 URL。而入站图片的 XML 里只有 `cdnbigimgurl`/`cdnmidimgurl`
+    # 那种**加密 fileid**（`305f0201...`）——实测 30 张图片 30 张没有 cdnurl。
+    # 拿不到就别去试：每次尝试都是一次注定失败的 RPC + relay 一条 WARN 日志。
+    downloadable: bool = False
 
     @property
     def placeholder(self) -> str:
@@ -27,6 +34,11 @@ class Media:
     @property
     def needs_description(self) -> bool:
         return not self.description and bool(self.md5)
+
+    @property
+    def describable(self) -> bool:
+        """ 值不值得排一次识图：缺描述、且字节真拿得到。 """
+        return self.needs_description and self.downloadable
 
 
 PLACEHOLDER = re.compile(r'^\[(图片|表情|语音|视频|位置|链接|文件|合并转发|小程序)([：:][^\]]*)?\]$')
@@ -104,12 +116,23 @@ def parse_emoji_description(content: str) -> str | None:
     return text or None
 
 
+# relay 的 `cdn::find_attr` 找的是**字面量** `cdnurl="`（等号两边不能有空格），
+# 所以这里必须跟它**一样严格**，否则就是一次次注定失败的 RPC。
+#
+# 实测群里 19 条带 cdnurl 的表情，15 条写的是 `cdnurl = "http...`（另一种客户端的
+# XML 风格），relay 看不见 → 报「无 cdnurl」。等 relay 把 find_attr 改成容忍空格之后，
+# 这里也要跟着放宽（见 notes/未完成.md）。
+PLAIN_URL = re.compile(r'cdnurl="https?://')
+
+
 def parse_media(content: str) -> Media | None:
     """ 解析图片 / 表情消息的 XML 载荷。非媒体消息返回 None。 """
     if '<emoji' in content:
-        return Media('emoji', attr(strip_prefix(content), 'md5'), parse_emoji_description(content))
+        return Media('emoji', attr(strip_prefix(content), 'md5'), parse_emoji_description(content),
+                     downloadable=bool(PLAIN_URL.search(content)))
     if '<img' in content:
-        return Media('image', attr(strip_prefix(content), 'md5'))
+        return Media('image', attr(strip_prefix(content), 'md5'),
+                     downloadable=bool(PLAIN_URL.search(content)))
     return None
 
 
@@ -191,6 +214,22 @@ if __name__ == '__main__':
     assert blank.placeholder == '[表情]' and blank.needs_description, blank
     assert parse_media('hello world') is None
     assert parse_media('<msg><img /></msg>').needs_description is False
+
+    # 「拿得到字节吗」得从 XML 就判出来：relay 只认字面量 `cdnurl="`，
+    # 而入站图片的 XML 里只有加密 fileid，很多表情又写成 `cdnurl = "…`（带空格）
+    assert image.downloadable is False and image.describable is False
+    enc = parse_media('<msg><img md5="m" aeskey="k" cdnbigimgurl="305f020100044b" /></msg>')
+    assert enc.downloadable is False, enc
+    plain = parse_media('<msg><img md5="m" cdnurl="http://wxapp.tc.qq.com/x" /></msg>')
+    assert plain.downloadable is True and plain.describable is True, plain
+    # 带空格的写法 relay 看不见，所以这里也不能认为能下（否则白写一次注定失败的 RPC）
+    spaced = parse_media('<msg><emoji md5="m" cdnurl = "http://x" /></msg>')
+    assert spaced.downloadable is False, spaced
+    # 表情：有 cdnurl 的才值得排识图；带 desc 的本来就不用描述
+    sticker = parse_media('<msg><emoji md5="m" cdnurl="http://x" /></msg>')
+    assert sticker.downloadable is True and sticker.describable is True
+    tagged = parse_media('<msg><emoji md5="m" desc="ChEKB2RlZmF1bHQSBuWVp+WVpw==" cdnurl="http://x" /></msg>')
+    assert tagged.describable is False, '带标签的表情不需要识图'
 
     # 位置 / 视频 / 语音 / 链接 / 文件 / 引用
     assert parse_location('<msg><location label="海淀区京新高速" poiname="海淀·上郡" /></msg>') == '[位置：海淀区京新高速]'
