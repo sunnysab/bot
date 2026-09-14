@@ -1,4 +1,4 @@
-""" 插件自检：回复策略、群聊必要性门控、私聊直通、图片直传，以及复读机不跟媒体占位标记。 """
+""" 插件自检：两段式回复、必要性门控、模板注入、回复轨迹，以及复读机不跟媒体占位。 """
 
 import base64
 import json
@@ -12,19 +12,35 @@ from context import ChatWindow, MessageContext
 from habits import Habit, HabitStore
 from moments import Moment, MomentStore
 from necessity import NECESSITY_THRESHOLD
+from persona import Persona
 from plugin import ChatPlugin, RepeatPlugin, ReplyPolicy
 from profiles import Profile, ProfileStore
 from reply_trace import TraceLogger
 
+PLANNER_MARK = '决策者'          # planner.txt 里独有的字眼，用来区分两次调用
+
 
 class FakeAi:
-    def __init__(self, response=('收到',)):
-        self.responses = list(response) if response else None
+    """ Planner 和 Expressor 共用，用 prompt 里的标记区分。 """
+
+    def __init__(self, reply=('收到',), plan='{"speak": true, "intent": "附和一句", "emotion": "无奈"}'):
+        self.reply = list(reply) if reply else None
+        self.plan = plan
         self.calls = []
 
     async def chat(self, prompt, message):
         self.calls.append((prompt, message))
-        return self.responses
+        if PLANNER_MARK in prompt:
+            return [self.plan] if self.plan else None
+        return self.reply
+
+    @property
+    def planner_calls(self):
+        return [call for call in self.calls if PLANNER_MARK in call[0]]
+
+    @property
+    def reply_calls(self):
+        return [call for call in self.calls if PLANNER_MARK not in call[0]]
 
 
 def make_msg(msg_type=1, is_chatroom=False, is_at_me=False, media=b'', content=''):
@@ -72,21 +88,114 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         ctx = make_ctx(make_msg(is_chatroom=True, content='这个怎么弄啊'), history=history)
         reply = await self.plugin.handle(ctx)
         self.assertEqual(reply.texts, ['收到'])
-        self.assertIn('主动插话', self.ai.calls[0][0])
+        self.assertEqual(len(self.ai.planner_calls), 1)
+        self.assertEqual(len(self.ai.reply_calls), 1)
 
-    async def test_group_at_replies(self):
-        reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=True, is_at_me=True)))
-        self.assertEqual(reply.texts, ['收到'])
-        self.assertIn('@ 了你', self.ai.calls[0][0])
+    async def test_plan_is_passed_to_expressor(self):
+        await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
+        message = self.ai.reply_calls[0][1]
+        self.assertIn('【决策】', message)
+        self.assertIn('想表达：附和一句', message)
+        self.assertIn('情绪：无奈', message)
+        self.assertIn('在吗', message)          # 决策之后跟着原始聊天记录
+
+    async def test_planner_is_told_it_is_not_the_bot(self):
+        await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
+        self.assertIn('不是 Bot 本人', self.ai.planner_calls[0][0])
+
+    async def test_group_at_trigger_reaches_planner(self):
+        await self.plugin.handle(make_ctx(make_msg(is_chatroom=True, is_at_me=True)))
+        self.assertIn('@ 了 Bot', self.ai.planner_calls[0][0])
 
     async def test_group_name_mention_replies(self):
         reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=True, content='Bot 在吗')))
         self.assertEqual(reply.texts, ['收到'])
-        self.assertIn('叫到了你的名字', self.ai.calls[0][0])
+        self.assertIn('叫到了 Bot', self.ai.planner_calls[0][0])
 
     async def test_private_replies(self):
         reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
         self.assertEqual(reply.texts, ['收到'])
+        self.assertIn('私聊', self.ai.planner_calls[0][0])
+
+    async def test_silent_plan_skips_expressor(self):
+        self.plugin.ai = FakeAi(plan='{"speak": false, "analysis": "接不上话"}')
+        history = history_with(12, now=time.time())
+        reply = await self.plugin.handle(
+            make_ctx(make_msg(is_chatroom=True, content='这个怎么弄啊'), history=history))
+        self.assertEqual(reply.texts, [])
+        self.assertTrue(reply.stop)
+        self.assertEqual(len(self.plugin.ai.planner_calls), 1)
+        self.assertEqual(self.plugin.ai.reply_calls, [])   # 不再多跑一次表达
+
+    async def test_planner_cannot_veto_a_direct_address(self):
+        """ 被 @ 是必须回应的场景，决策者说不开口也不作数。 """
+        self.plugin.ai = FakeAi(plan='{"speak": false, "analysis": "不想说"}')
+        reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=True, is_at_me=True)))
+        self.assertEqual(reply.texts, ['收到'])
+        self.assertEqual(len(self.plugin.ai.reply_calls), 1)
+
+    async def test_planner_failure_does_not_mute_the_bot(self):
+        """ 决策者挂了就退回单段，不能因此变吧。 """
+        self.plugin.ai = FakeAi(plan=None)
+        reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
+        self.assertEqual(reply.texts, ['收到'])
+        self.assertNotIn('【决策】', self.plugin.ai.reply_calls[0][1])
+
+    async def test_planner_disabled_falls_back_to_single_call(self):
+        plugin = ChatPlugin(self.ai, context_length=10, enable_planner=False)
+        reply = await plugin.handle(make_ctx(make_msg(is_chatroom=False)))
+        self.assertEqual(reply.texts, ['收到'])
+        self.assertEqual(len(self.ai.calls), 1)
+        self.assertIn('你的名字是', self.ai.calls[0][0])
+
+    async def test_silent_model_does_not_reply(self):
+        self.plugin.ai = FakeAi(reply=None)
+        reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
+        self.assertEqual(reply.texts, [])
+        self.assertTrue(reply.stop)
+
+    async def test_alternate_style_uses_own_expression(self):
+        import random
+        persona = Persona(alternates=('用1-2个字回复',), alternate_probability=1.0)
+        plugin = ChatPlugin(self.ai, context_length=10, persona=persona, rng=random.Random(0))
+        await plugin.handle(make_ctx(make_msg(is_chatroom=False)))
+        self.assertIn('用1-2个字回复', self.ai.reply_calls[0][0])
+
+    async def test_personality_and_style_come_from_config(self):
+        persona = Persona(personality='是一只猫', reply_style='只会喵')
+        plugin = ChatPlugin(self.ai, context_length=10, persona=persona)
+        await plugin.handle(make_ctx(make_msg(is_chatroom=False)))
+        prompt = self.ai.reply_calls[0][0]
+        self.assertIn('你的名字是Bot。是一只猫', prompt)
+        self.assertIn('只会喵', prompt)
+
+    async def test_image_is_sent_as_content_block(self):
+        image = b'\xff\xd8fake-jpeg'
+        reply = await self.plugin.handle(make_ctx(make_msg(msg_type=3, is_chatroom=False, media=image)))
+        self.assertEqual(reply.texts, ['收到'])
+        content = self.ai.reply_calls[0][1]
+        self.assertIsInstance(content, list)
+        self.assertEqual(content[0]['type'], 'text')
+        self.assertEqual(content[1]['type'], 'image_url')
+        expected = 'data:image/jpeg;base64,' + base64.b64encode(image).decode()
+        self.assertEqual(content[1]['image_url']['url'], expected)
+
+    async def test_profiles_are_injected_into_prompt(self):
+        store = ProfileStore(people={'wxid_x': Profile('wxid_x', names=('Alice',), phrases=('蛙趣',))})
+        self.plugin.profiles = store
+        await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
+        self.assertIn('群里这些人你大致认识', self.ai.planner_calls[0][0])
+        self.assertIn('口头禅：蛙趣', self.ai.planner_calls[0][0])
+
+    async def test_habits_injected_only_on_hit(self):
+        self.plugin.habits = HabitStore(habits=(Habit('蛙趣', 126, ('蛙趣 你的ID和小红书一样的吧',)),))
+
+        await self.plugin.handle(make_ctx(make_msg(is_chatroom=False, content='蛙趣，真的假的')))
+        self.assertIn('你的ID和小红书', self.ai.planner_calls[0][0])
+        self.assertIn('你的ID和小红书', self.ai.reply_calls[0][0])   # 表达者也要知道群里怎么说
+
+        await self.plugin.handle(make_ctx(make_msg(is_chatroom=False, content='平平无奇的一句话')))
+        self.assertNotIn('黑话', self.ai.planner_calls[1][0])
 
     async def test_memories_injected_on_keyword_hit(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -95,28 +204,12 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
             self.plugin.memories = store
 
             await self.plugin.handle(make_ctx(make_msg(is_chatroom=False, content='明天上班好烦')))
-            self.assertIn('你想起的旧事', self.ai.calls[0][0])
-            self.assertIn('要不要上班请假', self.ai.calls[0][0])
+            self.assertIn('你想起的旧事', self.ai.planner_calls[0][0])
+            self.assertIn('要不要上班请假', self.ai.planner_calls[0][0])
 
             await self.plugin.handle(make_ctx(make_msg(is_chatroom=False, content='吃了没')))
-            self.assertNotIn('你想起的旧事', self.ai.calls[1][0])
+            self.assertNotIn('你想起的旧事', self.ai.planner_calls[1][0])
             store.close()
-
-    async def test_habits_injected_only_on_hit(self):
-        self.plugin.habits = HabitStore(habits=(Habit('蛙趣', 126, ('蛙趣 你的ID和小红书一样的吧',)),))
-
-        await self.plugin.handle(make_ctx(make_msg(is_chatroom=False, content='蛙趣，真的假的')))
-        self.assertIn('你的ID和小红书', self.ai.calls[0][0])
-
-        await self.plugin.handle(make_ctx(make_msg(is_chatroom=False, content='平平无奇的一句话')))
-        self.assertNotIn('黑话', self.ai.calls[1][0])
-
-    async def test_profiles_are_injected_into_prompt(self):
-        store = ProfileStore(people={'wxid_x': Profile('wxid_x', names=('Alice',), phrases=('蛙趣',))})
-        self.plugin.profiles = store
-        await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
-        self.assertIn('群里这些人你大致认识', self.ai.calls[0][0])
-        self.assertIn('口头禅：蛙趣', self.ai.calls[0][0])
 
     async def test_tracer_records_the_round(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -130,34 +223,20 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record['reply'], ['收到'])
         self.assertEqual(record['sender'], 'Alice')
         self.assertIn('在吗', record['transcript'])
+        self.assertIn('想表达：附和一句', record['plan'])
         self.assertGreaterEqual(record['latency_ms'], 0)
 
     async def test_tracer_records_silent_turns(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'trace.jsonl'
-            self.plugin.ai = FakeAi(response=None)
+            self.plugin.ai = FakeAi(plan='{"speak": false, "analysis": "接不上"}')
             self.plugin.tracer = TraceLogger(path)
-            await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
+            history = history_with(12, now=time.time())
+            await self.plugin.handle(make_ctx(make_msg(is_chatroom=True, content='这个怎么弄啊'), history=history))
             record = json.loads(path.read_text(encoding='utf-8').strip())
 
-        self.assertEqual(record['reply'], [])  # 走到模型但没开口，也要留痕
-
-    async def test_silent_model_does_not_reply(self):
-        self.plugin.ai = FakeAi(response=None)
-        reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
-        self.assertEqual(reply.texts, [])
-        self.assertTrue(reply.stop)
-
-    async def test_image_is_sent_as_content_block(self):
-        image = b'\xff\xd8fake-jpeg'
-        reply = await self.plugin.handle(make_ctx(make_msg(msg_type=3, is_chatroom=False, media=image)))
-        self.assertEqual(reply.texts, ['收到'])
-        content = self.ai.calls[0][1]
-        self.assertIsInstance(content, list)
-        self.assertEqual(content[0]['type'], 'text')
-        self.assertEqual(content[1]['type'], 'image_url')
-        expected = 'data:image/jpeg;base64,' + base64.b64encode(image).decode()
-        self.assertEqual(content[1]['image_url']['url'], expected)
+        self.assertEqual(record['reply'], [])   # 决策者选择不发言，也要留痕
+        self.assertEqual(record['plan'], '')
 
 
 class TestReplyPolicy(unittest.TestCase):

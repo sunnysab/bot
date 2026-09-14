@@ -1,4 +1,5 @@
 import base64
+import random
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -18,6 +19,8 @@ from necessity import (
     NecessityScore,
     score_necessity,
 )
+from persona import Persona
+from planner import Plan
 from profiles import ProfileStore
 from reply_trace import TraceLogger, TraceRecord
 
@@ -181,34 +184,55 @@ class ReplyPolicy:
 
 
 class ChatPlugin(Plugin):
+    """ 聊天插件。两段式：Planner 判断说与不说、说什么，Expressor 负责说成人话。
+
+    Planner 被明确告知「你不是本人，你是决策者」，输出的是判断而不是台词；
+    Expressor 拿人设 + 表达风格 + 决策当作参考，只负责组织语言。
+    enable_planner=False 时退回单段（Expressor 直接看着聊天记录说），便于对比。
+
+    两个例外：被 @ / 被叫名字 / 私聊是「必须回应」的场景，决策者说不开口也不作数；
+    决策者调用失败时退回「无决策」继续表达，不能因此变吧。
+    """
+
+    # 这些触发下 bot 必须开口，不接受 Planner 的否决
+    HARD_TRIGGERS = frozenset(('at', 'mention', 'private'))
+
     def __init__(self, ai_provider: AiProvider, context_length: int = 10, policy: ReplyPolicy | None = None,
-                 profiles: ProfileStore | None = None, habits: HabitStore | None = None,
-                 memories: MomentStore | None = None, tracer: TraceLogger | None = None):
+                 persona: Persona | None = None, profiles: ProfileStore | None = None,
+                 habits: HabitStore | None = None, memories: MomentStore | None = None,
+                 tracer: TraceLogger | None = None, enable_planner: bool = True,
+                 rng: random.Random | None = None):
         """ 聊天插件
 
         :param ai_provider: AI 服务提供者
         :param context_length: 送入模型的上下文消息条数
         :param policy: 是否回复的策略；不传则用默认（必要性打分）
+        :param persona: 人格配置（身份 / 表达风格 / 行动准则 / 临时风格）
         :param profiles: 群友画像；传了就注入 prompt 让机器人认识人
         :param habits: 群里的特色用语；当前消息命中才注入
         :param memories: 中期记忆；按当前消息关键词召回，命中才注入
         :param tracer: 回复轨迹记录；传了就把每轮触发/上下文/回复写成 JSONL
+        :param enable_planner: 是否跑两段式；False 则只调 Expressor
+        :param rng: 抽临时风格用的随机源，测试时可注入
         """
         self.ai = ai_provider
         self.context_length = context_length
         self.policy = policy or ReplyPolicy()
+        self.persona = persona or Persona()
         self.profiles = profiles
         self.habits = habits
         self.memories = memories
         self.tracer = tracer
+        self.enable_planner = enable_planner
+        self.rng = rng
 
         from jinja2 import Template
-        template_file = (Path(__file__).parent / 'prompt.txt').read_text(encoding='utf-8')
-        self.prompt_template = Template(template_file, enable_async=True)
+        base = Path(__file__).parent
+        self.planner_template = Template((base / 'planner.txt').read_text(encoding='utf-8'), enable_async=True)
+        self.replyer_template = Template((base / 'replyer.txt').read_text(encoding='utf-8'), enable_async=True)
 
     @override
     async def handle(self, ctx: MessageContext) -> Reply | None:
-        msg = ctx.msg
         if not (ctx.is_text or ctx.is_image):  # 只处理文本和图片消息
             return None
 
@@ -217,25 +241,21 @@ class ChatPlugin(Plugin):
             return None
 
         history: ChatWindow = ctx.history.latest_n(self.context_length)
-        profiles = ''
-        if self.profiles:
-            profiles = self.profiles.render_for(record.sender for record in reversed(history))
-        habit_block = self.habits.render(msg.content) if self.habits else ''
-        memory_block = ''
-        if self.memories:
-            recalled = self.memories.search(msg.reply_target, extract_keywords(msg.content))
-            if recalled:
-                memory_block = '\n'.join(moment.render() for moment in recalled)
-        prompt = await self.prompt_template.render_async(self_name=ctx.self_name, contact=ctx.contact,
-                                                         is_group=msg.is_chatroom, trigger=necessity.kind,
-                                                         trigger_detail=necessity.detail, profiles=profiles,
-                                                         habits=habit_block, memories=memory_block)
+        blocks = self._context_blocks(ctx, history)
+        transcript = '以下聊天记录供你参考：\n\n' + str(history)
 
-        text = '回复你扮演的角色所要说的话。以下聊天记录供你参考：\n\n' + str(history)
         started = time.perf_counter()
-        response = await self.ai.chat(prompt.strip(), await self._build_message(ctx, text))
-        latency_ms = int((time.perf_counter() - started) * 1000)
-        self._trace(ctx, necessity, text, response, latency_ms)
+        plan = ''
+        if self.enable_planner:
+            decided = await self._plan(ctx, necessity, blocks, transcript)
+            if decided is not None and not decided.speak and necessity.kind not in self.HARD_TRIGGERS:
+                self._trace(ctx, necessity, transcript, None, self._elapsed(started), '')
+                return Reply(stop=True)
+            plan = decided.render() if decided else ''
+
+        response = await self._express(ctx, blocks, transcript, plan)
+        latency_ms = self._elapsed(started)
+        self._trace(ctx, necessity, transcript, response, latency_ms, plan)
         if not response:
             return Reply(stop=True)
 
@@ -243,8 +263,49 @@ class ChatPlugin(Plugin):
         prefix = ctx.self_name + ':'
         return Reply(texts=[x.lstrip(prefix) for x in response])
 
+    def _context_blocks(self, ctx: MessageContext, history: ChatWindow) -> dict[str, str]:
+        """ 画像 / 群用语 / 中期记忆，三者都是「能捞到才注入」。 """
+        msg = ctx.msg
+        block = {'self_name': ctx.self_name, 'contact': ctx.contact, 'is_group': msg.is_chatroom,
+                 'profiles': '', 'habits': '', 'memories': ''}
+        if self.profiles:
+            block['profiles'] = self.profiles.render_for(record.sender for record in reversed(history))
+        if self.habits:
+            block['habits'] = self.habits.render(msg.content)
+        if self.memories:
+            recalled = self.memories.search(msg.reply_target, extract_keywords(msg.content))
+            block['memories'] = '\n'.join(moment.render() for moment in recalled)
+        return block
+
+    async def _plan(self, ctx: MessageContext, necessity: NecessityScore, blocks: dict[str, str],
+                    transcript: str) -> Plan | None:
+        """ 跑决策者；返回 None 表示这次没拿到决策（调用失败），不代表不开口。 """
+        prompt = await self.planner_template.render_async(
+            behavior_style=self.persona.behavior_style, trigger=necessity.kind, **blocks)
+        raw = await self._ask(prompt, transcript, ctx, image=ctx.is_image)
+        if not raw:
+            return None
+        # ai.chat 返回的是按行切好的列表，决策是一整块 JSON，拼回去再解析
+        return Plan.parse('\n'.join(raw))
+
+    async def _express(self, ctx: MessageContext, blocks: dict[str, str], transcript: str,
+                       plan: str) -> list[str] | None:
+        """ 跑表达者；有决策就把决策放在聊天记录前面。 """
+        prompt = await self.replyer_template.render_async(
+            identity=self.persona.identity(ctx.self_name), reply_style=self.persona.reply_style,
+            alternate_style=self.persona.maybe_alternate(self.rng), **blocks)
+        message = f'【决策】\n{plan}\n\n{transcript}' if plan else transcript
+        return await self._ask(prompt, message, ctx, image=ctx.is_image)
+
+    async def _ask(self, prompt: str, message: str, ctx: MessageContext, image: bool = False) -> list[str] | None:
+        return await self.ai.chat(prompt.strip(), await self._build_message(ctx, message, image))
+
+    @staticmethod
+    def _elapsed(started: float) -> int:
+        return int((time.perf_counter() - started) * 1000)
+
     def _trace(self, ctx: MessageContext, necessity: NecessityScore, transcript: str,
-               response: list[str] | None, latency_ms: int) -> None:
+               response: list[str] | None, latency_ms: int, plan: str) -> None:
         """ 记录这一轮：为什么开口、看到了什么、说了什么。 """
         if not self.tracer:
             return
@@ -253,19 +314,19 @@ class ChatPlugin(Plugin):
             ts=time.time(), contact=msg.reply_target, contact_name=ctx.contact,
             sender=msg.sender_name, trigger=necessity.kind, score=necessity.score,
             reasons=necessity.reasons, transcript=transcript, reply=tuple(response or ()),
-            latency_ms=latency_ms))
+            latency_ms=latency_ms, plan=plan))
 
     @staticmethod
-    async def _build_message(ctx: MessageContext, transcript: str) -> str | list:
+    async def _build_message(ctx: MessageContext, transcript: str, image: bool = False) -> str | list:
         """ 文本消息直接发送；图片消息把真实图片作为 content block 附在文本后（DeepSeek 原生识图）。 """
-        if not ctx.is_image:
-            return transcript
-
-        image = await ctx.msg.get_media_bytes()
         if not image:
             return transcript
 
-        encoded = base64.b64encode(image).decode()
+        raw = await ctx.msg.get_media_bytes()
+        if not raw:
+            return transcript
+
+        encoded = base64.b64encode(raw).decode()
         return [
             {'type': 'text', 'text': transcript},
             {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{encoded}'}},

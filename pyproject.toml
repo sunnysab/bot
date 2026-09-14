@@ -37,6 +37,8 @@ py-modules = [
     "moments",
     "necessity",
     "outbound",
+    "persona",
+    "planner",
     "plugin",
     "profiles",
     "replay_memory",

@@ -30,6 +30,7 @@ class TraceRecord:
     transcript: str             # 送进模型的聊天记录
     reply: tuple[str, ...]      # 实际发出的内容，空 = 模型选择不发言
     latency_ms: int
+    plan: str = ''              # Planner 的决策（两段式时才有）
 
 
 class TraceLogger:

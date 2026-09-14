@@ -1,6 +1,8 @@
 import os
 from dataclasses import dataclass
 
+from persona import Persona
+
 
 @dataclass(frozen=True)
 class Config:
@@ -31,6 +33,15 @@ class Config:
     # 中期记忆：滑出上下文窗口的消息压成回想，存这个 sqlite
     moment_path: str = 'memory/moments.db'
     moment_batch: int = 20
+    # 人格：身份 / 表达风格 / 行动准则（分别喂给 expressor 和 planner）
+    personality: str = Persona.personality
+    reply_style: str = Persona.reply_style
+    behavior_style: str = Persona.behavior_style
+    # 备用表达风格，用 | 分隔；按概率抽一条用在本次回复上
+    reply_styles: str = ''
+    style_probability: float = 0.0
+    # 两段式：Planner 判断说与不说，Expressor 负责说成人话
+    enable_planner: bool = True
     # 回复轨迹 JSONL（攒数据给以后做效果评估）
     trace_path: str = 'reply_trace.jsonl'
     log_path: str = 'bot.log'
@@ -57,6 +68,12 @@ class Config:
             habit_path=os.getenv('HABIT_PATH', cls.habit_path),
             moment_path=os.getenv('MOMENT_PATH', cls.moment_path),
             moment_batch=int(os.getenv('MOMENT_BATCH', str(cls.moment_batch))),
+            personality=os.getenv('PERSONALITY', cls.personality),
+            reply_style=os.getenv('REPLY_STYLE', cls.reply_style),
+            behavior_style=os.getenv('BEHAVIOR_STYLE', cls.behavior_style),
+            reply_styles=os.getenv('REPLY_STYLES', cls.reply_styles),
+            style_probability=float(os.getenv('STYLE_PROBABILITY', str(cls.style_probability))),
+            enable_planner=os.getenv('ENABLE_PLANNER', '1').lower() not in ('0', 'false', 'no'),
             trace_path=os.getenv('TRACE_PATH', cls.trace_path),
             log_path=os.getenv('LOG_PATH', cls.log_path),
             log_level=os.getenv('LOG_LEVEL', cls.log_level),
