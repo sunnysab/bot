@@ -18,6 +18,7 @@ from moments import MomentStore, extract_keywords
 from necessity import (
     NECESSITY_THRESHOLD,
     PRESENCE_WINDOW_SECONDS,
+    IdleBackoff,
     NecessityInput,
     NecessityScore,
     score_necessity,
@@ -189,14 +190,16 @@ class ReplyPolicy:
     """
 
     def __init__(self, threshold: int = NECESSITY_THRESHOLD, activity_window: float = 180.0,
-                 aliases: tuple[str, ...] = ()):
+                 aliases: tuple[str, ...] = (), backoff: IdleBackoff | None = None):
         """ :param threshold: 必要性分数阈值，越高越沉默
         :param activity_window: 统计群活跃度的时间窗口（秒）
         :param aliases: 机器人自己的其他叫法，命中就当被叫到名字
+        :param backoff: 连续沉默退避；不传则用默认（连续两轮不开口开始歇 15s）
         """
         self.threshold = threshold
         self.activity_window = activity_window
         self.aliases = aliases
+        self.backoff = backoff if backoff is not None else IdleBackoff()
 
     def evaluate(self, ctx: MessageContext, now: float) -> NecessityScore | None:
         """ 返回 None 表示不交给模型；否则返回打分（可注入 prompt 说明触发原因）。
@@ -213,7 +216,16 @@ class ReplyPolicy:
             self_replies=self._self_replies(ctx, now),
             recent_messages=self._recent_messages(ctx, now),
         ))
-        return result if result.score >= self.threshold else None
+        if result.score < self.threshold:
+            return None
+        # 只有主动参与才退避：被 @ / 叫名字 / 私聊是必须回应的
+        if result.kind == 'proactive' and not self.backoff.allows(ctx.contact, now, ctx.history):
+            return None
+        return result
+
+    def record(self, ctx: MessageContext, spoke: bool, now: float) -> None:
+        """ 记下这一轮最后说没说，给连续沉默退避用。 """
+        self.backoff.record(ctx.contact, spoke, now, ctx.history)
 
     def _activity(self, ctx: MessageContext, now: float) -> int:
         """ 活动窗口内别人的消息数。 """
@@ -294,7 +306,8 @@ class ChatPlugin(Plugin):
         if not (ctx.is_text or ctx.is_image):  # 只处理文本和图片消息
             return None
 
-        necessity = self.policy.evaluate(ctx, time.time())
+        now = time.time()
+        necessity = self.policy.evaluate(ctx, now)
         if necessity is None:
             return None
 
@@ -309,19 +322,27 @@ class ChatPlugin(Plugin):
             decided = await self._plan(ctx, necessity, blocks, transcript)
             if decided is not None and not decided.speak:
                 self._trace(ctx, necessity, transcript, None, self._elapsed(started), '')
-                return Reply(stop=True)
+                return self._silent(ctx, now)
             plan = decided.render() if decided else ''
 
         response = await self._express(ctx, blocks, transcript, plan)
         latency_ms = self._elapsed(started)
         self._trace(ctx, necessity, transcript, response, latency_ms, plan)
         if not response:
-            return Reply(stop=True)
+            return self._silent(ctx, now)
 
         # 模型常顺手带上「昵称：」前缀或引号包裹，不能直接漏到群里
         names = (ctx.self_name, *self.persona.aliases)
         texts = [text for text in (clean_reply(x, names) for x in response) if text]
-        return Reply(texts=texts) if texts else Reply(stop=True)
+        if not texts:
+            return self._silent(ctx, now)
+        self.policy.record(ctx, spoke=True, now=now)
+        return Reply(texts=texts)
+
+    def _silent(self, ctx: MessageContext, now: float) -> Reply:
+        """ 这一轮没说话，记一笔给连续沉默退避用。 """
+        self.policy.record(ctx, spoke=False, now=now)
+        return Reply(stop=True)
 
     def _context_blocks(self, ctx: MessageContext, history: ChatWindow) -> dict[str, str]:
         """ 画像 / 群用语 / 中期记忆，三者都是「能捞到才注入」。 """

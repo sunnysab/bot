@@ -35,6 +35,13 @@ SHORT_REACTIONS = frozenset((
     '好', '嗯', '啊', '哦', '确实', '牛的', 'nb', '可以'))
 MEDIA_PREFIXES = ('[图片', '[表情', '[语音', '[视频', '[位置', '[链接', '[文件', '[合并转发')
 
+# 连续沉默退避：没人点名的消息每条都要花一次决策模型调用，连着几轮都判
+# 「不说」就说明这会儿不需要它，那就歇一会儿再听。
+IDLE_START_AFTER = 2       # 连着几轮没开口才开始退避
+IDLE_BASE_SECONDS = 15.0   # 第一档冷却
+IDLE_MAX_SECONDS = 300.0   # 冷却上限
+IDLE_BYPASS_MESSAGES = 6   # 中间又来了这么多条消息，就当话题翻篇了，立刻放行
+
 TriggerKind = Literal['at', 'mention', 'private', 'proactive']
 
 
@@ -150,6 +157,56 @@ def _presence_penalty(self_replies: int, recent_messages: int) -> tuple[int, str
     return int(round(PRESENCE_PENALTY_MAX * progress)), f'存在感={self_replies}/{recent_messages}'
 
 
+@dataclass
+class _IdleState:
+    silences: int = 0
+    until: float = 0.0
+
+
+class IdleBackoff:
+    """ 连续几轮没开口就歇一会儿（冷却 15s → 30s → … → 最多 5 分钟）。
+
+    只该用在「主动参与」上：被 @ / 被叫名字 / 私聊是必须回应的，不能退避。
+    群里又刷了 IDLE_BYPASS_MESSAGES 条消息就当作话题翻篇，立刻放行。
+    """
+
+    def __init__(self, start_after: int = IDLE_START_AFTER, base: float = IDLE_BASE_SECONDS,
+                 maximum: float = IDLE_MAX_SECONDS, bypass: int = IDLE_BYPASS_MESSAGES):
+        self.start_after = start_after
+        self.base = base
+        self.maximum = maximum
+        self.bypass = bypass
+        self._states: dict[str, _IdleState] = {}
+        self._newest: dict[str, float] = {}   # 上次判断时看到的最新消息时间
+
+    def allows(self, contact: str, now: float, history=()) -> bool:
+        state = self._states.get(contact)
+        if state is None or state.until <= now:
+            return True
+        # 还在冷却里，但话题已经翻篇了就不等了
+        seen = self._newest.get(contact, 0.0)
+        return sum(1 for r in history if r.t > seen) >= self.bypass
+
+    def record(self, contact: str, spoke: bool, now: float, history=()) -> None:
+        """ 记下这一轮的结果：开口就清零，没开口就攒着。 """
+        newest = max([now, *(r.t for r in history)])
+        self._newest[contact] = newest
+        state = self._states.setdefault(contact, _IdleState())
+        if spoke:
+            state.silences = 0
+            state.until = 0.0
+            return
+        state.silences += 1
+        if state.silences >= self.start_after:
+            steps = state.silences - self.start_after
+            state.until = now + min(self.base * (2 ** steps), self.maximum)
+
+    def wait_left(self, contact: str, now: float) -> float:
+        """ 还要等多久；只用于日志和测试。 """
+        state = self._states.get(contact)
+        return max(0.0, state.until - now) if state else 0.0
+
+
 def _self_check() -> None:
     def score(text, **kwargs) -> NecessityScore:
         return score_necessity(NecessityInput(text=text, is_group=True, has_at=False, has_mention=False, **kwargs))
@@ -174,6 +231,49 @@ def _self_check() -> None:
     # 媒体占位不算内容分（但热聊群靠活跃度照样能触发）
     assert score('[图片：一只橘猫]', activity=10).score == score('一句平平无奇的话', activity=10).score
     assert score('[图片：一只橘猫]', activity=5).score < NECESSITY_THRESHOLD
+
+    # 连续沉默退避
+    from types import SimpleNamespace
+
+    def feed(history, times):
+        for t in times:
+            history.append(SimpleNamespace(t=t))
+
+    backoff = IdleBackoff()
+    history: list = []
+    feed(history, [1.0])
+    assert backoff.allows('g', 1.0, history)          # 新会话不拦
+    backoff.record('g', spoke=False, now=1.0, history=history)
+    assert backoff.allows('g', 2.0, history)          # 才一次，还没到 start_after
+
+    feed(history, [2.0])
+    backoff.record('g', spoke=False, now=2.0, history=history)
+    assert not backoff.allows('g', 3.0, history)      # 连着两轮没开口，开始歇
+    assert backoff.wait_left('g', 3.0) == 14.0        # 第一档 15s
+
+    # 冷却到期就放行
+    assert backoff.allows('g', 17.0, history)
+
+    # 再沉默一轮，冷却变成 30s（直到 48.0）
+    feed(history, [18.0])
+    backoff.record('g', spoke=False, now=18.0, history=history)
+    assert backoff.wait_left('g', 18.0) == 30.0
+
+    # 冷却中，但群里又刷够 6 条就立刻放行
+    feed(history, [19.0 + i for i in range(IDLE_BYPASS_MESSAGES - 1)])
+    assert not backoff.allows('g', 20.0, history)     # 才 5 条
+    feed(history, [30.0])
+    assert backoff.allows('g', 30.0, history)         # 第 6 条，话题翻篇了
+
+    # 连败越久退避越久，封顶 IDLE_MAX_SECONDS
+    capped = IdleBackoff()
+    for i in range(12):
+        capped.record('g', spoke=False, now=float(i), history=[])
+    assert capped._states['g'].until == 11.0 + IDLE_MAX_SECONDS
+
+    # 开口就清零
+    capped.record('g', spoke=True, now=100.0, history=[])
+    assert capped.allows('g', 100.0, []) and capped._states['g'].silences == 0
 
     print('necessity self-check ok')
 
