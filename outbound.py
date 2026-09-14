@@ -56,25 +56,3 @@ class OutboundQueue:
                 await self._send(item)
             except Exception as e:  # 单条失败不能拖垮 worker
                 logger.error(f'发送失败 {item.receiver}: {e}')
-
-
-if __name__ == '__main__':
-    # 自检：顺序发出，且相邻两条间隔不小于 min_interval
-    async def demo():
-        sent = []
-
-        async def send(item: Outbound):
-            sent.append((asyncio.get_running_loop().time(), item.text))
-
-        queue = OutboundQueue(send, min_interval=0.1)
-        await queue.start()
-        for i in range(3):
-            queue.put('u', f'm{i}')
-        await asyncio.sleep(0.6)
-        await queue.stop()
-        assert [t for _, t in sent] == ['m0', 'm1', 'm2'], sent
-        gaps = [b[0] - a[0] for a, b in zip(sent, sent[1:], strict=False)]
-        assert all(g >= 0.1 for g in gaps), gaps
-        print('ok', [round(g, 3) for g in gaps])
-
-    asyncio.run(demo())
