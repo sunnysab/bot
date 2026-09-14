@@ -344,8 +344,13 @@ class ChatPlugin(Plugin):
 
         from jinja2 import Template
         base = Path(__file__).parent
-        self.planner_template = Template((base / 'planner.txt').read_text(encoding='utf-8'), enable_async=True)
-        self.replyer_template = Template((base / 'replyer.txt').read_text(encoding='utf-8'), enable_async=True)
+        # trim_blocks/lstrip_blocks：{% if %} 独占一行时不留空行。
+        # 不设的话每个分支里都会多出一堆空行，白烧 token。
+        options = {'enable_async': True, 'trim_blocks': True, 'lstrip_blocks': True}
+        self.planner_template = Template(
+            (base / 'planner.txt').read_text(encoding='utf-8'), **options)
+        self.replyer_template = Template(
+            (base / 'replyer.txt').read_text(encoding='utf-8'), **options)
 
     @property
     def planner_ai(self) -> AiProvider:
@@ -451,7 +456,7 @@ class ChatPlugin(Plugin):
         tools.append((SPEAK, speak))
         toolbox = Toolbox(tools)
 
-        prompt = await self._planner_prompt(ctx)
+        prompt = await self._planner_prompt(ctx, toolbox.names)
         messages = [{'role': 'user',
                      'content': await self._build_message(ctx, self._compose(ctx, blocks, transcript),
                                                           ctx.is_image)}]
@@ -522,11 +527,12 @@ class ChatPlugin(Plugin):
         lines.append(transcript)
         return '\n\n'.join(lines)
 
-    async def _planner_prompt(self, ctx: MessageContext) -> str:
+    async def _planner_prompt(self, ctx: MessageContext, tools: tuple[str, ...] = ()) -> str:
+        """ tools 传空就用单轮 JSON 那套输出格式，传工具名就换成工具行动那套。 """
         return await self.planner_template.render_async(behavior_style=self.persona.behavior_style,
                                                         self_name=ctx.self_name, contact=ctx.contact,
                                                         is_group=ctx.msg.is_chatroom,
-                                                        aliases=self.persona.aliases)
+                                                        aliases=self.persona.aliases, tools=tools)
 
     async def _plan(self, ctx: MessageContext, necessity: NecessityScore, blocks: dict[str, str],
                     transcript: str) -> Plan | None:

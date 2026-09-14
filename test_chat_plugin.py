@@ -561,6 +561,32 @@ class TestToolLoop(unittest.IsolatedAsyncioTestCase):
         reply = await plugin.handle(proactive_ctx())
         self.assertEqual(reply.texts, ['收到'])
 
+    async def test_prompt_switches_between_tool_and_json_mode(self):
+        """ 提示词的输出格式必须跟走哪条路一致，不能两个都写。 """
+        plugin = self.plugin([])
+        ctx = proactive_ctx()
+        tool_prompt = await plugin._planner_prompt(ctx, ('search_emoji', 'send_emoji', 'speak'))
+        json_prompt = await plugin._planner_prompt(ctx)
+
+        self.assertIn('什么工具都不调，就等于这一轮不发言', tool_prompt)
+        self.assertIn('search_emoji', tool_prompt)
+        self.assertNotIn('只输出一个 JSON', tool_prompt)
+
+        self.assertIn('只输出一个 JSON', json_prompt)
+        self.assertNotIn('search_emoji', json_prompt)
+
+        # {% if %} 独占一行不能留下空行，白烧 token
+        for text in (tool_prompt, json_prompt):
+            self.assertNotIn('\n\n\n', text)
+
+    async def test_emoji_tools_are_left_out_of_the_prompt_when_unavailable(self):
+        """ 没接表情搜索时，提示词里不能提搜表情——不然模型会去调一个不存在的工具。 """
+        plugin = ChatPlugin(ToolAi([]), context_length=10)
+        prompt = await plugin._planner_prompt(proactive_ctx(), ('speak',))
+        self.assertIn('speak', prompt)
+        self.assertNotIn('search_emoji', prompt)
+        self.assertNotIn('send_emoji', prompt)
+
 
 class TestCleanReply(unittest.TestCase):
     """ 模型顺手带的包装不能漏到群里。 """
