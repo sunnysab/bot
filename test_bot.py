@@ -11,8 +11,10 @@ from plugin import EndProcessing, Plugin, Reply
 
 
 class FakeWechat:
-    def __init__(self):
+    def __init__(self, fail=False):
         self.sent: list[tuple[str, str]] = []
+        self.attempts: list[tuple[str, str]] = []
+        self.fail = fail
         self.all_contacts: dict[str, str] = {}
 
     @property
@@ -20,6 +22,9 @@ class FakeWechat:
         return 'wxid_bot'
 
     async def send_text(self, text, receiver, at_list=''):
+        self.attempts.append((receiver, text))
+        if self.fail:
+            raise RuntimeError('解析长链 newsendmsg 响应失败: invalid data: unsupported wiretype 7')
         self.sent.append((receiver, text))
 
     async def get_display_name(self, wxid, chatroom=''):
@@ -60,6 +65,17 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.bot._wechat.sent, [('456@chatroom', 'hi')])
         self.assertEqual([r.text for r in self._window()], ['hello', 'hi'])
+
+    async def test_send_failure_still_records_history(self):
+        """ relay 回执解析失败但消息已投递：不能重试，历史也要照写。 """
+        self.bot.set_default_plugin(FakePlugin(texts=['hi', 'there']))
+        self.bot._wechat.fail = True
+        await self.bot.on_message(make_msg())
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(self.bot._wechat.attempts, [('456@chatroom', 'hi'), ('456@chatroom', 'there')])
+        self.assertNotIn(('456@chatroom', 'hi'), self.bot._wechat.sent)  # 没有重发
+        self.assertEqual([r.text for r in self._window()], ['hello', 'hi', 'there'])
 
     async def test_stop_plugin_short_circuits(self):
         self.bot.set_default_plugin([FakePlugin(texts=['a'], stop=True), FakePlugin(texts=['b'])])

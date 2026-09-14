@@ -144,7 +144,13 @@ class Bot:
 
     async def _deliver(self, item: Outbound) -> None:
         """ 真正发送并写入上下文，由 OutboundQueue 串行调用。 """
-        await self._wechat.send_text(item.text, item.receiver)
+        try:
+            await self._wechat.send_text(item.text, item.receiver)
+        except Exception as e:
+            # relay 长链发送回执解析有 bug：消息通常已经投递出去，重发会重复发。
+            # 所以只告警不重试，但仍然写历史，否则下一轮模型看不到自己说过的话。
+            # ponytail: 真·投递失败时历史会多一条，靠日志排查
+            logger.warning(f'发送报错，按已投递处理（不重试）{item.receiver}: {e}')
         self._history.push_message(item.receiver, item.sender, item.text, int(time.time()), is_self=True)
 
     async def _preprocess(self, msg: Message, **ctx) -> Message | None:
