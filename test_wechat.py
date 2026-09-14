@@ -25,6 +25,11 @@ def make_message(**kwargs) -> Message:
 class FakeBot:
     def __init__(self):
         self.sent: list[dict] = []
+        self.contact_calls: list[str] = []
+        self.wxid = 'wxid_me'
+        # 实测 relay 查不到群成员时是拿 wxid 当名字返回的；置空模拟这种情况
+        self.group_card = 'AliceGroupCard'
+        self.contacts = {'wxid_alice': 'Alice', '456@chatroom': '一起哈啤'}
 
     async def get_all_contacts(self, **kwargs):
         return [types.SimpleNamespace(username='wxid_alice', name='Alice')]
@@ -42,7 +47,12 @@ class FakeBot:
         ]
 
     async def get_chatroom_member(self, chatroom, wxid):
-        return types.SimpleNamespace(name='AliceGroupCard')
+        return types.SimpleNamespace(name=self.group_card or wxid)
+
+    async def get_contact(self, user):
+        self.contact_calls.append(user)
+        name = self.contacts.get(user)
+        return [types.SimpleNamespace(username=user, name=name)] if name else []
 
     async def send_text(self, to, text, at_users, at_names):
         self.sent.append({'to': to, 'text': text, 'at_users': at_users, 'at_names': at_names})
@@ -100,6 +110,28 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
         self.wechat.dry_run = True
         await self.wechat.send_text('你好', '456@chatroom')
         self.assertEqual(self.wechat._bot.sent, [])
+
+    async def test_member_name_falls_back_when_relay_returns_wxid(self):
+        """ relay 查不到群成员就返 wxid；那不是名字，得退到联系人表。 """
+        self.wechat._bot.group_card = ''
+        name = await self.wechat.get_display_name('wxid_alice', '456@chatroom')
+        self.assertEqual(name, 'Alice')
+
+    async def test_group_name_comes_from_get_contact(self):
+        """ get_all_contacts 不含群，群名只能单独查。 """
+        self.assertEqual(await self.wechat.get_display_name('456@chatroom'), '一起哈啤')
+
+    async def test_resolved_names_are_cached(self):
+        for _ in range(3):
+            await self.wechat.get_display_name('456@chatroom')
+            await self.wechat.get_display_name('wxid_alice', '456@chatroom')
+        self.assertEqual(self.wechat._bot.contact_calls, ['456@chatroom'])   # 群里那个人走群名片
+        self.assertEqual(await self.wechat.get_display_name('456@chatroom'), '一起哈啤')
+
+    async def test_unknown_name_stays_wxid(self):
+        self.wechat._bot.group_card = ''
+        self.assertEqual(await self.wechat.get_display_name('wxid_nobody', '456@chatroom'),
+                         'wxid_nobody')
 
 
 if __name__ == '__main__':

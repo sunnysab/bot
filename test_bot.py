@@ -2,6 +2,7 @@
 
 import asyncio
 import random
+import time
 import types
 import unittest
 
@@ -21,6 +22,7 @@ class FakeWechat:
         self.emojis_sent: list[tuple[str, str]] = []    # (receiver, md5)
         self.emoji_queries: list[str] = []
         self.online: list = []                          # 假线上搜索结果
+        self.names = {'wxid_bot': 'Bot'}                # wxid -> 显示名，查不到就回 wxid
 
     async def search_emoji(self, keyword, limit=10):
         self.emoji_queries.append(keyword)
@@ -40,7 +42,7 @@ class FakeWechat:
         self.sent.append((receiver, text))
 
     async def get_display_name(self, wxid, chatroom=''):
-        return 'Bot'
+        return self.names.get(wxid, wxid)
 
 
 class FakePlugin(Plugin):
@@ -53,9 +55,11 @@ class FakePlugin(Plugin):
         return Reply(texts=list(self.texts), stop=self._stop, emoji=self.emoji)
 
 
-def make_msg(text='hello', is_self=False, msg_type=1):
+def make_msg(text='hello', is_self=False, msg_type=1, create_time=None):
     return types.SimpleNamespace(msg_type=msg_type, content=text, clean_text=text, text=text, is_self=is_self,
-                                 reply_target='456@chatroom', sender_name='Alice', create_time=100,
+                                 reply_target='456@chatroom', sender_name='Alice', sender='wxid_alice',
+                                 sender_display_name='Alice',
+                                 create_time=int(time.time()) if create_time is None else create_time,
                                  is_chatroom=True, is_at_me=True)
 
 
@@ -116,6 +120,15 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot._wechat.sent, [])
         self.assertEqual(len(self._window()), 1)
 
+    async def test_stale_backlog_is_recorded_but_not_answered(self):
+        """ relay 长链重连补推的离线积压：写进历史当上下文，但不触发回复。 """
+        self.bot.set_default_plugin(FakePlugin(texts=['hi']))
+        await self.bot.on_message(make_msg(create_time=int(time.time()) - 3600))
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(self.bot._wechat.sent, [])
+        self.assertEqual([r.text for r in self._window()], ['hello'])
+
     async def test_self_message_is_ignored(self):
         self.bot.set_default_plugin(FakePlugin(texts=['hi']))
         await self.bot.on_message(make_msg(is_self=True))
@@ -150,6 +163,23 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         await self.bot.on_message(make_msg())
         await asyncio.sleep(0.05)
         self.assertEqual(self.bot._wechat.sent[0][1], '这个我觉得不行')
+
+    async def test_media_placeholder_is_never_sent_as_text(self):
+        """ [表情：欢迎] 只该出现在历史里；插件/模型把它当话说就拦下。 """
+        self.bot.set_default_plugin(FakePlugin(texts=['[表情：欢迎]']))
+        await self.bot.on_message(make_msg())
+        await asyncio.sleep(0.05)
+        self.assertEqual(self.bot._wechat.sent, [])
+        self.assertEqual(len(self._window()), 1)     # 只有别人那条，自己什么也没说
+
+    async def test_placeholder_is_dropped_but_the_emoji_still_goes(self):
+        """ 搜不到表情时宁可不说话；真选中了表情就正常发。 """
+        self.bot.set_default_plugin(FakePlugin(texts=['[表情：欢迎]'],
+                                               emoji=Emoji(md5='a' * 32, desc='欢迎', cdnurl='http://cdn/x')))
+        await self.bot.on_message(make_msg())
+        await asyncio.sleep(0.05)
+        self.assertEqual(self.bot._wechat.sent, [])
+        self.assertEqual(self.bot._wechat.emojis_sent, [('456@chatroom', 'a' * 32)])
 
 
 class FakeDescriber:

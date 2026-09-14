@@ -21,6 +21,8 @@ class Wechat:
         self.dry_run = dry_run
         # 联系人字典，键值对格式: {'wxid': '显示名'}
         self.all_contacts: dict[str, str] = {}
+        # 按需查到的名字（群名、群里的人）；只记成功的结果，查不到就下次再查
+        self._names: dict[str, str] = {}
         self._message_callback = callback or self._on_message
 
         self._bot.on_message(self._dispatch)
@@ -121,23 +123,51 @@ class Wechat:
         return sessions[:count]
 
     async def get_display_name(self, wxid: str, chatroom: str = '') -> str:
-        """ 获取联系人的显示名称. 对于群友，优先使用本地的备注，其次使用群昵称，最后使用微信昵称 """
+        """ 获取联系人的显示名称. 对于群友，优先使用本地的备注，其次使用群昵称，最后使用微信昵称
+
+        注意 relay 查不到群成员时会**拿 wxid 当名字**返回，那不是名字，得接着往下找。
+        """
         if chatroom == wxid:  # 非群聊
             chatroom = ''
-
-        if chatroom and wxid:
-            try:
-                member = await self._bot.get_chatroom_member(chatroom, wxid)
-                if member.name:
-                    return member.name
-            except Exception as e:
-                logger.debug(f'failed to get chatroom member {wxid} in {chatroom}: {e}')
 
         if wxid == self.wxid:
             return self.nickname or wxid
 
-        # 使用兜底方案：联系人表中查找昵称
-        return self.all_contacts.get(wxid, wxid)
+        key = f'{chatroom}|{wxid}' if chatroom else wxid
+        if key in self._names:
+            return self._names[key]
+
+        name = ''
+        if chatroom and wxid:
+            try:
+                member = await self._bot.get_chatroom_member(chatroom, wxid)
+                if member.name and member.name != wxid:
+                    name = member.name
+            except Exception as e:
+                logger.debug(f'failed to get chatroom member {wxid} in {chatroom}: {e}')
+
+        if not name:
+            name = await self._resolve_contact(wxid)
+
+        if name:
+            self._names[key] = name
+        return name or wxid
+
+    async def _resolve_contact(self, wxid: str) -> str:
+        """ 从联系人表查显示名，查不到就现查一次。
+
+        群名也走这条路：`get_all_contacts` 不含群，得单独 `get_contact` 才拿得到。
+        """
+        if wxid in self.all_contacts:
+            return self.all_contacts[wxid]
+        try:
+            for contact in await self._bot.get_contact(wxid):
+                if contact.username == wxid and contact.name:
+                    self.all_contacts[wxid] = contact.name
+                    return contact.name
+        except Exception as e:
+            logger.debug(f'failed to resolve contact {wxid}: {e}')
+        return ''
 
     async def fetch_history(self, wxid: str, count: int = 50) -> ChatWindow:
         """ 获取群或联系人的聊天记录

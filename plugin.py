@@ -198,24 +198,28 @@ class RepeatPlugin(Plugin):
         if len(history) < self.repeat_count:
             return None
 
-        # 对历史消息去除昵称、标点等操作
+        # 对历史消息去除昵称、标点等操作；自己已经说过的队形不跟
         myself = ctx.self_name
-        # 队形跟过了就不要再跟了
-        blocked_set = {x.pure_text() for x in history if x.sender == myself}
-        clear_context: list[str] = [x.pure_text() for x in history if x.pure_text() and x.pure_text() not in blocked_set]
-        count_dict: dict[str, list[int]] = {}
-        for pos, text in enumerate(clear_context):
-            count_dict.setdefault(text, []).append(pos)
+        blocked = {x.pure_text() for x in history if x.sender == myself}
+        groups: dict[str, list[SingleRecord]] = {}
+        for record in history:
+            if record.sender == myself:
+                continue
+            clean = record.pure_text()
+            # 洗掉标点后是空串的（[表情：欢迎] 这类占位符）不能当队形，
+            # 否则会把一串方括号当话发出去
+            if clean and clean not in blocked:
+                groups.setdefault(clean, []).append(record)
 
-        # 找到最多的重复元素及次数, 其实就是找 count_dict 中 value 最长的.
-        if not count_dict:
+        # 找到最多的重复元素及次数, 其实就是找 groups 中 value 最长的.
+        if not groups:
             return None
-        max_repeat = max(count_dict.values(), key=len)
-        if len(max_repeat) < self.repeat_count:
+        repeated = max(groups.values(), key=len)
+        if len(repeated) < self.repeat_count:
             return None
 
         # 找一条别人说过的队形，跟上
-        record: SingleRecord = history[max_repeat[-1]]
+        record: SingleRecord = repeated[-1]
         text: str = record.text
         # 太长不跟
         if len(text) > self.max_length:

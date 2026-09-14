@@ -29,6 +29,18 @@ class Media:
         return not self.description and bool(self.md5)
 
 
+PLACEHOLDER = re.compile(r'^\[(图片|表情|语音|视频|位置|链接|文件|合并转发|小程序)([：:][^\]]*)?\]$')
+
+
+def is_placeholder(text: str) -> bool:
+    """ 整句就是个媒体占位符（`[表情：欢迎]`）？
+
+    这种文本只应该出现在**历史**里。但模型看到历史会照抄，插件也可能把历史原文当队形
+    发出来——真发出去群里看到的就是一串方括号。所以发送前统一拦一道。
+    """
+    return bool(PLACEHOLDER.match((text or '').strip()))
+
+
 def strip_prefix(content: str) -> str:
     """ relay 有时在 XML 前拼一行 'wxid_xxx:'，截到第一个 '<'。 """
     start = content.find('<')
@@ -196,4 +208,12 @@ if __name__ == '__main__':
     assert render(43, '', '') == ('[视频]', None)
     assert render(1, 'ignored', '你好') == ('你好', None)
     assert render(2, 'x', 'x') == ('', None)
+
+    # 媒体占位符不能被当成要说的话发出去
+    assert is_placeholder('[表情：欢迎]') and is_placeholder('[图片]') and is_placeholder('[位置：海淀区]')
+    assert is_placeholder('  [表情：欢迎]  ')
+    assert not is_placeholder('欢迎')
+    assert not is_placeholder('[表情：欢迎] 也太离谱了')     # 只是开头像，不当占位
+    assert not is_placeholder('') and not is_placeholder('[不是占位符]')
+    assert not is_placeholder('我[表情]了')
     print('ok')

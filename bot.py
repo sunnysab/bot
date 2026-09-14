@@ -7,7 +7,7 @@ from loguru import logger
 from context import ChatWindow, ContextManager, MessageContext, MessageKind, SingleRecord
 from describer import MediaDescriber
 from emojis import Emoji, EmojiLibrary, parse_emoji_xml
-from media import render
+from media import is_placeholder, render
 from moments import MomentKeeper
 from outbound import Outbound, OutboundQueue
 from plugin import Plugin, PluginManager, Reply
@@ -18,6 +18,7 @@ from wechat import Message, Wechat
 EMOJI_LOCAL_ENOUGH = 3
 EMOJI_RESULT_LIMIT = 8
 EMOJI_SAVE_INTERVAL = 5.0      # 表情库最长隔这么久落一次盘（热度是运行时累加的）
+STALE_MESSAGE_SECONDS = 300.0  # 比这更旧的消息只当上下文：relay 长链重连会补推离线积压
 
 T = TypeVar('T')
 
@@ -99,10 +100,14 @@ class Bot:
             return local
         seen = {item.md5 for item in local}
         merged = local + [item for item in online if item.md5 not in seen]
-        if self.emojis and online:
-            for item in online:
-                self.emojis.record(item)   # 当缓存，下次同类关键词不用再联网
-            self.save_emojis()
+        # 只把「真能发出去」的存进库：线上搜回来的经常缺 cdnurl/aeskey（实测 40 条里
+        # cdnurl 全空、aeskey 只有 10 条有），存下来也发不出去，只是占位置
+        if self.emojis:
+            cached = [item for item in online if item.sendable]
+            for item in cached:
+                self.emojis.record(item)
+            if cached:
+                self.save_emojis()
         return merged[:EMOJI_RESULT_LIMIT]
 
     def steal_emoji(self, msg) -> None:
@@ -252,7 +257,10 @@ class Bot:
 
         # 自己的名字；消息来源：群消息取群名称，否则取联系人备注
         self_name: str = await self._wechat.get_display_name(self.wxid, msg.reply_target)
-        source = self._wechat.all_contacts.get(msg.reply_target, msg.reply_target)
+        source = await self._wechat.get_display_name(msg.reply_target)
+        # relay 有时把群成员的显示名解析成了 wxid，那样历史里全是 wxid，得自己补一次
+        if msg.is_chatroom and msg.sender_name == msg.sender:
+            msg.sender_display_name = await self._wechat.get_display_name(msg.sender, msg.reply_target)
         logger.debug(msg)
 
         # 非文本消息的正文换成可读标记：图片/表情/位置/视频/语音/链接/文件/引用
@@ -267,15 +275,25 @@ class Bot:
         if self._describer:
             self._describer.schedule(record)
 
+        # 离线的积压不触发决策：relay 长链重连会把几个钟头前的消息当 live 推过来，
+        # 照发会对着死了的话题连回几十条。写进历史当上下文就够了。
+        if msg.create_time and time.time() - msg.create_time > STALE_MESSAGE_SECONDS:
+            logger.info(f'积压消息只记不回（{int(time.time() - msg.create_time)}s 前）: '
+                        f'{msg.sender_name}: {msg.content[:30]}')
+            return
+
         response = await self._run_plugins(msg, self_name, source)
         if not response.texts and not response.emoji:
             logger.debug('no response to send.')
             return  # 没有回复内容
 
         # 交给全局发送队列统一限流和拟人延迟，避免阻塞消息接收循环
-        for text in response.texts:
+        texts = [text for text in response.texts if not is_placeholder(text)]
+        if len(texts) != len(response.texts):
+            logger.warning(f'拦下 {len(response.texts) - len(texts)} 条媒体占位符，不往群里发：{response.texts}')
+        for text in texts:
             self.outbox.put(msg.reply_target, text, sender=self_name)
         if response.emoji:
             # 表情排在文字后面：先说一句，再补个表情收尾
             self.outbox.put_emoji(msg.reply_target, response.emoji, sender=self_name)
-        logger.debug(f'{len(response.texts)} responses queued.')
+        logger.debug(f'{len(texts)} responses queued.')

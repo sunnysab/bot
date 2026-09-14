@@ -401,6 +401,17 @@ class TestRepeatPlugin(unittest.IsolatedAsyncioTestCase):
         reply = await RepeatPlugin().handle(make_ctx(make_msg(), history=window))
         self.assertIsNone(reply)
 
+    async def test_marker_between_the_repeats_is_not_echoed(self):
+        """ 真实的那个 bug：占位符被洗成空串后就从下标里消失了，
+        但选中的却是**原历史**的第 N 条——于是把 [表情：欢迎] 当队形发出去。 """
+        window = ChatWindow()
+        window.append('Alice', '牛啊', 1)
+        window.append('Bob', '[表情：欢迎]', 2)
+        window.append('Carol', '牛啊', 3)
+        window.append('Dave', '[表情：欢迎]', 4)
+        reply = await RepeatPlugin().handle(make_ctx(make_msg(), history=window))
+        self.assertEqual(reply.texts, ['牛啊'])
+
     async def test_repeats_and_stops(self):
         window = ChatWindow()
         window.append('Alice', '牛啊', 1)
@@ -408,6 +419,14 @@ class TestRepeatPlugin(unittest.IsolatedAsyncioTestCase):
         reply = await RepeatPlugin().handle(make_ctx(make_msg(), history=window))
         self.assertEqual(reply.texts, ['牛啊'])
         self.assertTrue(reply.stop)
+
+    async def test_own_repeat_is_not_followed_again(self):
+        window = ChatWindow(sample_history())
+        window.append('Alice', '牛啊', 1)
+        window.append('Bob', '牛啊', 2)
+        window.append('Bot', '牛啊', 3, is_self=True)
+        reply = await RepeatPlugin().handle(make_ctx(make_msg(), history=window))
+        self.assertIsNone(reply)
 
 
 class TestIdleBackoffInPlugin(unittest.IsolatedAsyncioTestCase):
