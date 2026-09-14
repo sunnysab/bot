@@ -9,6 +9,7 @@ from loguru import logger
 
 from ai import AiProvider
 from context import ChatWindow, MessageContext, SingleRecord
+from habits import HabitStore
 from necessity import (
     NECESSITY_THRESHOLD,
     PRESENCE_WINDOW_SECONDS,
@@ -180,19 +181,22 @@ class ReplyPolicy:
 
 class ChatPlugin(Plugin):
     def __init__(self, ai_provider: AiProvider, context_length: int = 10, policy: ReplyPolicy | None = None,
-                 profiles: ProfileStore | None = None, tracer: TraceLogger | None = None):
+                 profiles: ProfileStore | None = None, habits: HabitStore | None = None,
+                 tracer: TraceLogger | None = None):
         """ 聊天插件
 
         :param ai_provider: AI 服务提供者
         :param context_length: 送入模型的上下文消息条数
         :param policy: 是否回复的策略；不传则用默认（必要性打分）
         :param profiles: 群友画像；传了就注入 prompt 让机器人认识人
+        :param habits: 群里的特色用语；当前消息命中才注入
         :param tracer: 回复轨迹记录；传了就把每轮触发/上下文/回复写成 JSONL
         """
         self.ai = ai_provider
         self.context_length = context_length
         self.policy = policy or ReplyPolicy()
         self.profiles = profiles
+        self.habits = habits
         self.tracer = tracer
 
         from jinja2 import Template
@@ -213,9 +217,11 @@ class ChatPlugin(Plugin):
         profiles = ''
         if self.profiles:
             profiles = self.profiles.render_for(record.sender for record in reversed(history))
+        habit_block = self.habits.render(msg.content) if self.habits else ''
         prompt = await self.prompt_template.render_async(self_name=ctx.self_name, contact=ctx.contact,
                                                          is_group=msg.is_chatroom, trigger=necessity.kind,
-                                                         trigger_detail=necessity.detail, profiles=profiles)
+                                                         trigger_detail=necessity.detail, profiles=profiles,
+                                                         habits=habit_block)
 
         text = '回复你扮演的角色所要说的话。以下聊天记录供你参考：\n\n' + str(history)
         started = time.perf_counter()

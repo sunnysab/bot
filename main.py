@@ -8,6 +8,7 @@ from ai import Deepseek
 from bot import Bot, PayloadProcessor
 from config import Config
 from describer import MediaCache, MediaDescriber
+from habits import HabitStore
 from plugin import ChatPlugin, EndProcessing, RepeatPlugin, ReplyPolicy
 from profiles import ProfileStore
 from reply_trace import TraceLogger
@@ -42,8 +43,11 @@ def main():
     profiles = ProfileStore.load(config.profile_path)
     if profiles:
         logger.info(f'已加载 {len(profiles)} 个人的画像: {config.profile_path}')
+    habits = HabitStore.load(config.habit_path)
+    if habits:
+        logger.info(f'已加载 {len(habits)} 条群用语: {config.habit_path}')
     chat_plugin = ChatPlugin(ai_provider, context_length=30, policy=policy, profiles=profiles,
-                             tracer=TraceLogger(config.trace_path))
+                             habits=habits, tracer=TraceLogger(config.trace_path))
 
     bot.set_default_plugin([repeater, chat_plugin])
     bot.attach('研究生摆烂群', EndProcessing())

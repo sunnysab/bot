@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from context import ChatWindow, MessageContext
+from habits import Habit, HabitStore
 from necessity import NECESSITY_THRESHOLD
 from plugin import ChatPlugin, RepeatPlugin, ReplyPolicy
 from profiles import Profile, ProfileStore
@@ -85,6 +86,15 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
     async def test_private_replies(self):
         reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
         self.assertEqual(reply.texts, ['收到'])
+
+    async def test_habits_injected_only_on_hit(self):
+        self.plugin.habits = HabitStore(habits=(Habit('蛙趣', 126, ('蛙趣 你的ID和小红书一样的吧',)),))
+
+        await self.plugin.handle(make_ctx(make_msg(is_chatroom=False, content='蛙趣，真的假的')))
+        self.assertIn('你的ID和小红书', self.ai.calls[0][0])
+
+        await self.plugin.handle(make_ctx(make_msg(is_chatroom=False, content='平平无奇的一句话')))
+        self.assertNotIn('黑话', self.ai.calls[1][0])
 
     async def test_profiles_are_injected_into_prompt(self):
         store = ProfileStore(people={'wxid_x': Profile('wxid_x', names=('Alice',), phrases=('蛙趣',))})

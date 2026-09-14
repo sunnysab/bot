@@ -25,10 +25,12 @@ dev = ["ruff"]
 py-modules = [
     "ai",
     "bot",
+    "build_habits",
     "build_profiles",
     "config",
     "context",
     "describer",
+    "habits",
     "main",
     "media",
     "message",

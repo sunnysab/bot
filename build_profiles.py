@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Iterator
+from collections.abc import Collection, Iterable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -109,18 +109,23 @@ def iter_clauses(text: str) -> Iterator[str]:
             yield part
 
 
-def keep_phrases(counter: Counter[str]) -> list[str]:
-    """ 取高频短句，顺带去掉互为子串的变体（哈哈 / 哈哈哈 / 哈哈哈哈）。 """
+# 纯笑声：只反映情绪，不携带任何表达习惯
+LAUGH_ONLY = frozenset('哈嘻嘿呵hH')
+
+
+def keep_phrases(counter: Counter[str], min_count: int = MIN_PHRASE_COUNT, limit: int = MAX_PHRASES,
+                 banned: Collection[str] = PHRASE_STOPLIST) -> list[str]:
+    """ 取高频短句，顺带去掉互为子串的变体（哈哈 / 哈哈哈 / 哈哈哈哈）和纯笑声。 """
     picked: list[str] = []
     for phrase, count in counter.most_common():
-        if count < MIN_PHRASE_COUNT:
+        if count < min_count:
             break
-        if phrase in PHRASE_STOPLIST:
+        if phrase in banned or set(phrase) <= LAUGH_ONLY:
             continue
         if any(phrase in other or other in phrase for other in picked):
             continue
         picked.append(phrase)
-        if len(picked) >= MAX_PHRASES:
+        if len(picked) >= limit:
             break
     return picked
 
