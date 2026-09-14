@@ -11,6 +11,7 @@ dependencies = [
     "openai",
     "jinja2",
     "loguru",
+    "python-dotenv",
     "weixin-bot",
 ]
 
@@ -24,14 +25,17 @@ dev = ["ruff"]
 py-modules = [
     "ai",
     "bot",
+    "build_profiles",
     "config",
     "context",
     "describer",
     "main",
     "media",
     "message",
+    "necessity",
     "outbound",
     "plugin",
+    "profiles",
     "wechat",
 ]
 

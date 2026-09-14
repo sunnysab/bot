@@ -90,41 +90,6 @@ class Doubao(OpenAI):
         super().__init__(url='https://ark.cn-beijing.volces.com/api/v3', key=key, model=model, **kwargs)
 
 
-class Ollama(AiProvider):
-    """ Ollama """
-
-    def __init__(self, model: str, url: str, **kwargs):
-        super().__init__(**kwargs)
-
-        from ollama import AsyncClient
-        self.model = model
-        self.client = AsyncClient(url)
-
-    async def chat(self, prompt: str, message: str | list) -> list[str] | None:
-        """ 聊天 """
-        response = await self.client.chat(
-            model=self.model,
-            messages=[
-                {'role': 'system', 'content': prompt},
-                {'role': 'user', 'content': message}],
-        )
-
-        response_text: str = response['message']['content']
-        logger.debug(
-            f'Ollama interface. prompt: {repr(prompt)}, response: {repr(response_text)}')
-
-        # 额外处理一下 Deepseek-R1 思维链的思维过程.
-        RIGHT_THINK_BRACE = '</think>'
-        right_brace = response_text.find(RIGHT_THINK_BRACE) + len(RIGHT_THINK_BRACE) + 1
-        if right_brace > 0:
-            response_text = response_text[right_brace:]
-
-        # 如果回复内容为“本轮不发言”，则返回 None
-        if self.silent(response_text):
-            return None
-        return [x.strip() for x in response_text.split() if x.strip()]
-
-
 async def main():
     ds = Deepseek(key='your-key')
     image = base64.b64encode(open('image/dog.jpg', 'rb').read()).decode()
