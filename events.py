@@ -125,6 +125,18 @@ class EventBus:
         # 被回复的消息 msg_id -> 那个回复最近到哪一步了。
         # 出站要等 relay 收下才有自己的身份，所以回复的进度挂在被回复的那条上
         self._by_reply: dict[str, Event] = {}
+        # 每条事件都要跑一遍的回调（落盘用）。同步调用，自己负责快
+        self._subscribers: list = []
+
+    def subscribe(self, fn) -> None:
+        """ 订阅每一条事件（在发布线程里同步调用，别在里面做慢活）。 """
+        with self._lock:
+            self._subscribers.append(fn)
+
+    def unsubscribe(self, fn) -> None:
+        with self._lock:
+            if fn in self._subscribers:
+                self._subscribers.remove(fn)
 
     def publish(self, status: str, *, chat_id: str = '', chat_name: str = '',
                 msg_id=None, reply_to=None, **fields) -> Event | None:
@@ -139,6 +151,13 @@ class EventBus:
                     self._latest[event.msg_id] = event
                 if event.reply_to:
                     self._by_reply[event.reply_to] = event
+                subscribers = list(self._subscribers)
+            # 出了锁再通知：订户要落盘，别把发布路径锁住
+            for fn in subscribers:
+                try:
+                    fn(event)
+                except Exception as e:  # noqa: BLE001 —— 一个订户坏了不能影响其他
+                    logger.warning(f'事件订阅者出错（{status}）: {e}')
             return event
         except Exception as e:  # noqa: BLE001 —— 后台绝不能把聊天带崩
             logger.warning(f'事件发布失败（{status}）: {e}')
@@ -230,6 +249,15 @@ def _self_check() -> None:
     # 吞异常：传一个不认识的字段也得活
     assert bus.publish(Status.RECEIVED, msg_id=1, 不存在的字段=1) is None
     assert bus.publish(Status.RECEIVED, msg_id=1).status == Status.RECEIVED
+
+    # 订户：每条都收到，且一个订户报错不影响别的
+    seen: list = []
+    b.subscribe(lambda e: seen.append(('first', e.status)))
+    b.subscribe(lambda _e: 1 / 0)                      # 坏订户
+    b.subscribe(lambda e: seen.append(('second', e.status)))
+    b.publish(Status.SENT, msg_id=42)
+    assert ('first', Status.SENT) in seen, seen          # 坏订户之前的不受影响
+    assert ('second', Status.SENT) in seen, seen         # 坏订户之后的也活着
 
     import json
     assert json.loads(json.dumps(e.to_dict()))['msg_id'] == '9202842881785760589'

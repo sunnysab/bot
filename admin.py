@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import threading
 import time
 from dataclasses import MISSING, replace
@@ -36,9 +37,11 @@ from context import SYSTEM_KINDS, MessageKind
 from events import Status, bus
 from media import render
 from reply_trace import find as find_trace
+from reply_trace import latencies as trace_latencies
 from runtime import HOT_FIELDS, RESTART_FIELDS
 
 PAGE = Path(__file__).parent / 'admin.html'
+SIDECAR = Path(__file__).parent / 'admin.db'
 DEFAULT_PORT = 8099          # 8080 在本机被 iptv 占了，别用
 CHATS_LIMIT = 50
 MESSAGES_LIMIT = 300         # v1 一次拉满，relay 的 get_messages 还不能翻页
@@ -110,12 +113,88 @@ def _stale(new: Config, old: Config) -> list[str]:
             if f.name in RESTART_FIELDS and getattr(new, f.name) != getattr(old, f.name)]
 
 
+def _ratio(part: int, whole: int) -> float | None:
+    return None if not whole else round(part / whole, 4)
+
+
+def _percentile(values: list[int], q: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, round(q * (len(ordered) - 1)))]
+
+
+def _rates(counts: dict[str, int]) -> dict:
+    """ 把状态计数变成面板直接能看的比率。公式就写在这儿，不藏在 UI 里。 """
+    received = counts.get(Status.RECEIVED, 0)
+    gated = counts.get(Status.GATED, 0) + counts.get(Status.BACKOFF, 0)
+    deciding = counts.get(Status.DECIDING, 0)
+    failed = (counts.get(Status.PLANNER_FAILED, 0) + counts.get(Status.EXPRESS_FAILED, 0)
+              + counts.get(Status.FAILED, 0))
+    return {
+        'gate_pass': _ratio(received - gated, received),      # 门控放行率
+        'planner_silent': _ratio(counts.get(Status.PLANNER_SILENT, 0), deciding),
+        'reply': _ratio(counts.get(Status.SENT, 0), received),
+        'failed': _ratio(failed, received),
+    }
+
+
+class DecisionLog:
+    """ 状态元数据的窄表（`admin.db`）。**只存元数据，不存正文**——正文的事实源是 relay。
+
+    为什么需要它：放行率 / 沉默率这类统计需要分母，而 `reply_trace` 只记
+    「走到模型的那一轮」——门控拦下的、出站失败的都没有。
+
+    append-only（一条事件一行，不按 msg_id 覆盖）：入站消息后面会跟着好几条状态，
+    覆盖掉就数不出「收到多少条」了。实测量级：每天 ~400 条入站 × 几次状态 = 几千行。
+    ponytail: 同步写，个人量级够用（~ms 级，和 TraceLogger 一致）；卡了再改后台队列批量写。
+    """
+
+    def __init__(self, path: str | Path):
+        self._conn = sqlite3.connect(str(path), check_same_thread=False)
+        self._lock = threading.Lock()
+        self._conn.execute('''CREATE TABLE IF NOT EXISTS decision(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            msg_id TEXT NOT NULL, chat_id TEXT, status TEXT NOT NULL, detail TEXT,
+            score INTEGER, trigger TEXT, latency_ms INTEGER, ts REAL, origin TEXT)''')
+        self._conn.execute('CREATE INDEX IF NOT EXISTS idx_decision_ts ON decision(ts)')
+        self._conn.execute('CREATE INDEX IF NOT EXISTS idx_decision_msg ON decision(msg_id)')
+        self._conn.commit()
+
+    def write(self, event) -> None:
+        """ 总线订户。出站早期的事件（queued/typing）没有身份，不入库——它们是临时的。 """
+        if not event.msg_id:
+            return
+        try:
+            with self._lock:
+                self._conn.execute(
+                    'INSERT INTO decision(msg_id, chat_id, status, detail, score, trigger,'
+                    ' latency_ms, ts, origin) VALUES (?,?,?,?,?,?,?,?,?)',
+                    (event.msg_id, event.chat_id, event.status, event.detail, event.score,
+                     event.trigger, event.latency_ms, event.ts, event.origin))
+                self._conn.commit()
+        except sqlite3.Error as e:
+            logger.warning(f'状态落库失败: {e}')
+
+    def counts(self, since: float) -> dict[str, int]:
+        with self._lock:
+            rows = self._conn.execute(
+                'SELECT status, COUNT(*) FROM decision WHERE ts >= ? GROUP BY status',
+                (since,)).fetchall()
+        return {status: n for status, n in rows}
+
+    def close(self) -> None:
+        self._conn.close()
+
+
 class Admin:
-    def __init__(self, runtime, host: str = '127.0.0.1', port: int = DEFAULT_PORT):
+    def __init__(self, runtime, host: str = '127.0.0.1', port: int = DEFAULT_PORT,
+                 sidecar: str | Path = SIDECAR):
         self.runtime = runtime
         self.host = host
         self.port = port
         self.dotenv = DOTENV_PATH      # 自检里会换成临时文件
+        self.decisions = DecisionLog(sidecar)
         self.server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -134,12 +213,15 @@ class Admin:
     def start(self) -> None:
         handler = type('_BoundHandler', (_Handler,), {'admin': self})
         self.server = ThreadingHTTPServer((self.host, self.port), handler)
+        bus.subscribe(self.decisions.write)      # 绑端口成功了才订，免得白记
         self._thread = threading.Thread(target=self.server.serve_forever,
                                         name='admin', daemon=True)
         self._thread.start()
         logger.info(f'管理后台: http://{self.host}:{self.port}')
 
     def stop(self) -> None:
+        bus.unsubscribe(self.decisions.write)
+        self.decisions.close()
         if self.server:
             self.server.shutdown()
             self.server.server_close()
@@ -298,6 +380,24 @@ class Admin:
             'trace': find_trace(self.runtime.config.trace_path, msg_id),
         }
 
+    # ---------- 统计 ----------
+
+    def stats(self, hours: float = 24.0) -> dict:
+        """ 统计看板。计数的分母来自 sidecar，被点名延迟来自 trace 文件。 """
+        since = time.time() - max(0.1, hours) * 3600
+        counts = self.decisions.counts(since)
+        latencies = trace_latencies(self.runtime.config.trace_path)
+        bot = self.runtime.bot
+        return {
+            'hours': hours,
+            'counts': counts,
+            'rates': _rates(counts),
+            'latency': {'p50': _percentile(latencies, 0.5), 'p95': _percentile(latencies, 0.95),
+                        'n': len(latencies)},
+            'focus': {'entered': self.runtime.focus.entered, 'exited': self.runtime.focus.exited},
+            'counters': {'reply': bot.reply_count, 'emoji': bot.emoji_count, 'typo': bot.typo_count},
+        }
+
     # ---------- 动作 ----------
 
     def set_dry_run(self, on: bool) -> dict:
@@ -439,6 +539,9 @@ class Admin:
                 tail = int((query.get('tail') or ['200'])[0])
                 only = (query.get('only') or [''])[0]
                 return self._json(handler, {'lines': self.log_tail(tail, only)})
+            if route == '/api/stats':
+                hours = float((query.get('hours') or ['24'])[0])
+                return self._json(handler, self.stats(hours))
             if route.startswith('/api/trace/'):
                 return self._json(handler, self.trace(unquote(route[len('/api/trace/'):])))
             if route == '/api/config':
@@ -515,6 +618,7 @@ _STARTED_AT = time.time()
 
 def _self_check() -> None:
     """ 不连 relay 的自检：拿假 runtime 把「渲染 + 贴状态 + 路由」这条链走通。 """
+    import tempfile
     import types
 
     bus.reset()
@@ -562,7 +666,8 @@ def _self_check() -> None:
             is_muted=lambda name: name == '测试群',
             wechat=types.SimpleNamespace(wxid='wxid_bot', nickname='Bot', dry_run=False)))
 
-    admin = Admin(runtime)
+    admin = Admin(runtime, sidecar=Path(tempfile.gettempdir()) / 'bot-admin-selfcheck.db')
+    admin.decisions._conn.execute('DELETE FROM decision')      # 干净起点
 
     def msg(msg_type, content, clean='', is_self=False, msg_id=9202842881785760589):
         return types.SimpleNamespace(
@@ -646,8 +751,6 @@ def _self_check() -> None:
     assert flat['typo_rate']['hot'] and not flat['relay_port']['hot']
 
     # 写回 .env：先校验 → 原子写 → 保留注释 → 报出要重启的字段
-    import tempfile
-
     with tempfile.TemporaryDirectory() as tmp:
         admin.dotenv = Path(tmp) / '.env'
         admin.dotenv.write_text('# 注释\nTYPO_RATE=0.08\n', encoding='utf-8')
@@ -686,6 +789,35 @@ def _self_check() -> None:
         result = admin.reload_config()
         assert applied and applied[0].typo_rate == 0.25, applied
         assert result['changed']['typo_rate'] == '0.25', result
+
+    # 状态落库（统计卡的分母）+ 比率公式
+    bus.subscribe(admin.decisions.write)
+    bus.publish(Status.RECEIVED, msg_id=1, chat_id='g')
+    bus.publish(Status.GATED, msg_id=1, chat_id='g', score=45)
+    bus.publish(Status.RECEIVED, msg_id=2, chat_id='g')
+    bus.publish(Status.DECIDING, msg_id=2, chat_id='g')
+    bus.publish(Status.PLANNER_SILENT, msg_id=2, chat_id='g')
+    bus.publish(Status.QUEUED, reply_to=2, origin='bot')      # 没身份：不入库
+    bus.unsubscribe(admin.decisions.write)
+    counts = admin.decisions.counts(0)
+    # 逐条对比：接口上的数字必须就是这些事件本身（P3 的验收条件）
+    assert counts == {Status.RECEIVED: 2, Status.GATED: 1,
+                      Status.DECIDING: 1, Status.PLANNER_SILENT: 1}, counts
+    assert Status.QUEUED not in counts
+    rates = _rates(counts)
+    assert rates['gate_pass'] == 0.5, rates          # 2 条入站，1 条被门控拦下
+    assert rates['planner_silent'] == 1.0, rates     # 1 次决策，1 次选择不发言
+    assert rates['reply'] == 0.0 and rates['failed'] == 0.0
+    assert _ratio(1, 0) is None                       # 没分母时不能说「0%」
+    assert _percentile([], 0.5) is None
+    assert _percentile([10], 0.95) == 10
+    assert _percentile(list(range(1, 101)), 0.5) == 51
+
+    # 统计接口：trace 文件不存在时延迟那一项是「没有」而不是 0
+    board = admin.stats(hours=1)
+    assert board['latency'] == {'p50': None, 'p95': None, 'n': 0}, board['latency']
+    assert board['counts'][Status.RECEIVED] == 2
+    assert board['focus']['entered'] == 2                     # 前面 set_focus 进了两次
 
     # dataclass 字段自检：Config 里每个字段都得在 HOT 或 RESTART 里，不能漏
     known = HOT_FIELDS | RESTART_FIELDS

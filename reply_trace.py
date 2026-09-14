@@ -84,6 +84,31 @@ def find(path: str | Path, msg_id) -> dict | None:
     return None
 
 
+def latencies(path: str | Path, limit: int = 500,
+              triggers: tuple[str, ...] = ('at', 'mention', 'private')) -> list[int]:
+    """ 最近 limit 轮里，被点名那几类的延迟（毫秒）。
+
+    面板要看「被 @ 的延迟 p50/p95」——notes/未完成.md 里把它列成最可能真需要回退的一项
+    （为了表情工具，点名也走决策者，多一次调用）。
+    """
+    file = Path(path)
+    if not file.exists():
+        return []
+    try:
+        lines = file.read_text(encoding='utf-8').splitlines()[-limit:]
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if record.get('trigger') in triggers:
+            out.append(int(record.get('latency_ms') or 0))
+    return out
+
+
 def _self_check() -> None:
     import tempfile
 
@@ -103,6 +128,12 @@ def _self_check() -> None:
         assert hit and hit['reply'] == ['这样弄'], hit
         assert find(path, '7100000000000000123') == hit
         assert find(path, '7100000000000000124') is None
+
+        # 延迟百分位：默认只算被点名那几类（proactive 是没人点名的主动参与）
+        assert latencies(path) == [500]                      # 那条 trigger='at'
+        assert latencies(path, triggers=('proactive',)) == [800]
+        assert latencies(path, triggers=('mention',)) == []
+        assert latencies('/no/such/dir/trace.jsonl') == []
 
         lines = path.read_text(encoding='utf-8').strip().split('\n')
         assert len(lines) == 2, lines

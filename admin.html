@@ -77,6 +77,10 @@
   .cfg .cfg-row input[type=checkbox]{width:16px;height:16px}
   .cfg-actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
   .cfg textarea{width:100%;min-height:60px;padding:6px;border:1px solid var(--line);border-radius:6px;font:inherit}
+  .bar{display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:3px}
+  .bar span{width:112px;flex:none;color:var(--dim)}
+  .bar i{height:10px;background:var(--accent);border-radius:3px;min-width:2px}
+  .bar em{font-style:normal;color:var(--dim)}
 </style>
 </head>
 <body>
@@ -108,11 +112,13 @@
       <button data-tab="trace" class="on">这条消息</button>
       <button data-tab="health">健康</button>
       <button data-tab="log">日志</button>
+      <button data-tab="stats">统计</button>
       <button data-tab="config">配置</button>
     </div>
     <div id="panel-trace"></div>
     <div id="panel-health" style="display:none"></div>
     <div id="panel-log" style="display:none"></div>
+    <div id="panel-stats" style="display:none"></div>
     <div id="panel-config" style="display:none"></div>
   </div>
 </main>
@@ -263,7 +269,40 @@ function pickedRow(){
   return el ? el.querySelector('.body').textContent : '';
 }
 
-const TABS = ['trace','health','log','config'];
+const TABS = ['trace','health','log','stats','config'];
+
+async function stats(){
+  const hours = window.statsHours || 24;
+  const s = await get('/api/stats?hours=' + hours);
+  const pct = v => v == null ? '—' : (v*100).toFixed(1) + '%';
+  const rows = Object.entries(s.counts).sort((a,b) => b[1]-a[1]);
+  const total = rows.reduce((n, [,v]) => n + v, 0) || 1;
+  $('#panel-stats').innerHTML = `
+    <div class="tabs">
+      <button onclick="setHours(1)" class="${hours===1?'on':''}">1 小时</button>
+      <button onclick="setHours(24)" class="${hours===24?'on':''}">24 小时</button>
+      <button onclick="setHours(168)" class="${hours===168?'on':''}">7 天</button>
+    </div>
+    <h3>比率</h3>
+    <div class="kv">
+      <span>门控放行率</span><span>${pct(s.rates.gate_pass)}</span>
+      <span>planner 沉默率</span><span>${pct(s.rates.planner_silent)}</span>
+      <span>回复率</span><span>${pct(s.rates.reply)}</span>
+      <span>失败率</span><span>${pct(s.rates.failed)}</span>
+    </div>
+    <h3>被点名延迟（最近 ${s.latency.n} 轮）</h3>
+    <div class="kv"><span>p50 / p95</span><span>${s.latency.p50 ?? '—'} / ${s.latency.p95 ?? '—'} ms</span></div>
+    <h3>专注 / 累计</h3>
+    <div class="kv">
+      <span>专注进 / 出</span><span>${s.focus.entered} / ${s.focus.exited}</span>
+      <span>回复·表情·错别字</span><span>${s.counters.reply} · ${s.counters.emoji} · ${s.counters.typo}</span>
+    </div>
+    <h3>状态分布（共 ${total} 条事件）</h3>
+    ${rows.map(([k,v]) => `<div class="bar"><span>${esc(LABEL[k]||k)}</span>
+      <i style="width:${Math.max(2, v/total*100)}%"></i><em>${v}</em></div>`).join('')
+      || '<div class="detail">这段时间没有事件（看板是从启用后台开始计的）</div>'}`;
+}
+window.setHours = h => { window.statsHours = h; stats(); };
 
 function cfgInput(item){
   const label = esc(item.name) + (item.hot ? '' : ' ⚠');
@@ -341,6 +380,7 @@ async function showPanel(){
     $('#panel-trace').innerHTML = html;
   } else if(tab==='health') await health();
   else if(tab==='log') await logs();
+  else if(tab==='stats') await stats();
   else if(tab==='config') await config();
 }
 
