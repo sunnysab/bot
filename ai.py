@@ -58,11 +58,17 @@ class OpenAI(AiProvider):
         )
 
         completion_message = response.choices[0].message
-        response_text: str = completion_message.content
+        reasoning = (completion_message.model_extra or {}).get('reasoning_content') or ''
+        response_text: str = completion_message.content or ''
+        if not response_text.strip() and reasoning.strip():
+            # thinking 模型偶尔把整段预算烧在推理上、content 为空；
+            # 答案（JSON / 要点）通常已经在推理里，回退去拿它，比丢掉这次调用强
+            logger.debug('content 为空，回退到 reasoning_content')
+            response_text = reasoning
         logger.debug(
             f'OpenAI compatible interface. prompt: {repr(prompt)}, response: {repr(response_text)}')
-        if 'reasoning_content' in completion_message.model_extra:
-            logger.debug(f'reasoning content: {repr(completion_message.model_extra["reasoning_content"])}')
+        if reasoning:
+            logger.debug(f'reasoning content: {repr(reasoning)}')
 
         # 如果回复内容为“本轮不发言”，则返回 None
         if self.silent(response_text):
