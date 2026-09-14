@@ -120,36 +120,55 @@ class RepeatPlugin(Plugin):
 
 
 class ReplyPolicy:
-    """ 决定一条消息是否值得交给模型。便宜的规则先筛，模型只负责表达。
+    """ 是否把一条消息交给模型判断。
 
-    - 私聊：始终回复
-    - 群聊：被 @ 回复；昵称被提及且不在冷却期内也回复
-    - 冷却：刚回过话的会话，短时间内不因「提及昵称」再次插话（@ 不受限）
+    结构性决策用便宜规则，内容决策仍由模型（说不出话时回「本轮不发言」）：
+    - 私聊 / 被 @ / 被叫到名字：直接交给模型
+    - 群聊其他消息：主动参与，按群活跃度节流。群越活跃参与越频繁：
+      等待时间 = clamp(倍数 × 活动窗口 / 别人的消息数, 下限, 上限)
+    - 模型真的发言后刷新时间戳，防止刚说完又插话
     """
 
-    def __init__(self, cooldown: float = 30.0):
-        self.cooldown = cooldown
-        self._last_reply: dict[str, float] = {}
+    def __init__(self, activity_window: float = 180.0, factor: float = 2.0,
+                 wait_min: float = 30.0, wait_max: float = 180.0):
+        """ :param activity_window: 统计活跃度的时间窗口（秒）
+        :param factor: 等待时长 = factor × 活动窗口内别人消息的平均间隔
+        :param wait_min: 热聊时的最小等待（秒）
+        :param wait_max: 冷清时的最大等待（秒）
+        """
+        assert 0 < wait_min <= wait_max
+        self.activity_window = activity_window
+        self.factor = factor
+        self.wait_min = wait_min
+        self.wait_max = wait_max
+        self._last_proactive: dict[str, float] = {}
 
     def should_reply(self, ctx: MessageContext, now: float) -> bool:
+        """ now 用 epoch 秒，与 history 里的时间戳同源。 """
         msg = ctx.msg
         if not msg.is_chatroom:
             return True
-        if msg.is_at_me:
+        if msg.is_at_me or self._mentions_me(ctx):
             return True
-        if self._in_cooldown(ctx.contact, now):
+        if now - self._last_proactive.get(ctx.contact, float('-inf')) < self._wait(ctx, now):
             return False
-        return self._mentions_me(ctx)
+        # 记录一次主动考虑（不论模型最后说不说），节流后续调用
+        self._last_proactive[ctx.contact] = now
+        return True
 
     def note_reply(self, contact: str, now: float) -> None:
-        self._last_reply[contact] = now
+        """ 模型真的发言了，把节流窗口推后。 """
+        self._last_proactive[contact] = now
+
+    def _wait(self, ctx: MessageContext, now: float) -> float:
+        """ 别人发言越密，等得越短；没人说话则封顶到 wait_max。 """
+        others = sum(1 for r in ctx.history if not r.is_self and now - r.t <= self.activity_window)
+        if others <= 0:
+            return self.wait_max
+        return min(self.wait_max, max(self.wait_min, self.factor * self.activity_window / others))
 
     def _mentions_me(self, ctx: MessageContext) -> bool:
         return bool(ctx.self_name) and ctx.self_name in ctx.msg.content
-
-    def _in_cooldown(self, contact: str, now: float) -> bool:
-        last = self._last_reply.get(contact)
-        return last is not None and now - last < self.cooldown
 
 
 class ChatPlugin(Plugin):
@@ -158,7 +177,7 @@ class ChatPlugin(Plugin):
 
         :param ai_provider: AI 服务提供者
         :param context_length: 送入模型的上下文消息条数
-        :param policy: 是否回复的策略；不传则用默认（@ 或提昵称，带冷却）
+        :param policy: 是否回复的策略；不传则用默认（@/提名，带主动参与）
         """
         self.ai = ai_provider
         self.context_length = context_length
@@ -174,10 +193,8 @@ class ChatPlugin(Plugin):
         if not (ctx.is_text or ctx.is_image):  # 只处理文本和图片消息
             return None
 
-        now = time.monotonic()
-        if not self.policy.should_reply(ctx, now):
+        if not self.policy.should_reply(ctx, time.time()):
             return None
-        self.policy.note_reply(ctx.contact, now)
 
         history: ChatWindow = ctx.history.latest_n(self.context_length)
         prompt = await self.prompt_template.render_async(self_name=ctx.self_name, contact=ctx.contact,
@@ -187,6 +204,7 @@ class ChatPlugin(Plugin):
         response = await self.ai.chat(prompt.strip(), await self._build_message(ctx, text))
         if not response:
             return Reply(stop=True)
+        self.policy.note_reply(ctx.contact, time.time())  # 真的发言了才推后节流窗口
 
         # 有时候模型返回数据中会带有 "昵称: " 的前缀，这里需要去掉
         prefix = ctx.self_name + ':'

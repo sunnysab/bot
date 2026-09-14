@@ -6,7 +6,7 @@ from ai import Deepseek
 from bot import Bot, PayloadProcessor
 from config import Config
 from describer import MediaCache, MediaDescriber
-from plugin import ChatPlugin, EndProcessing, RepeatPlugin
+from plugin import ChatPlugin, EndProcessing, RepeatPlugin, ReplyPolicy
 
 
 def main():
@@ -32,7 +32,9 @@ def main():
     bot.add_preprocessor(PayloadProcessor())
 
     repeater = RepeatPlugin()
-    chat_plugin = ChatPlugin(ai_provider, context_length=30)
+    policy = ReplyPolicy(activity_window=config.reply_activity_window, factor=config.reply_activity_factor,
+                         wait_min=config.reply_wait_min, wait_max=config.reply_wait_max)
+    chat_plugin = ChatPlugin(ai_provider, context_length=30, policy=policy)
 
     bot.set_default_plugin([repeater, chat_plugin])
     bot.attach('研究生摆烂群', EndProcessing())
