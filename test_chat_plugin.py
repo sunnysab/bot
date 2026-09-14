@@ -91,9 +91,18 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.ai.planner_calls), 1)
         self.assertEqual(len(self.ai.reply_calls), 1)
 
+    async def test_expressor_is_told_which_message_to_answer(self):
+        """ 没决策时也不能跑偏，至少要知道本轮在回哪条。 """
+        self.plugin.ai = FakeAi(plan=None)
+        await self.plugin.handle(make_ctx(make_msg(is_chatroom=False, content='在吗')))
+        message = self.plugin.ai.reply_calls[0][1]
+        self.assertIn('【本轮】Alice: 在吗', message)
+        self.assertNotIn('【决策】', message)
+
     async def test_plan_is_passed_to_expressor(self):
         await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
         message = self.ai.reply_calls[0][1]
+        self.assertIn('【本轮】', message)
         self.assertIn('【决策】', message)
         self.assertIn('想表达：附和一句', message)
         self.assertIn('情绪：无奈', message)
@@ -133,6 +142,16 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=True, is_at_me=True)))
         self.assertEqual(reply.texts, ['收到'])
         self.assertEqual(len(self.plugin.ai.reply_calls), 1)
+
+    async def test_planner_can_use_its_own_model(self):
+        """ 决策者可以走本地便宜模型，表达者仍用主模型。 """
+        planner = FakeAi()
+        plugin = ChatPlugin(self.ai, context_length=10, planner_ai=planner)
+        await plugin.handle(make_ctx(make_msg(is_chatroom=False)))
+        self.assertEqual(len(planner.calls), 1)
+        self.assertIn(PLANNER_MARK, planner.calls[0][0])
+        self.assertEqual(len(self.ai.calls), 1)
+        self.assertNotIn(PLANNER_MARK, self.ai.calls[0][0])
 
     async def test_planner_failure_does_not_mute_the_bot(self):
         """ 决策者挂了就退回单段，不能因此变吧。 """

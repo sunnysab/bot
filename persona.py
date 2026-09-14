@@ -46,7 +46,7 @@ class Persona:
 
 def _self_check() -> None:
     persona = Persona()
-    assert persona.identity('糖糖') == '你的名字是糖糖。是一个积极乐观、温暖阳光的女生，03 年出生。'
+    assert persona.identity('示例名') == '你的名字是示例名。是一个积极乐观、温暖阳光的女生，03 年出生。'
     # 没配备用风格时永远是空
     assert persona.maybe_alternate() == ''
 

@@ -29,7 +29,8 @@ class AiProvider:
 class OpenAI(AiProvider):
     """ OpenAI 兼容接口 """
 
-    def __init__(self, url: str, key: str, model: str = 'deepseek-chat', temperature: float = 0.8, top_p: float = 0.95):
+    def __init__(self, url: str, key: str, model: str = 'deepseek-chat', temperature: float = 0.8,
+                 top_p: float = 0.95, max_tokens: int | None = None, extra_body: dict | None = None):
         super().__init__()
 
         from openai import AsyncOpenAI
@@ -37,10 +38,13 @@ class OpenAI(AiProvider):
         self.model = model
         self.temperature = temperature
         self.top_p = top_p
+        self.max_tokens = max_tokens
+        self.extra_body = extra_body or {}
         self.client = AsyncOpenAI(base_url=url, api_key=key)
 
     async def chat(self, prompt: str, message: str | list) -> list[str] | None:
         """ 聊天 """
+        extra = {'max_tokens': self.max_tokens} if self.max_tokens else {}
         response = await self.client.chat.completions.create(
             model=self.model,
             temperature=self.temperature,
@@ -48,6 +52,9 @@ class OpenAI(AiProvider):
             messages=[
                 {'role': 'system', 'content': prompt},
                 {'role': 'user', 'content': message}],
+            # 供应商特有的参数（如 vLLM 的 chat_template_kwargs）走 extra_body，不能当普通 kwarg 展开
+            extra_body=self.extra_body or None,
+            **extra,
         )
 
         completion_message = response.choices[0].message

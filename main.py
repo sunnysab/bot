@@ -4,7 +4,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from loguru import logger
 
-from ai import Deepseek
+from ai import Deepseek, OpenAI
 from bot import Bot, PayloadProcessor
 from config import Config
 from describer import MediaCache, MediaDescriber
@@ -25,6 +25,15 @@ def main():
         logger.warning('DEEPSEEK_KEY 未设置，ChatPlugin 将无法调用模型')
 
     ai_provider = Deepseek(key=config.deepseek_key, model=config.deepseek_model, temperature=0.85)
+
+    # 决策者可以走本地免费模型；留空 PLANNER_URL 就两段都用主模型
+    planner_ai = None
+    if config.planner_url:
+        planner_ai = OpenAI(url=config.planner_url, key=config.planner_key, model=config.planner_model,
+                            temperature=config.planner_temperature, max_tokens=config.planner_max_tokens,
+                            # 关掉 thinking，reasoning 从 900 字降到 400 字，单次快一倍
+                            extra_body={'chat_template_kwargs': {'enable_thinking': False}})
+        logger.info(f'Planner 使用本地模型: {config.planner_url} / {config.planner_model}')
 
     describer = None
     if config.describe_media:
@@ -57,7 +66,8 @@ def main():
         alternate_probability=config.style_probability)
     chat_plugin = ChatPlugin(ai_provider, context_length=30, policy=policy, persona=persona, profiles=profiles,
                              habits=habits, memories=memory_store, tracer=TraceLogger(config.trace_path),
-                             enable_planner=config.enable_planner, timeout=config.request_timeout)
+                             enable_planner=config.enable_planner, planner_ai=planner_ai,
+                             timeout=config.request_timeout)
 
     bot.set_default_plugin([repeater, chat_plugin])
     bot.attach('研究生摆烂群', EndProcessing())

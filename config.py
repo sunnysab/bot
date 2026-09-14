@@ -42,6 +42,12 @@ class Config:
     style_probability: float = 0.0
     # 两段式：Planner 判断说与不说，Expressor 负责说成人话
     enable_planner: bool = True
+    # Planner 可以走本地免费模型（OpenAI 兼容）；planner_url 留空则两段都用主模型
+    planner_url: str = ''
+    planner_model: str = 'minicpm5'
+    planner_key: str = 'local'
+    planner_temperature: float = 0.3
+    planner_max_tokens: int = 1024   # 生成上限，不是上下文；thinking 模型会先吐 reasoning，给够即可
     # 单次模型调用超时（秒），避免一次 API 抽风拖死消息处理链
     request_timeout: float = 60.0
     # 回复轨迹 JSONL（攒数据给以后做效果评估）
@@ -76,6 +82,11 @@ class Config:
             reply_styles=os.getenv('REPLY_STYLES', cls.reply_styles),
             style_probability=float(os.getenv('STYLE_PROBABILITY', str(cls.style_probability))),
             enable_planner=os.getenv('ENABLE_PLANNER', '1').lower() not in ('0', 'false', 'no'),
+            planner_url=os.getenv('PLANNER_URL', cls.planner_url),
+            planner_model=os.getenv('PLANNER_MODEL', cls.planner_model),
+            planner_key=os.getenv('PLANNER_KEY', cls.planner_key),
+            planner_temperature=float(os.getenv('PLANNER_TEMPERATURE', str(cls.planner_temperature))),
+            planner_max_tokens=int(os.getenv('PLANNER_MAX_TOKENS', str(cls.planner_max_tokens))),
             request_timeout=float(os.getenv('REQUEST_TIMEOUT', str(cls.request_timeout))),
             trace_path=os.getenv('TRACE_PATH', cls.trace_path),
             log_path=os.getenv('LOG_PATH', cls.log_path),

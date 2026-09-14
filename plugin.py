@@ -202,6 +202,7 @@ class ChatPlugin(Plugin):
                  persona: Persona | None = None, profiles: ProfileStore | None = None,
                  habits: HabitStore | None = None, memories: MomentStore | None = None,
                  tracer: TraceLogger | None = None, enable_planner: bool = True,
+                 planner_ai: AiProvider | None = None,
                  timeout: float = 60.0, rng: random.Random | None = None):
         """ 聊天插件
 
@@ -214,10 +215,12 @@ class ChatPlugin(Plugin):
         :param memories: 中期记忆；按当前消息关键词召回，命中才注入
         :param tracer: 回复轨迹记录；传了就把每轮触发/上下文/回复写成 JSONL
         :param enable_planner: 是否跑两段式；False 则只调 Expressor
+        :param planner_ai: 决策者专用模型；留空则和 Expressor 用同一个
         :param timeout: 单次模型调用超时（秒）
         :param rng: 抽临时风格用的随机源，测试时可注入
         """
         self.ai = ai_provider
+        self._planner_ai = planner_ai
         self.context_length = context_length
         self.policy = policy or ReplyPolicy()
         self.persona = persona or Persona()
@@ -233,6 +236,11 @@ class ChatPlugin(Plugin):
         base = Path(__file__).parent
         self.planner_template = Template((base / 'planner.txt').read_text(encoding='utf-8'), enable_async=True)
         self.replyer_template = Template((base / 'replyer.txt').read_text(encoding='utf-8'), enable_async=True)
+
+    @property
+    def planner_ai(self) -> AiProvider:
+        """ 决策者用的模型；没单独配就和表达者共用一个。动态回退，换 ai 也能跟上。 """
+        return self._planner_ai or self.ai
 
     @override
     async def handle(self, ctx: MessageContext) -> Reply | None:
@@ -285,7 +293,7 @@ class ChatPlugin(Plugin):
         """ 跑决策者；返回 None 表示这次没拿到决策（调用失败），不代表不开口。 """
         prompt = await self.planner_template.render_async(
             behavior_style=self.persona.behavior_style, trigger=necessity.kind, **blocks)
-        raw = await self._ask(prompt, transcript, ctx, image=ctx.is_image)
+        raw = await self._ask(prompt, transcript, ctx, image=ctx.is_image, ai=self.planner_ai)
         if not raw:
             return None
         # ai.chat 返回的是按行切好的列表，决策是一整块 JSON，拼回去再解析
@@ -293,18 +301,22 @@ class ChatPlugin(Plugin):
 
     async def _express(self, ctx: MessageContext, blocks: dict[str, str], transcript: str,
                        plan: str) -> list[str] | None:
-        """ 跑表达者；有决策就把决策放在聊天记录前面。 """
+        """ 跑表达者。先把「本轮要回哪条」摆明，再给决策；没决策也不会跑偏到旧话题。 """
         prompt = await self.replyer_template.render_async(
             identity=self.persona.identity(ctx.self_name), reply_style=self.persona.reply_style,
             alternate_style=self.persona.maybe_alternate(self.rng), **blocks)
-        message = f'【决策】\n{plan}\n\n{transcript}' if plan else transcript
-        return await self._ask(prompt, message, ctx, image=ctx.is_image)
+        head = [f'【本轮】{ctx.msg.sender_name}: {ctx.msg.content}']
+        if plan:
+            head.append(f'【决策】\n{plan}')
+        return await self._ask(prompt, '\n'.join(head) + '\n\n' + transcript, ctx, image=ctx.is_image)
 
-    async def _ask(self, prompt: str, message: str, ctx: MessageContext, image: bool = False) -> list[str] | None:
+    async def _ask(self, prompt: str, message: str, ctx: MessageContext, image: bool = False,
+                   ai: AiProvider | None = None) -> list[str] | None:
         """ 调模型。超时或报错只当这次没结果——不能让一次 API 抽风拖死消息处理链。 """
+        provider = ai or self.ai
         try:
             return await asyncio.wait_for(
-                self.ai.chat(prompt.strip(), await self._build_message(ctx, message, image)), self.timeout)
+                provider.chat(prompt.strip(), await self._build_message(ctx, message, image)), self.timeout)
         except Exception as e:
             logger.warning(f'调用模型失败（{ctx.contact}）: {e}')
             return None
