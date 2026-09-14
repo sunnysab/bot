@@ -191,12 +191,10 @@ class ChatPlugin(Plugin):
     Expressor 拿人设 + 表达风格 + 决策当作参考，只负责组织语言。
     enable_planner=False 时退回单段（Expressor 直接看着聊天记录说），便于对比。
 
-    两个例外：被 @ / 被叫名字 / 私聊是「必须回应」的场景，决策者说不开口也不作数；
-    决策者调用失败时退回「无决策」继续表达，不能因此变吧。
+    决策者只负责「要不要主动插话」这一件事：被 @ / 被叫名字 / 私聊都是必须回应的
+    场景，直接交给表达者，不多花一次调用；只有没人点名的情形才请决策者判断。
+    enable_planner=False 时连这种情况也直接回，便于对比。
     """
-
-    # 这些触发下 bot 必须开口，不接受 Planner 的否决
-    HARD_TRIGGERS = frozenset(('at', 'mention', 'private'))
 
     def __init__(self, ai_provider: AiProvider, context_length: int = 10, policy: ReplyPolicy | None = None,
                  persona: Persona | None = None, profiles: ProfileStore | None = None,
@@ -257,9 +255,10 @@ class ChatPlugin(Plugin):
 
         started = time.perf_counter()
         plan = ''
-        if self.enable_planner:
+        # 只有「没人点名」才需要决策者判断要不要插话；其余情形直接回，省一次调用
+        if self.enable_planner and necessity.kind == 'proactive':
             decided = await self._plan(ctx, necessity, blocks, transcript)
-            if decided is not None and not decided.speak and necessity.kind not in self.HARD_TRIGGERS:
+            if decided is not None and not decided.speak:
                 self._trace(ctx, necessity, transcript, None, self._elapsed(started), '')
                 return Reply(stop=True)
             plan = decided.render() if decided else ''
@@ -290,9 +289,8 @@ class ChatPlugin(Plugin):
 
     async def _plan(self, ctx: MessageContext, necessity: NecessityScore, blocks: dict[str, str],
                     transcript: str) -> Plan | None:
-        """ 跑决策者；返回 None 表示这次没拿到决策（调用失败），不代表不开口。 """
-        prompt = await self.planner_template.render_async(
-            behavior_style=self.persona.behavior_style, trigger=necessity.kind, **blocks)
+        """ 请决策者判断要不要主动插话；返回 None 表示这次没拿到决策（调用失败），不代表不开口。 """
+        prompt = await self.planner_template.render_async(behavior_style=self.persona.behavior_style, **blocks)
         raw = await self._ask(prompt, transcript, ctx, image=ctx.is_image, ai=self.planner_ai)
         if not raw:
             return None
