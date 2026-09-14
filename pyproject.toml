@@ -47,6 +47,7 @@ py-modules = [
     "profiles",
     "replay_memory",
     "reply_trace",
+    "runtime",
     "typos",
     "wechat",
 ]

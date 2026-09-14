@@ -63,6 +63,14 @@ class OutboundQueue:
     async def start(self) -> None:
         self._task = asyncio.create_task(self._worker(), name='outbound')
 
+    def set_interval(self, seconds: float) -> None:
+        """ 热重载改限速（防风控）；队列里已经排好的不受影响。 """
+        self._min_interval = seconds
+
+    def depth(self) -> int:
+        """ 还堆着多少条没发。管理后台的健康卡要显示。 """
+        return self._queue.qsize()
+
     async def stop(self) -> None:
         if self._task:
             self._task.cancel()

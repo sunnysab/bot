@@ -150,17 +150,19 @@ class PluginManager:
         self._defaults: list[Plugin] = []
         self._contact_mappings: dict[str, list[Plugin]] = {}
 
-    def register(self, plugin: Plugin) -> None:
-        """Register a plugin for all contacts"""
-        self._defaults.append(plugin)
-        logger.info(f'Registered plugin: {plugin.__class__.__name__}')
+    def set_defaults(self, plugins: list[Plugin]) -> None:
+        """ 整体替换默认插件链（热重载用）。contact 映射不动。 """
+        self._defaults = list(plugins)
 
-    def map_plugin_to_contact(self, contact: str, plugin: Plugin) -> None:
-        """Map a specific plugin to a contact"""
-        if contact not in self._contact_mappings:
-            self._contact_mappings[contact] = []
-        self._contact_mappings[contact].append(plugin)
-        logger.info(f'Mapped plugin {plugin.__class__.__name__} to contact {contact}')
+    def set_contact_plugins(self, contact: str, plugins: list[Plugin]) -> None:
+        """ 替换某个会话的插件链（静音 / 解音）。幂等：重复调不会堆一长串。 """
+        self._contact_mappings[contact] = list(plugins)
+        logger.info(f'Mapped plugins {[p.__class__.__name__ for p in plugins]} to contact {contact}')
+
+    def unmap_contact(self, contact: str) -> None:
+        """ 恢复这个会话走默认插件链。 """
+        self._contact_mappings.pop(contact, None)
+        logger.info(f'Contact {contact} back to default plugins')
 
     def get_plugins_for_contact(self, contact: str) -> list[Plugin]:
         """ 注意语义：只要为某个 contact 映射过插件，就完全覆盖默认插件链（例如用它静音某个群）。 """
@@ -675,7 +677,7 @@ class ChatPlugin(Plugin):
             ts=time.time(), contact=msg.reply_target, contact_name=ctx.contact,
             sender=msg.sender_name, trigger=necessity.kind, score=necessity.score,
             reasons=necessity.reasons, transcript=transcript, reply=tuple(response or ()),
-            latency_ms=latency_ms, plan=plan))
+            latency_ms=latency_ms, plan=plan, msg_id=str(getattr(msg, 'msg_id', ''))))
 
     @staticmethod
     async def _build_message(ctx: MessageContext, transcript: str, image: bool = False) -> str | list:

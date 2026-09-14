@@ -57,6 +57,9 @@ class FocusMode:
         self.cooldown = cooldown
         self.sessions: dict[str, FocusSession] = {}
         self._blocked_until: dict[str, float] = {}
+        # 累计次数：管理后台的统计卡要看「进得太频繁还是太少」
+        self.entered = 0
+        self.exited = 0
 
     def tick(self, contact: str, now: float, activity: int = 0) -> bool:
         """ 每条消息过一遍：该进就进、该出就出，返回这一轮算不算专注。 """
@@ -79,11 +82,13 @@ class FocusMode:
 
     def enter(self, contact: str, now: float, reason: str = '手动') -> None:
         self.sessions[contact] = FocusSession(started=now, last_message=now, reason=reason)
+        self.entered += 1
         logger.info(f'进入专注模式：{contact}（{reason}）')
 
     def exit(self, contact: str, now: float, reason: str, cooldown: bool = True) -> None:
         if self.sessions.pop(contact, None) is None:
             return
+        self.exited += 1
         if cooldown:
             self._blocked_until[contact] = now + self.cooldown
         logger.info(f'退出专注模式：{contact}（{reason}）')
@@ -109,12 +114,14 @@ def _self_check() -> None:
     # 够热就进，进去之后哪怕只有一条消息也算专注
     assert focus.tick('g', now, activity=3) is True
     assert focus.sessions['g'].reason == '活跃度 3 条'
+    assert focus.entered == 1 and focus.exited == 0
     assert focus.tick('g', now + 10, activity=0) is True
     assert focus.sessions['g'].rounds == 2
 
     # 闲太久自己出来，而且有冷却期不能立刻再进
     assert focus.tick('g', now + 10 + 100, activity=0) is False   # 1110 退出，冷却到 1160
     assert 'g' not in focus.sessions
+    assert focus.entered == 1 and focus.exited == 1
     assert focus.tick('g', now + 130, activity=99) is False        # 1130，还在冷却
     assert focus.tick('g', now + 170, activity=99) is True         # 1170，冷却过了
 

@@ -11,7 +11,7 @@ from events import Status, bus
 from media import is_placeholder, render
 from moments import MomentKeeper
 from outbound import Outbound, OutboundQueue
-from plugin import Plugin, PluginManager, Reply
+from plugin import EndProcessing, Plugin, PluginManager, Reply
 from typos import apply_typos
 from wechat import Message, Wechat
 
@@ -20,6 +20,11 @@ EMOJI_LOCAL_ENOUGH = 3
 EMOJI_RESULT_LIMIT = 8
 EMOJI_SAVE_INTERVAL = 5.0      # 表情库最长隔这么久落一次盘（热度是运行时累加的）
 STALE_MESSAGE_SECONDS = 300.0  # 比这更旧的消息只当上下文：relay 长链重连会补推离线积压
+
+FILTERED_KINDS = {
+    MessageKind.VOICE: '语音', MessageKind.EMOJI: '表情', MessageKind.LOCATION: '位置',
+    MessageKind.VIDEO: '视频', MessageKind.APPMSG: '链接/引用/文件',
+}
 
 T = TypeVar('T')
 
@@ -79,6 +84,10 @@ class Bot:
         self.emoji_path = emoji_path
         self.emoji_describer = emoji_describer
         self.typo_rate = typo_rate
+        # 运行计数：面板的统计卡要看（拍的那些常数到底撞了多少次）
+        self.typo_count = 0
+        self.emoji_count = 0
+        self.reply_count = 0
         self._rng = rng or random.Random()
         self._emoji_saved_at = time.time()
 
@@ -96,6 +105,11 @@ class Bot:
     def wechat(self) -> Wechat:
         """ relay 适配层。管理后台直接拿它读会话列表和历史。 """
         return self._wechat
+
+    @property
+    def history(self) -> ContextManager:
+        """ 会话窗口。管理后台要看「模型此刻能看到多少条」。 """
+        return self._history
 
     async def search_emoji(self, keyword: str) -> list[Emoji]:
         """ 搜表情：先翻本群的梗，不够再联网，线上的顺手存进库里当缓存。
@@ -178,12 +192,22 @@ class Bot:
         self._wechat.on_ready(func)
 
     def set_default_plugin(self, plugin: Plugin | list[Plugin]):
-        for p in _aslist(plugin):
-            self._plugins.register(p)
+        """ 整体替换默认插件链（**不是追加**）——热重载靠它换掉一整套。 """
+        self._plugins.set_defaults(_aslist(plugin))
 
     def attach(self, contact: str, plugin: Plugin | list[Plugin]):
-        for p in _aslist(plugin):
-            self._plugins.map_plugin_to_contact(contact, p)
+        """ 给某个会话单独指定插件链。注意语义：一旦指定就**完全覆盖**默认链。 """
+        self._plugins.set_contact_plugins(contact, _aslist(plugin))
+
+    def mute(self, contact: str) -> None:
+        """ 静音一个会话：只留 EndProcessing，什么也不回。 """
+        self._plugins.set_contact_plugins(contact, [EndProcessing()])
+
+    def unmute(self, contact: str) -> None:
+        self._plugins.unmap_contact(contact)
+
+    def is_muted(self, contact: str) -> bool:
+        return any(isinstance(p, EndProcessing) for p in self._plugins.get_plugins_for_contact(contact))
 
     async def load_context(self, session_count: int = 10, window_size: int = 30) -> None:
         """ 可以在启动时加载最近的若干聊天记录, 如果想提高启动速度, 可以不调用它.
@@ -225,6 +249,12 @@ class Bot:
         """ 真正发送并写入上下文，由 OutboundQueue 串行调用。 """
         # 错别字只在出站这一刻抖，历史里记的也是抖过的版本——跟真人一致
         text = apply_typos(item.text, self.typo_rate, self._rng) if item.text else ''
+        if item.text and text != item.text:
+            self.typo_count += 1
+        if text or item.emoji:
+            self.reply_count += 1
+        if item.emoji:
+            self.emoji_count += 1
         stored = text or (f'[表情：{item.emoji.desc or "表情"}]' if item.emoji else '')
         # relay 给的 server_id：这条出站消息在 relay 里的身份。拿不到就留空
         relay_id = None
@@ -330,9 +360,10 @@ class Bot:
             latest = bus.status_of(msg.msg_id)
             if latest is not None and latest.status == Status.RECEIVED:
                 handled = kind in (MessageKind.TEXT, MessageKind.IMAGE)
+                label = FILTERED_KINDS.get(kind, kind.name)
                 bus.publish(Status.MUTED if handled else Status.UNSUPPORTED,
                             chat_id=msg.reply_target, chat_name=source, msg_id=msg.msg_id,
-                            detail='该会话已静音' if handled else f'{kind.name} 不处理')
+                            detail='该会话已静音' if handled else f'{label}消息不回复')
             return  # 没有回复内容
 
         # 交给全局发送队列统一限流和拟人延迟，避免阻塞消息接收循环

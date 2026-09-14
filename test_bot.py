@@ -218,6 +218,44 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.bot._wechat.sent, [])
 
+    async def test_mute_and_unmute(self):
+        """ 管理后台的静音按钮。键是**显示名**，因为插件链就是按显示名分发的。 """
+        self.bot.set_default_plugin(FakePlugin(texts=['hi']))
+        # 这个群在 relay 里叫「测试群」；插件链拿到的 source 就是显示名
+        self.bot._wechat.names['456@chatroom'] = '测试群'
+        self.assertFalse(self.bot.is_muted('测试群'))
+
+        self.bot.mute('测试群')          # 注意：不是 '456@chatroom'
+        self.assertTrue(self.bot.is_muted('测试群'))
+        await self.bot.on_message(make_msg())
+        await asyncio.sleep(0.05)
+        self.assertEqual(self.bot._wechat.sent, [])          # 静音了就不回
+
+        self.bot.unmute('测试群')
+        self.assertFalse(self.bot.is_muted('测试群'))
+        await self.bot.on_message(make_msg())
+        await asyncio.sleep(0.05)
+        self.assertEqual(self.bot._wechat.sent, [('456@chatroom', 'hi')])
+
+    async def test_set_default_plugin_replaces_not_appends(self):
+        """ 热重载靠它整体换掉插件链，不能是追加（否则每重载一次多跑一遍旧链）。 """
+        self.bot.set_default_plugin(FakePlugin(texts=['first']))
+        self.bot.set_default_plugin(FakePlugin(texts=['second']))
+        await self.bot.on_message(make_msg())
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(self.bot._wechat.sent, [('456@chatroom', 'second')])
+
+    async def test_history_sizes_and_counters(self):
+        """ 健康卡要看的两个数。 """
+        self.bot.set_default_plugin(FakePlugin(texts=['hi']))
+        await self.bot.on_message(make_msg())
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(self.bot.history.sizes(), {'456@chatroom': 2})   # 入站 + 自己的回复
+        self.assertEqual(self.bot.reply_count, 1)
+        self.assertEqual(self.bot.outbox.depth(), 0)
+
     async def test_typos_are_applied_on_send_and_in_history(self):
         """ 错别字在出站那一刻抖，历史里记的也得是抖过的版本。 """
         self.bot.typo_rate = 1.0

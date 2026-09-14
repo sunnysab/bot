@@ -6,11 +6,14 @@
    把 relay 的消息读出来、把 events.py 里的状态贴上去。
 2. **绝不拖累聊天。** 启动整段 try/except；任何一路出错只打日志 + 返回 500。
 3. **msg_id 一律字符串。** relay 的 server_id 是 64 位整数，实测 985 条里 958 条
-   超过 JS 安全整数 2^51 附近的那个坎，当数字过 JSON 会被 JS 悄悄改掉，
-   然后状态就永远贴不上，而且不报错。
+   超过 JS 安全整数 2^53（最大 9202842881785760589）。当数字过 JSON 会被 JS 悄悄
+   改掉，然后状态就永远贴不上，而且不报错。
 
 轮询而不是 SSE：单用户本地工具，1 秒拉一次，没有线程泄漏和背压问题，
 靠 seq 游标还天生去重（见设计文档第四节）。
+
+只绑 127.0.0.1，不做鉴权（已拍板）。代价是 /api/send 能发消息、/api/restart
+能重启进程，本机任何进程都能打——接受。
 """
 
 from __future__ import annotations
@@ -18,42 +21,47 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
+from dataclasses import fields as dataclass_fields
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from loguru import logger
 
 from context import SYSTEM_KINDS, MessageKind
 from events import Status, bus
 from media import render
+from reply_trace import find as find_trace
 
 PAGE = Path(__file__).parent / 'admin.html'
 DEFAULT_PORT = 8099          # 8080 在本机被 iptv 占了，别用
 CHATS_LIMIT = 50
 MESSAGES_LIMIT = 300         # v1 一次拉满，relay 的 get_messages 还不能翻页
 RPC_TIMEOUT = 15.0
+LOG_TAIL_BYTES = 256 * 1024  # 只看日志尾巴，不把整份读进内存
 
 
 class Admin:
-    def __init__(self, bot, wechat, cache=None, loop=None,
-                 host: str = '127.0.0.1', port: int = DEFAULT_PORT):
-        """ :param bot: 用来读 dry_run 之类的运行态
-        :param wechat: relay 适配层，读会话列表和历史
-        :param cache: MediaCache，把 md5 换成图片/表情的描述
-        :param loop: bot 的事件循环，RPC 要切回去跑
-        """
-        self.bot = bot
-        self.wechat = wechat
-        self.cache = cache
-        self.loop = loop
+    def __init__(self, runtime, host: str = '127.0.0.1', port: int = DEFAULT_PORT):
+        self.runtime = runtime
         self.host = host
         self.port = port
         self.server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
-    # ---------- 启动 / 停止 ----------
+    @classmethod
+    def start_safely(cls, runtime, host: str = '127.0.0.1',
+                     port: int = DEFAULT_PORT) -> Admin | None:
+        """ 起后台。失败只打日志返回 None——管理后台绝不能把 bot 拖下水。 """
+        try:
+            panel = cls(runtime, host, port)
+            panel.start()
+            return panel
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f'管理后台启动失败（{host}:{port}），bot 继续跑: {e}')
+            return None
 
     def start(self) -> None:
         handler = type('_BoundHandler', (_Handler,), {'admin': self})
@@ -70,50 +78,95 @@ class Admin:
 
     def call(self, coro, timeout: float = RPC_TIMEOUT):
         """ 从 HTTP 线程切回 bot 的事件循环执行一个协程。 """
-        return asyncio.run_coroutine_threadsafe(coro, self.loop).result(timeout)
+        loop = self.runtime.loop
+        if loop is None:
+            raise RuntimeError('bot 的事件循环还没起来')
+        return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout)
 
-    # ---------- 数据 ----------
+    @property
+    def _wechat(self):
+        return self.runtime.bot.wechat
+
+    # ---------- 只读数据 ----------
 
     def state(self) -> dict:
         groups: dict[str, int] = {}
         for event in bus.since(0):
             group = Status.group(event.status)
             groups[group] = groups.get(group, 0) + 1
+        bot = self.runtime.bot
         return {
-            'wxid': getattr(self.wechat, 'wxid', ''),
-            'nickname': getattr(self.wechat, 'nickname', ''),
-            'dry_run': bool(getattr(self.bot, 'dry_run', False)),
+            'wxid': getattr(self._wechat, 'wxid', ''),
+            'nickname': getattr(self._wechat, 'nickname', ''),
+            'dry_run': bool(getattr(bot, 'dry_run', False)),
             'seq': bus.latest_seq(),
             'groups': groups,
         }
 
+    def health(self) -> dict:
+        """ 健康状态卡。relay 那项要走一次 RPC，可能慢——所以单开一个接口。 """
+        runtime = self.runtime
+        now = time.time()
+        relay: dict = {'ok': False}
+        try:
+            status = self.call(self._wechat.status(), timeout=5.0)
+            relay = {'ok': True,
+                     'wxid': status.get('wxid', ''), 'nickname': status.get('nickname', ''),
+                     'uin': status.get('uin')}
+        except Exception as e:  # noqa: BLE001 —— relay 挂了也要能把面板打开
+            relay['error'] = str(e)
+
+        focus = [{'chat': chat, 'rounds': session.rounds, 'reason': session.reason,
+                  'idle_left': max(0.0, runtime.focus.idle - (now - session.last_message)),
+                  'max_left': max(0.0, runtime.focus.maximum - (now - session.started))}
+                 for chat, session in runtime.focus.sessions.items()]
+        bot = runtime.bot
+        return {
+            'relay': relay,
+            'focus': focus,
+            'focus_counts': {'entered': runtime.focus.entered, 'exited': runtime.focus.exited},
+            'backoff': {chat: round(left, 1) for chat, left in runtime.backoff.pending(now).items()},
+            'outbox': bot.outbox.depth(),
+            'window': bot.history.sizes(),
+            'emojis': {'total': len(runtime.emojis), 'sendable': runtime.emojis.sendable_count,
+                       'scene': runtime.emojis.scene_count},
+            'moments': len(runtime.memories),
+            'counters': {'reply': bot.reply_count, 'emoji': bot.emoji_count,
+                         'typo': bot.typo_count},
+            'uptime': round(now - _STARTED_AT, 1),
+        }
+
     def chats(self) -> list[dict]:
         out = []
-        for chat in self.call(self.wechat.conversations(limit=CHATS_LIMIT)):
+        for chat in self.call(self._wechat.conversations(limit=CHATS_LIMIT)):
             peer = getattr(chat, 'peer', '')
             # 公众号 / filehelper / weixin 这些不进列表，和 get_recent_sessions 一个规矩
             if not (peer.startswith('wxid_') or peer.endswith('@chatroom')):
                 continue
             last = getattr(chat, 'last_message', None) or {}
+            name = getattr(chat, 'display_name', '') or peer
             out.append({
                 'chat_id': peer,
-                'name': getattr(chat, 'display_name', '') or peer,
+                'name': name,
                 'is_group': bool(getattr(chat, 'is_chatroom', False)),
                 'count': getattr(chat, 'msg_count', 0),
                 'updated_at': getattr(chat, 'updated_at', 0),
                 'last': (last.get('clean_text') or last.get('content') or '')[:60],
+                # 静音和专注都按**显示名**记（插件链就是按显示名分发的）
+                'muted': self.runtime.bot.is_muted(name),
+                'focus': name in self.runtime.focus.sessions,
             })
         return out
 
     def messages(self, chat: str, limit: int = MESSAGES_LIMIT) -> list[dict]:
         if not chat:
             return []
-        raw = self.call(self.wechat.messages(chat, limit=limit))
+        raw = self.call(self._wechat.messages(chat, limit=limit))
         # relay 的 sender_display_name 查不到时会拿 wxid 当名字，那不是名字。
         # 只对真正拿不到的那几个查（查到的会缓存），不是每条都查
         unknown = [m.sender for m in raw
                    if not m.is_self and m.sender and m.sender_display_name == m.sender]
-        names = self.call(self.wechat.sender_names(chat, unknown)) if unknown else {}
+        names = self.call(self._wechat.sender_names(chat, unknown)) if unknown else {}
         return [row for row in (self._row(msg, names) for msg in raw) if row]
 
     def _row(self, msg, names: dict[str, str] | None = None) -> dict | None:
@@ -125,8 +178,8 @@ class Admin:
         text, media = render(msg.msg_type, msg.content, msg.text)
         if not text:
             return None
-        if media is not None and not media.description and media.md5 and self.cache:
-            cached = self.cache.get(media.md5)
+        if media is not None and not media.description and media.md5 and self.runtime.media_cache:
+            cached = self.runtime.media_cache.get(media.md5)
             if cached:
                 media = replace(media, description=cached)
                 text = media.placeholder
@@ -149,6 +202,77 @@ class Admin:
             'dry_text': reply.text if reply and reply.status == Status.DRY_RUN else '',
         }
 
+    def log_tail(self, tail: int = 200, only: str = '') -> list[str]:
+        """ 日志尾巴。loguru 一直在写，面板里看得到就不必 SSH。 """
+        path = Path(self.runtime.config.log_path)
+        if not path.exists():
+            return []
+        with path.open('rb') as file:
+            file.seek(0, 2)
+            size = file.tell()
+            file.seek(max(0, size - LOG_TAIL_BYTES))
+            text = file.read().decode('utf-8', errors='replace')
+        lines = text.splitlines()[-max(1, tail):]
+        if only:
+            keys = [word.strip().upper() for word in only.split(',') if word.strip()]
+            lines = [line for line in lines if any(f'| {key}' in line or f'| {key:<8}' in line
+                                                   for key in keys)]
+        return lines
+
+    def trace(self, msg_id: str) -> dict:
+        """ 「为什么没回」抽屉：门控理由（总线）+ 这一轮的模型轨迹（trace 文件）。 """
+        own = bus.status_of(msg_id)
+        reply = bus.progress_of(msg_id)
+        return {
+            'msg_id': str(msg_id),
+            'event': own.to_dict() if own else None,
+            'reply': reply.to_dict() if reply else None,
+            'trace': find_trace(self.runtime.config.trace_path, msg_id),
+        }
+
+    # ---------- 动作 ----------
+
+    def set_dry_run(self, on: bool) -> dict:
+        """ 演习开关。两个对象的开关都要改：Bot 决定写不写历史 / 发不发事件，
+        Wechat 决定真发还是只打日志。 """
+        self.runtime.bot.dry_run = bool(on)
+        self._wechat.dry_run = bool(on)
+        self.runtime.config = replace(self.runtime.config, dry_run=bool(on))
+        logger.warning(f'管理后台{"打开" if on else "关闭"}了演习模式')
+        return {'dry_run': bool(on)}
+
+    def send(self, chat: str, text: str) -> dict:
+        """ 手动发一条。走 OutboundQueue，不绕开限速和拟人延迟。 """
+        if not (chat and text.strip()):
+            raise ValueError('chat 和 text 都不能为空')
+        bot = self.runtime.bot
+        self.call(self._send_manual(chat, text.strip()))
+        return {'queued': (chat, text.strip()), 'outbox': bot.outbox.depth()}
+
+    async def _send_manual(self, chat: str, text: str) -> None:
+        sender = await self._wechat.get_display_name(self._wechat.wxid, chat)
+        self.runtime.bot.outbox.put(chat, text, sender=sender, chat_name=chat)
+
+    def set_focus(self, chat: str, on: bool) -> dict:
+        """ 手动进/出专注。手动进出不进冷却（FocusMode.enter/exit 本来就支持）。 """
+        if not chat:
+            raise ValueError('chat 不能为空')
+        if on:
+            self.runtime.focus.enter(chat, time.time(), '管理后台手动')
+        else:
+            self.runtime.focus.exit(chat, time.time(), '管理后台手动', cooldown=False)
+        return {'focus': sorted(self.runtime.focus.sessions)}
+
+    def set_mute(self, chat: str, on: bool) -> dict:
+        """ 会话静音开关。键是**显示名**（插件链按显示名分发）。 """
+        if not chat:
+            raise ValueError('chat 不能为空')
+        if on:
+            self.runtime.bot.mute(chat)
+        else:
+            self.runtime.bot.unmute(chat)
+        return {'muted': self.runtime.bot.is_muted(chat)}
+
     # ---------- HTTP ----------
 
     def handle_get(self, handler: BaseHTTPRequestHandler) -> None:
@@ -161,6 +285,8 @@ class Admin:
                                   'text/html; charset=utf-8')
             if route == '/api/state':
                 return self._json(handler, self.state())
+            if route == '/api/health':
+                return self._json(handler, self.health())
             if route == '/api/chats':
                 return self._json(handler, {'chats': self.chats()})
             if route == '/api/messages':
@@ -171,9 +297,42 @@ class Admin:
                 since = int((query.get('since') or ['0'])[0])
                 return self._json(handler, {'seq': bus.latest_seq(),
                                             'events': [e.to_dict() for e in bus.since(since)]})
+            if route == '/api/log':
+                tail = int((query.get('tail') or ['200'])[0])
+                only = (query.get('only') or [''])[0]
+                return self._json(handler, {'lines': self.log_tail(tail, only)})
+            if route.startswith('/api/trace/'):
+                return self._json(handler, self.trace(unquote(route[len('/api/trace/'):])))
             self._json(handler, {'error': 'not found'}, 404)
         except Exception as e:  # noqa: BLE001 —— 后台出错不能冒泡到 bot
-            logger.warning(f'管理后台 {route} 出错: {e}')
+            logger.warning(f'管理后台 GET {route} 出错: {e}')
+            self._json(handler, {'error': str(e)}, 500)
+
+    def handle_post(self, handler: BaseHTTPRequestHandler) -> None:
+        url = urlparse(handler.path)
+        route = url.path
+        try:
+            length = int(handler.headers.get('Content-Length') or 0)
+            payload = json.loads(handler.rfile.read(length) or b'{}')
+        except ValueError as e:
+            return self._json(handler, {'error': f'请求体不是 JSON: {e}'}, 400)
+
+        try:
+            if route == '/api/dry_run':
+                return self._json(handler, self.set_dry_run(bool(payload.get('on'))))
+            if route == '/api/send':
+                return self._json(handler, self.send(payload.get('chat', ''), payload.get('text', '')))
+            if route == '/api/focus':
+                return self._json(handler, self.set_focus(payload.get('chat', ''),
+                                                          bool(payload.get('on'))))
+            if route == '/api/mute':
+                return self._json(handler, self.set_mute(payload.get('chat', ''),
+                                                         bool(payload.get('on'))))
+            self._json(handler, {'error': 'not found'}, 404)
+        except ValueError as e:
+            self._json(handler, {'error': str(e)}, 400)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f'管理后台 POST {route} 出错: {e}')
             self._json(handler, {'error': str(e)}, 500)
 
     @staticmethod
@@ -187,7 +346,8 @@ class Admin:
         handler.wfile.write(data)
 
     def _json(self, handler, payload, code: int = 200) -> None:
-        self._send(handler, json.dumps(payload, ensure_ascii=False), 'application/json', code)
+        self._send(handler, json.dumps(payload, ensure_ascii=False, default=str),
+                   'application/json', code)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -197,33 +357,70 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 —— BaseHTTPRequestHandler 的命名
         self.admin.handle_get(self)
 
+    def do_POST(self) -> None:  # noqa: N802
+        self.admin.handle_post(self)
+
     def log_message(self, fmt: str, *args) -> None:
         logger.debug(f'admin {self.address_string()} {fmt % args}')
 
 
-def start(bot, wechat, cache=None, loop=None, host: str = '127.0.0.1',
-          port: int = DEFAULT_PORT) -> Admin | None:
-    """ 起后台。失败只打日志返回 None——管理后台绝不能把 bot 拖下水。 """
-    try:
-        admin = Admin(bot, wechat, cache, loop or asyncio.get_running_loop(), host, port)
-        admin.start()
-        return admin
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f'管理后台启动失败（{host}:{port}），bot 继续跑: {e}')
-        return None
+_STARTED_AT = time.time()
 
 
 def _self_check() -> None:
-    """ 不连 relay 的自检：拿假消息把「渲染 + 贴状态」这条链走通。 """
+    """ 不连 relay 的自检：拿假 runtime 把「渲染 + 贴状态 + 路由」这条链走通。 """
     import types
 
-    bot = types.SimpleNamespace(dry_run=False)
-    admin = Admin(bot, types.SimpleNamespace(wxid='wxid_bot', nickname='Bot'), cache=None)
     bus.reset()
+    now = time.time()
 
-    def msg(msg_type, content, clean='', is_self=False):
+    class FakeFocus:
+        idle, maximum = 300.0, 1800.0
+        entered, exited = 2, 1
+
+        def __init__(self):
+            self.sessions = {'测试群': types.SimpleNamespace(
+                rounds=3, reason='活跃度 16 条', started=now - 100, last_message=now - 10)}
+
+        def enter(self, chat, _now, reason=''):
+            self.sessions[chat] = types.SimpleNamespace(rounds=0, reason=reason,
+                                                        started=_now, last_message=_now)
+
+        def exit(self, chat, _now, reason, cooldown=True):  # noqa: ARG002
+            self.sessions.pop(chat, None)
+
+    class FakeBackoff:
+        def pending(self, _now):
+            return {'测试群': 12.0}
+
+    class FakeEmojis:
+        def __len__(self): return 10
+        sendable_count, scene_count = 4, 2
+
+    class FakeMemories:
+        def __len__(self): return 7
+
+    class FakeOutbox:
+        def depth(self): return 0
+
+    class FakeHistory:
+        def sizes(self): return {'456@chatroom': 30}
+
+    runtime = types.SimpleNamespace(
+        loop=None, media_cache=None,
+        config=types.SimpleNamespace(log_path='/no/such/bot.log', trace_path='/no/such/trace.jsonl'),
+        focus=FakeFocus(), backoff=FakeBackoff(), emojis=FakeEmojis(), memories=FakeMemories(),
+        bot=types.SimpleNamespace(
+            dry_run=False, typo_rate=0.08, reply_count=3, emoji_count=1, typo_count=0,
+            outbox=FakeOutbox(), history=FakeHistory(),
+            is_muted=lambda name: name == '测试群',
+            wechat=types.SimpleNamespace(wxid='wxid_bot', nickname='Bot', dry_run=False)))
+
+    admin = Admin(runtime)
+
+    def msg(msg_type, content, clean='', is_self=False, msg_id=9202842881785760589):
         return types.SimpleNamespace(
-            msg_id=9202842881785760589, msg_type=msg_type, content=content, clean_text=clean,
+            msg_id=msg_id, msg_type=msg_type, content=content, clean_text=clean,
             text=clean or content, create_time=1700000000, is_chatroom=True,
             chatroom_sender='wxid_a' if not is_self else 'wxid_bot',
             sender_display_name='张三', sender='wxid_a', is_self=is_self,
@@ -249,18 +446,57 @@ def _self_check() -> None:
     assert admin._row(msg(10000, '系统消息')) is None
     assert admin._row(msg(34, 'x')) is not None          # 语音有占位符，要显示
 
-    # 表情 / 图片走占位符
+    # 表情 / 图片走占位符；有缓存描述时要补上
     emoji = admin._row(msg(47, '<msg><emoji md5="m" desc="ChEKB2RlZmF1bHQSBuWVp+WVpw==" /></msg>'))
     assert emoji['text'] == '[表情：啧啧]', emoji
 
-    # 有缓存描述时，图片占位符要补上描述
     class FakeCache:
         def get(self, md5):
             return '一只橘猫' if md5 == 'f9bf' else None
 
-    admin.cache = FakeCache()
+    runtime.media_cache = FakeCache()
     image = admin._row(msg(3, '<msg><img md5="f9bf" /></msg>'))
     assert image['text'] == '[图片：一只橘猫]', image
+
+    # 「为什么没回」抽屉：没有 trace 也不能炸
+    drawer = admin.trace(9202842881785760589)
+    assert drawer['event']['status'] == Status.GATED and drawer['trace'] is None
+
+    # 日志尾巴：文件不存在返回空
+    assert admin.log_tail() == []
+
+    # 健康卡：relay 拿不到也要能出结果（loop 是 None，会抛 → 被兜住）
+    health = admin.health()
+    assert health['relay']['ok'] is False and 'error' in health['relay']
+    assert health['focus'][0]['chat'] == '测试群' and health['backoff'] == {'测试群': 12.0}
+    assert health['emojis']['sendable'] == 4 and health['moments'] == 7
+
+    # 静音 / 专注开关：键都是显示名。真的 mute/unmute 在 test_bot.py 里测
+    muted: set[str] = set()
+    runtime.bot.mute = muted.add
+    runtime.bot.unmute = muted.discard
+    runtime.bot.is_muted = lambda name: name in muted
+    assert admin.set_focus('另一个群', True) == {'focus': ['另一个群', '测试群']}
+    assert admin.set_focus('另一个群', False) == {'focus': ['测试群']}
+    assert admin.set_mute('测试群', True) == {'muted': True}
+    assert admin.set_mute('测试群', False) == {'muted': False}
+    try:
+        admin.set_focus('', True)
+        raise AssertionError('空 chat 应该被拒绝')
+    except ValueError:
+        pass
+
+    state = admin.state()
+    assert state['nickname'] == 'Bot' and state['dry_run'] is False and state['seq'] > 0
+
+    # dataclass 字段自检：Config 里每个字段都得在 HOT 或 RESTART 里，不能漏
+    from config import Config
+    from runtime import HOT_FIELDS, RESTART_FIELDS
+
+    known = HOT_FIELDS | RESTART_FIELDS
+    missing = [f.name for f in dataclass_fields(Config) if f.name not in known]
+    assert not missing, f'这些配置字段没归类（热重载还是重启）: {missing}'
+    assert not (HOT_FIELDS & RESTART_FIELDS), HOT_FIELDS & RESTART_FIELDS
     print('admin self-check ok')
 
 

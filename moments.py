@@ -13,6 +13,7 @@ import asyncio
 import json
 import re
 import sqlite3
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Sequence
@@ -121,7 +122,10 @@ class MomentStore:
 
     def __init__(self, path: str | Path):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(path))
+        # check_same_thread=False 只是关掉 sqlite 的报错，不提供互斥：
+        # 消息链在事件循环里读写，管理后台的 HTTP 线程也会查（面板要看记忆条数）
+        self._conn = sqlite3.connect(str(path), check_same_thread=False)
+        self._lock = threading.Lock()
         self._conn.execute('''CREATE TABLE IF NOT EXISTS moments(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             chat TEXT NOT NULL,
@@ -134,21 +138,25 @@ class MomentStore:
         self._conn.commit()
 
     def __len__(self) -> int:
-        return self._conn.execute('SELECT COUNT(*) FROM moments').fetchone()[0]
+        with self._lock:
+            return self._conn.execute('SELECT COUNT(*) FROM moments').fetchone()[0]
 
     def close(self) -> None:
         self._conn.close()
 
     def last_end(self, chat: str) -> int:
         """ 这个会话已经记住的最后一刻；用于跳过重启后重复淘汰的老消息。 """
-        row = self._conn.execute('SELECT MAX(t_end) FROM moments WHERE chat=?', (chat,)).fetchone()
+        with self._lock:
+            row = self._conn.execute('SELECT MAX(t_end) FROM moments WHERE chat=?', (chat,)).fetchone()
         return row[0] or 0
 
     def add(self, moment: Moment) -> None:
-        self._conn.execute(
-            'INSERT INTO moments(chat, t_start, t_end, summary, cues, created_at) VALUES (?,?,?,?,?,?)',
-            (moment.chat, moment.t_start, moment.t_end, moment.summary, '\n'.join(moment.cues), int(time.time())))
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                'INSERT INTO moments(chat, t_start, t_end, summary, cues, created_at) VALUES (?,?,?,?,?,?)',
+                (moment.chat, moment.t_start, moment.t_end, moment.summary,
+                 '\n'.join(moment.cues), int(time.time())))
+            self._conn.commit()
 
     def search(self, chat: str, keywords: Sequence[str], limit: int = 2) -> list[Moment]:
         """ 按关键词捞回想，命中词多的优先，其次取新的。 """
@@ -160,9 +168,10 @@ class MomentStore:
         for keyword in keywords:
             params.extend((f'%{keyword}%', f'%{keyword}%'))
 
-        rows = self._conn.execute(
-            f'SELECT t_start, t_end, summary, cues FROM moments WHERE chat=? AND ({where}) '
-            'ORDER BY t_end DESC LIMIT 50', params).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                f'SELECT t_start, t_end, summary, cues FROM moments WHERE chat=? AND ({where}) '
+                'ORDER BY t_end DESC LIMIT 50', params).fetchall()
 
         scored = []
         for t_start, t_end, summary, cues in rows:

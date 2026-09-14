@@ -208,6 +208,11 @@ class IdleBackoff:
             return 0.0
         return state.until - now
 
+    def pending(self, now: float) -> dict[str, float]:
+        """ 还在冷却里的会话 -> 剩余秒数。管理后台的健康卡要列出来。 """
+        return {contact: state.until - now
+                for contact, state in self._states.items() if state.until > now}
+
 
 def _self_check() -> None:
     def score(text, **kwargs) -> NecessityScore:
@@ -270,6 +275,7 @@ def _self_check() -> None:
     # 翻篇只是放行，不重置冷却：剩下 18s 还在，面板要显示的是「拦不拦」不是「剩多少」
     assert backoff.remaining('g', 30.0) == 18.0
     assert backoff.remaining('从没见过的会话', 30.0) == 0.0
+    assert backoff.pending(30.0) == {'g': 18.0}
 
     # 连败越久退避越久，封顶 IDLE_MAX_SECONDS
     capped = IdleBackoff()

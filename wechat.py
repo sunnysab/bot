@@ -120,6 +120,10 @@ class Wechat:
         """ 管理后台用：会话列表（带 display_name / last_message / msg_count）。 """
         return await self._bot.get_conversations(limit=limit)
 
+    async def status(self) -> dict:
+        """ relay 的连接 / 登录状态。管理后台的健康卡用。 """
+        return await self._bot.get_status()
+
     async def messages(self, peer: str, limit: int = 300, exclude_system: bool = True):
         """ 管理后台用：某个会话的历史。
 

@@ -1,23 +1,14 @@
+""" 入口：读配置、起 Runtime、起管理后台、开收消息。 """
+
 import asyncio
 from pathlib import Path
 
 from dotenv import load_dotenv
 from loguru import logger
 
-from admin import start as start_admin
-from ai import Deepseek, OpenAI
-from bot import Bot
+from admin import Admin
 from config import Config
-from describer import EmojiDescriber, MediaCache, MediaDescriber
-from emojis import EmojiLibrary
-from focus import FocusMode
-from habits import HabitStore
-from moments import MomentKeeper, MomentStore
-from persona import Persona
-from planner import PLAN_RESPONSE_FORMAT
-from plugin import ChatPlugin, EndProcessing, RepeatPlugin, ReplyPolicy
-from profiles import ProfileStore
-from reply_trace import TraceLogger
+from runtime import Runtime
 
 
 def main():
@@ -28,104 +19,28 @@ def main():
     if not config.deepseek_key:
         logger.warning('DEEPSEEK_KEY 未设置，ChatPlugin 将无法调用模型')
 
-    ai_provider = Deepseek(key=config.deepseek_key, model=config.deepseek_model, url=config.deepseek_url,
-                           temperature=0.85)
-
-    # 决策者可以走本地免费模型；留空 PLANNER_URL 就两段都用主模型
-    planner_ai = None
+    runtime = Runtime(config)
     if config.planner_url:
-        planner_ai = OpenAI(url=config.planner_url, key=config.planner_key, model=config.planner_model,
-                            temperature=config.planner_temperature, max_tokens=config.planner_max_tokens,
-                            # thinking 与 json_schema 二选一：开 schema 会压掉思考（见 config 注释）
-                            extra_body={'chat_template_kwargs': {'enable_thinking': config.planner_thinking}},
-                            response_format=PLAN_RESPONSE_FORMAT if config.planner_json_schema else None)
         logger.info(f'Planner 使用本地模型: {config.planner_url} / {config.planner_model} '
                     f'(thinking={config.planner_thinking}, json_schema={config.planner_json_schema})')
-
-    # media_cache 建一份：识图往里写，管理后台从里读（md5 -> 描述）
-    media_cache = MediaCache(config.media_cache_path)
-
-    describer = None
-    if config.describe_media:
-        describer = MediaDescriber(ai_provider, media_cache,
-                                   model=config.deepseek_model, concurrency=config.describe_concurrency,
-                                   timeout=config.describe_timeout, max_tokens=config.describe_max_tokens)
-
-    memory_store = MomentStore(config.moment_path)
-    emojis = EmojiLibrary.load(config.emoji_path)
-    # 给偷来的表情补「使用场景」：微信的 desc 只有一个标签，够搜标签不够搜场合。
-    # 复用识图模型——真看图比只看标签准。
-    emoji_describer = None
-    if config.describe_media:
-        emoji_describer = EmojiDescriber(ai_provider, emojis, model=config.deepseek_model,
-                                         timeout=config.describe_timeout,
-                                         max_tokens=config.describe_max_tokens)
-    sendable = emojis.sendable_count
-    logger.info(f'已加载 {len(emojis)} 张表情（{sendable} 张能发，'
-                f'{emojis.scene_count} 张写了使用场景）: {config.emoji_path}')
-    bot = Bot(config.relay_host, config.relay_port, unix_path=config.relay_unix, x_delay=0.5,
-              send_interval=config.send_interval, describer=describer,
-              describe_history_limit=config.describe_history_limit,
-              keeper=MomentKeeper(ai_provider, memory_store, batch=config.moment_batch),
-              emojis=emojis, emoji_path=config.emoji_path,
-              emoji_describer=emoji_describer, typo_rate=config.typo_rate,
-              dry_run=config.dry_run)
-    if config.dry_run:
-        logger.warning('演习模式：全链路照跑，但不真的发消息（DRY_RUN=1 关掉）')
-    if emoji_describer:
-        emoji_describer.on_update = bot.save_emojis
-
-    # 初始化插件
-    repeater = RepeatPlugin()
-
-    # 人格：谁、怎么说话、怎么行动。别名也在这里
-    persona = Persona(
-        personality=config.personality, reply_style=config.reply_style, behavior_style=config.behavior_style,
-        alternates=tuple(style.strip() for style in config.reply_styles.split('|') if style.strip()),
-        alternate_probability=config.style_probability)
-    logger.info(f'机器人别名: {"、".join(persona.aliases)}')
-
-    policy = ReplyPolicy(threshold=config.reply_necessity_threshold,
-                         activity_window=config.reply_activity_window, aliases=persona.aliases,
-                         focus=FocusMode(enabled=config.enable_focus,
-                                         enter_activity=config.focus_enter_activity,
-                                         idle=config.focus_idle_seconds,
-                                         maximum=config.focus_max_seconds))
+    logger.info(f'机器人别名: {"、".join(runtime.chat_plugin.persona.aliases)}')
     logger.info(f'专注模式 {"开" if config.enable_focus else "关"}：'
                 f'活动 {config.focus_enter_activity} 条进入，'
                 f'空闲 {int(config.focus_idle_seconds)}s / 最长 {int(config.focus_max_seconds)}s 退出；'
                 f'错别字概率 {config.typo_rate:.0%}')
-    profiles = ProfileStore.load(config.profile_path)
-    if profiles:
-        logger.info(f'已加载 {len(profiles)} 个人的画像: {config.profile_path}')
-    habits = HabitStore.load(config.habit_path)
-    if habits:
-        logger.info(f'已加载 {len(habits)} 条群用语: {config.habit_path}')
-
-    chat_plugin = ChatPlugin(ai_provider, context_length=30, policy=policy, persona=persona, profiles=profiles,
-                             habits=habits, memories=memory_store, tracer=TraceLogger(config.trace_path),
-                             enable_planner=config.enable_planner, planner_ai=planner_ai,
-                             emoji_search=bot.search_emoji, enable_tools=config.enable_tools,
-                             planner_rounds=config.planner_rounds,
-                             timeout=config.request_timeout)
-
-    bot.set_default_plugin([repeater, chat_plugin])
-    bot.attach('研究生摆烂群', EndProcessing())
-
-    # 连接就绪后加载最近的聊天记录
-    bot.register_ready(lambda _bot: bot.load_context())
 
     async def run():
-        panel = start_admin(bot, bot.wechat, media_cache, asyncio.get_running_loop(),
-                            port=config.admin_port) if config.admin_port else None
+        # 后台在循环起来之后才起——它要拿 loop 才能把 RPC 切回来跑
+        panel = None
+        if config.admin_port:
+            panel = Admin.start_safely(runtime, port=config.admin_port)
         try:
-            await bot.start()
+            await runtime.start()
         finally:
             if panel:
                 panel.stop()
-            await bot.stop()
+            await runtime.stop()
 
-    # 开始接收消息
     try:
         asyncio.run(run())
     except KeyboardInterrupt:

@@ -193,6 +193,10 @@ class ContextManager:
         """
         return self.get_context(contact).append(sender, text, t, media, download, is_self)
 
+    def sizes(self) -> dict[str, int]:
+        """ 每个会话当前窗口里有多少条。面板要显示「模型此刻能看到多少」。 """
+        return {key: len(window) for key, window in self._contexts.items()}
+
 
 @dataclass(slots=True)
 class MessageContext:

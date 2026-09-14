@@ -1,7 +1,47 @@
 import os
 from dataclasses import dataclass, fields
+from pathlib import Path
 
 from persona import Persona
+
+
+def update_dotenv(path: str | Path, updates: dict[str, str]) -> None:
+    """ 只改给定的键，其余行原样保留，原子替换。
+
+    不整个重写：`.env` 里可能有注释掉的备用 key（现在那个文件里就有一行），
+    整文件重写会把它抹掉。也不直接写原文件：写到一半中断会留下半个 `.env`，
+    下次启动就少几个配置。
+    """
+    path = Path(path)
+    lines = path.read_text(encoding='utf-8').splitlines() if path.exists() else []
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
+
+    done = set()
+    out: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith('#') and '=' in stripped:
+            key = stripped.split('=', 1)[0].strip()
+            if key in updates:
+                out.append(f'{key}={_quote(updates[key])}')
+                done.add(key)
+                continue
+        out.append(line)
+    # 新键追加到末尾（不动已有行的顺序）
+    out.extend(f'{key}={_quote(value)}' for key, value in updates.items() if key not in done)
+
+    tmp = path.parent / f'{path.name}.tmp'
+    tmp.write_text('\n'.join(out) + '\n', encoding='utf-8')
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def _quote(value: str) -> str:
+    """ 值里有换行或首尾空白时加引号，否则 dotenv 会截掉。 """
+    value = str(value)
+    if '\n' in value or '#' in value or value != value.strip():
+        return '"' + value.replace('"', '\\"') + '"'
+    return value
 
 
 @dataclass(frozen=True)
@@ -33,6 +73,11 @@ class Config:
     focus_enter_activity: int = 15      # 活动窗口内别人的消息数够多就进
     focus_idle_seconds: float = 300.0   # 这么久没新消息自动退出
     focus_max_seconds: float = 1800.0   # 单次专注最长多久
+    # 连续沉默退避：连着几轮都不开口就歶一会儿（见 necessity.IdleBackoff）
+    backoff_start_after: int = 2        # 连着几轮没开口才开始退避
+    backoff_base_seconds: float = 15.0  # 第一档冷却，逐次翻倍
+    backoff_max_seconds: float = 300.0  # 冷却上限
+    backoff_bypass_messages: int = 6    # 中间又来了这么多条就当话题翻篇
     # 错别字：出站文本抖一个同音/形近字的概率（0 关掉）
     typo_rate: float = 0.08
     # 群友画像（离线生成，见 build_profiles.py）
@@ -101,10 +146,33 @@ if __name__ == '__main__':
     assert base.enable_focus and base.typo_rate == 0.08, base
     os.environ.update(ENABLE_FOCUS='0', TYPO_RATE='0')
     off = Config.from_env()
-    assert not off.enable_focus and off.typo_rate == 0.0, off
+    assert not off.enable_focus and off.typo_rate == 0.0, off    # 退避四档也能从环境变量调（面板上要能改）
+    assert base.backoff_start_after == 2 and base.backoff_max_seconds == 300.0, base
+    os.environ.update(BACKOFF_START_AFTER='3', BACKOFF_MAX_SECONDS='60')
+    tuned = Config.from_env()
+    assert tuned.backoff_start_after == 3 and tuned.backoff_max_seconds == 60.0, tuned
     # 管理后台端口和演习开关也能从环境变量调
     assert base.admin_port == 8099 and base.dry_run is False, base
     os.environ.update(ADMIN_PORT='0', DRY_RUN='1')
     panel = Config.from_env()
     assert panel.admin_port == 0 and panel.dry_run is True, panel
-    print('ok')
+
+    # .env 回写：只改动的键、保留注释和其余行、原子写
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / '.env'
+        path.write_text('# 备用\nDEEPSEEK_KEY=old\n#DEEPSEEK_KEY=spare\nSEND_INTERVAL=1.0\n', encoding='utf-8')
+        os.chmod(path, 0o644)
+        update_dotenv(path, {'SEND_INTERVAL': '2.5', 'TYPO_RATE': '0'})
+        written = path.read_text(encoding='utf-8')
+        assert 'DEEPSEEK_KEY=old' in written            # 没动的键保持原样
+        assert '#DEEPSEEK_KEY=spare' in written         # 注释没被抹掉
+        assert 'SEND_INTERVAL=2.5' in written and 'SEND_INTERVAL=1.0' not in written
+        assert 'TYPO_RATE=0' in written                 # 新键追加
+        assert path.stat().st_mode & 0o777 == 0o644     # 权限保留
+        assert not (Path(tmp) / '.env.tmp').exists()    # 临时文件已替换掉
+        # 带空格 / 井号的值要加引号，否则 dotenv 会截
+        update_dotenv(path, {'PERSONALITY': '温柔 阳光 #1'})
+        assert 'PERSONALITY="温柔 阳光 #1"' in path.read_text(encoding='utf-8')
+        print('ok')

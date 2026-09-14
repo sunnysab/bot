@@ -17,6 +17,7 @@ from persona import Persona
 from plugin import ChatPlugin, RepeatPlugin, ReplyPolicy, clean_reply
 from profiles import Profile, ProfileStore
 from reply_trace import TraceLogger
+from reply_trace import find as find_trace
 from tools import AssistantTurn, ToolCall
 
 PLANNER_MARK = '决策者'          # planner.txt 里独有的字眼，用来区分两次调用
@@ -93,6 +94,8 @@ class FakeEmojiSearch:
 
 def make_msg(msg_type=1, is_chatroom=False, is_at_me=False, media=b'', content=''):
     msg = types.SimpleNamespace(msg_type=msg_type, is_chatroom=is_chatroom, is_at_me=is_at_me,
+                                # 19 位雪花号，比 JS 安全整数还大
+                                msg_id=7100000000000000123,
                                 content=content, sender_name='Alice', reply_target='456@chatroom')
 
     async def get_media_bytes():
@@ -328,6 +331,7 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
             self.plugin.tracer = TraceLogger(path)
             await self.plugin.handle(proactive_ctx())
             record = json.loads(path.read_text(encoding='utf-8').strip())
+            found = find_trace(path, 7100000000000000123)      # 临时目录还在，得在 with 里找
 
         self.assertEqual(record['trigger'], 'proactive')
         self.assertEqual(record['reply'], ['收到'])
@@ -335,6 +339,9 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertIn('msg11', record['transcript'])
         self.assertIn('想表达：附和一句', record['plan'])
         self.assertGreaterEqual(record['latency_ms'], 0)
+        # 「为什么没回」抽屉靠 msg_id 把气泡和这一轮对上（64 位，存成字符串）
+        self.assertEqual(record['msg_id'], '7100000000000000123')
+        self.assertEqual(found, record)
 
     async def test_tracer_records_direct_address_with_plan(self):
         with tempfile.TemporaryDirectory() as tmp:
