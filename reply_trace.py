@@ -34,17 +34,24 @@ class TraceRecord:
 
 
 class TraceLogger:
-    """ 往 JSONL 追加回复轨迹。 """
+    """ 往 JSONL 追加回复轨迹，超过 max_bytes 就转存成 .1。 """
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, max_bytes: int = 8 * 1024 * 1024):
         self.path = Path(path)
+        self.max_bytes = max_bytes
 
     def log(self, record: TraceRecord) -> None:
         try:
+            self._rotate()
             with self.path.open('a', encoding='utf-8') as file:
                 file.write(json.dumps(asdict(record), ensure_ascii=False) + '\n')
         except OSError as e:
             logger.warning(f'写回复轨迹失败 {self.path}: {e}')
+
+    def _rotate(self) -> None:
+        # ponytail: 只留一份 .1，够查最近的问题就行；真要长期归档再说
+        if self.max_bytes > 0 and self.path.exists() and self.path.stat().st_size >= self.max_bytes:
+            self.path.replace(self.path.parent / (self.path.name + '.1'))
 
 
 def _self_check() -> None:
@@ -68,6 +75,16 @@ def _self_check() -> None:
         assert first['reasons'] == ['问句', '活跃=10条']
         assert first['reply'] == ['这样弄']
         assert json.loads(lines[1])['reply'] == []
+
+        # 超过上限就转存，新的从头写
+        rotated = Path(tmp) / 'big.jsonl'
+        roller = TraceLogger(rotated, max_bytes=100)
+        for i in range(5):
+            roller.log(TraceRecord(ts=float(i), contact='c', contact_name='n', sender='s',
+                                   trigger='at', score=1, reasons=(), transcript='t' * 50,
+                                   reply=(), latency_ms=0))
+        assert Path(tmp, 'big.jsonl.1').exists()
+        assert len(rotated.read_text(encoding='utf-8').strip().split('\n')) == 1
 
     # 路径不可写时不能抛出去
     TraceLogger('/no/such/dir/trace.jsonl').log(

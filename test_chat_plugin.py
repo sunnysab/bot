@@ -13,7 +13,7 @@ from habits import Habit, HabitStore
 from moments import Moment, MomentStore
 from necessity import NECESSITY_THRESHOLD
 from persona import Persona
-from plugin import ChatPlugin, RepeatPlugin, ReplyPolicy
+from plugin import ChatPlugin, RepeatPlugin, ReplyPolicy, clean_reply
 from profiles import Profile, ProfileStore
 from reply_trace import TraceLogger
 
@@ -347,6 +347,68 @@ class TestRepeatPlugin(unittest.IsolatedAsyncioTestCase):
         reply = await RepeatPlugin().handle(make_ctx(make_msg(), history=window))
         self.assertEqual(reply.texts, ['牛啊'])
         self.assertTrue(reply.stop)
+
+
+class TestCleanReply(unittest.TestCase):
+    """ 模型顺手带的包装不能漏到群里。 """
+
+    def test_strips_nickname_prefix(self):
+        self.assertEqual(clean_reply('Bot：在的', names=('Bot',)), '在的')
+        self.assertEqual(clean_reply('Bot: 在的', names=('Bot',)), '在的')
+        self.assertEqual(clean_reply('雨姐：在的', names=('雨墨蝉烟', '雨姐')), '在的')
+
+    def test_prefix_strip_needs_a_separator(self):
+        """ 按字符集剥（str.lstrip）和按裸前缀剥都会误伤，必须要求分隔符。 """
+        self.assertEqual(clean_reply('Bother', names=('Bot',)), 'Bother')
+        self.assertEqual(clean_reply('雨姐们都在吗', names=('雨姐',)), '雨姐们都在吗')
+        # 整条消息就只有名字（后面什么都不跟）就当空
+        self.assertEqual(clean_reply('Bot', names=('Bot',)), '')
+        self.assertEqual(clean_reply('Bot ', names=('Bot',)), '')
+
+    def test_strips_wrapping_quotes(self):
+        self.assertEqual(clean_reply('「在的」'), '在的')
+        self.assertEqual(clean_reply('“在的”'), '在的')
+        self.assertEqual(clean_reply('《在的》'), '在的')
+        # 叠了几层
+        self.assertEqual(clean_reply('“回复：在的”'), '在的')
+
+    def test_keeps_parentheses_because_they_are_content(self):
+        self.assertEqual(clean_reply('（目移）'), '（目移）')
+        self.assertEqual(clean_reply('在的（笑）'), '在的（笑）')
+
+    def test_strips_markdown_and_blank_lines(self):
+        self.assertEqual(clean_reply('**在的**'), '在的')
+        self.assertEqual(clean_reply('`在的`'), '在的')
+        self.assertEqual(clean_reply('\n\n在的\n\n'), '在的')
+        self.assertEqual(clean_reply('在的\n\n 好  \n'), '在的\n好')
+
+    def test_empty_stays_empty(self):
+        for text in ('', '   ', '\n\n', 'Bot：', '「」'):
+            self.assertEqual(clean_reply(text, names=('Bot',)), '', repr(text))
+
+    def test_does_not_touch_body(self):
+        self.assertEqual(clean_reply('在的，你说「那个」是什么意思'), '在的，你说「那个」是什么意思')
+
+
+class TestCleanReplyInPlugin(unittest.IsolatedAsyncioTestCase):
+    async def test_plugin_cleans_before_sending(self):
+        ai = FakeAi(reply=('Bot：「收到」',))
+        plugin = ChatPlugin(ai, context_length=10)
+        reply = await plugin.handle(make_ctx(make_msg(is_at_me=True)))
+        self.assertEqual(reply.texts, ['收到'])
+
+    async def test_all_empty_becomes_stop(self):
+        ai = FakeAi(reply=('Bot：',))
+        plugin = ChatPlugin(ai, context_length=10)
+        reply = await plugin.handle(make_ctx(make_msg(is_at_me=True)))
+        self.assertTrue(reply.stop)
+        self.assertEqual(reply.texts, [])
+
+    async def test_alias_prefix_is_also_stripped(self):
+        ai = FakeAi(reply=('雨姐：收到',))
+        plugin = ChatPlugin(ai, context_length=10, persona=Persona(aliases=('雨姐',)))
+        reply = await plugin.handle(make_ctx(make_msg(is_at_me=True)))
+        self.assertEqual(reply.texts, ['收到'])
 
 
 if __name__ == '__main__':

@@ -1,8 +1,10 @@
 import asyncio
 import base64
 import random
+import re
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import override
@@ -36,6 +38,50 @@ class Reply:
 
     texts: list[str] = field(default_factory=list)
     stop: bool = False
+
+
+# 模型爱顺手包上的东西：只剥真正在「包裹」的引号，括号不动
+# （（目移）这类括号里的话在群里就是正文）
+QUOTE_PAIRS = {'「': '」', '“': '”', '‘': '’', '"': '"', "'": "'", '《': '》', '〈': '〉'}
+REPLY_PREFIXES = ('回复：', '回复:', '回复你：', '回复你:', '答：', '答:')
+NAME_SEPARATORS = '：: ,，、'
+BOLD = re.compile(r'^\*\*(.+)\*\*$')
+CODE = re.compile(r'^`(.+)`$')
+
+
+def clean_reply(text: str, names: Iterable[str] = ()) -> str:
+    """ 清掉模型顺手带上的包装：昵称前缀、引号、书名号、markdown、多余空行。
+
+    只动首尾和整句包裹，不碰正文里的标点。注意不能用 str.lstrip——
+    它是按字符集剥的，'Bother'.lstrip('Bot:') 会变成 'her'。
+    """
+    cleaned = '\n'.join(line.strip() for line in (text or '').splitlines() if line.strip())
+    if not cleaned:
+        return ''
+
+    changed = True
+    while changed:  # 可能叠了几层：『"回复：xxx"』
+        changed = False
+        for name in names:
+            if not name or not cleaned.startswith(name):
+                continue
+            rest = cleaned[len(name):]
+            # 后面必须跟分隔符，否则「雨姐们」这种正文会被削掉
+            if rest and rest[0] not in NAME_SEPARATORS:
+                continue
+            cleaned = rest.lstrip(NAME_SEPARATORS).strip()
+            changed = True
+        for prefix in REPLY_PREFIXES:
+            if cleaned.startswith(prefix):
+                cleaned = cleaned[len(prefix):].strip()
+                changed = True
+        if len(cleaned) >= 2 and QUOTE_PAIRS.get(cleaned[0]) == cleaned[-1]:
+            cleaned = cleaned[1:-1].strip()
+            changed = True
+
+    for pattern in (BOLD, CODE):
+        cleaned = pattern.sub(r'\1', cleaned)
+    return cleaned.strip()
 
 
 class Plugin(ABC):
@@ -272,9 +318,10 @@ class ChatPlugin(Plugin):
         if not response:
             return Reply(stop=True)
 
-        # 有时候模型返回数据中会带有 "昵称: " 的前缀，这里需要去掉
-        prefix = ctx.self_name + ':'
-        return Reply(texts=[x.lstrip(prefix) for x in response])
+        # 模型常顺手带上「昵称：」前缀或引号包裹，不能直接漏到群里
+        names = (ctx.self_name, *self.persona.aliases)
+        texts = [text for text in (clean_reply(x, names) for x in response) if text]
+        return Reply(texts=texts) if texts else Reply(stop=True)
 
     def _context_blocks(self, ctx: MessageContext, history: ChatWindow) -> dict[str, str]:
         """ 画像 / 群用语 / 中期记忆，三者都是「能捞到才注入」。 """
