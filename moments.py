@@ -184,6 +184,22 @@ class MomentStore:
                        cues=tuple(cue for cue in row[4].split('\n') if cue))
                 for row in scored[:limit]]
 
+    def list(self, chat: str = '', limit: int = 100) -> list[dict]:
+        """ 列回想。面板要能看见并删掉——「记忆失真比没有记忆更糟」。 """
+        sql = ('SELECT id, chat, t_start, t_end, summary, cues FROM moments'
+               + (' WHERE chat=? ORDER BY t_end DESC LIMIT ?' if chat else ' ORDER BY t_end DESC LIMIT ?'))
+        params = (chat, limit) if chat else (limit,)
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [{'id': r[0], 'chat': r[1], 't_start': r[2], 't_end': r[3],
+                 'summary': r[4], 'cues': r[5]} for r in rows]
+
+    def delete(self, moment_id: int) -> bool:
+        with self._lock:
+            changed = self._conn.execute('DELETE FROM moments WHERE id=?', (moment_id,)).rowcount
+            self._conn.commit()
+        return changed > 0
+
 
 class MomentKeeper:
     """ 攒够一批滑出窗口的消息就压成一条回想。 """
@@ -267,6 +283,15 @@ def _self_check() -> None:
         assert store.search('g', extract_keywords('完全不相关的内容')) == []
         assert store.search('g', []) == []
         assert [m.summary for m in store.search('other', ['上班'])] == ['别群的上班话题']  # 不串群
+
+        # 面板要看得到、删得掉（「记忆失真比没有记忆更糟」）
+        listed = store.list(limit=10)
+        assert [m['summary'] for m in listed][0] == '讨论了周末去看电影'   # 新的在前
+        assert len(store.list('g')) == 2 and len(store.list('nobody')) == 0
+        target = next(m for m in listed if m['chat'] == 'other')
+        assert store.delete(target['id']) is True
+        assert store.delete(target['id']) is False          # 删两次第二次没有
+        assert len(store) == 2 and store.list('other') == []
         store.close()
 
     print('moments self-check ok')

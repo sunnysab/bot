@@ -1,10 +1,62 @@
 import base64
+from dataclasses import dataclass, field
 
 from loguru import logger
 
 from tools import AssistantTurn, parse_tool_calls
 
 DESCRIBE_PROMPT = '用不超过 15 个字描述这张图片或表情包的内容和情绪，不要标点符号'
+
+
+@dataclass
+class Usage:
+    """ 累计 token 用量。
+
+    以前 response.usage 拿到就丢了——而「KV 缓存到底有没有命中」这个问题
+    （notes/未完成.md 里挂着的那条）记下来就有答案。不同供应商字段名不一样，
+    认多少算多少，认不到就是 0。
+    """
+
+    calls: int = 0
+    prompt: int = 0
+    completion: int = 0
+    cached: int = 0
+    cache_write: int = 0
+    by_model: dict = field(default_factory=dict)
+
+    def add(self, raw, model: str = '') -> None:
+        if raw is None:
+            return
+        extra = getattr(raw, 'model_extra', None) or {}
+        details = getattr(raw, 'prompt_tokens_details', None)
+        # 两种口径都认：DeepSeek 原生是 prompt_cache_hit_tokens，
+        # Anthropic 式代理是 prompt_tokens_details.cached_tokens
+        # （实测本机配的中转返回的是后者 + model_extra.cache_creation_input_tokens）
+        cached = (getattr(details, 'cached_tokens', 0) or 0) if details else 0
+        cached = cached or extra.get('prompt_cache_hit_tokens', 0) or 0
+        prompt = getattr(raw, 'prompt_tokens', 0) or 0
+        completion = getattr(raw, 'completion_tokens', 0) or 0
+        self.calls += 1
+        self.prompt += prompt
+        self.completion += completion
+        self.cached += cached
+        # 写进缓存多少：看了它才分得清「没开缓存」和「开了但从来没命中」
+        self.cache_write += extra.get('cache_creation_input_tokens', 0) or 0
+        if model:
+            bucket = self.by_model.setdefault(model, {'calls': 0, 'prompt': 0, 'completion': 0})
+            bucket['calls'] += 1
+            bucket['prompt'] += prompt
+            bucket['completion'] += completion
+
+    def snapshot(self) -> dict:
+        hit = round(self.cached / self.prompt, 3) if self.prompt else None
+        return {'calls': self.calls, 'prompt': self.prompt, 'completion': self.completion,
+                'cached': self.cached, 'cache_write': self.cache_write,
+                'cache_hit_rate': hit, 'by_model': self.by_model}
+
+
+# 全局累计：面板的统计卡要读，跨所有模型调用
+usage = Usage()
 
 
 class AiProvider:
@@ -75,6 +127,7 @@ class OpenAI(AiProvider):
         )
 
         completion_message = response.choices[0].message
+        usage.add(response.usage, self.model)
         reasoning = (completion_message.model_extra or {}).get('reasoning_content') or ''
         response_text: str = completion_message.content or ''
         if not response_text.strip() and reasoning.strip():
@@ -112,6 +165,7 @@ class OpenAI(AiProvider):
             extra_body=self.extra_body or None,
         )
         completion_message = response.choices[0].message
+        usage.add(response.usage, self.model)
         reasoning = (completion_message.model_extra or {}).get('reasoning_content') or ''
         turn = AssistantTurn(
             content=(completion_message.content or '').strip(),
@@ -135,6 +189,7 @@ class OpenAI(AiProvider):
                 {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{encoded}'}},
             ]}],
         )
+        usage.add(response.usage, self.model)
         text = (response.choices[0].message.content or '').strip()
         return text or None
 
@@ -146,6 +201,7 @@ class OpenAI(AiProvider):
             max_tokens=max_tokens,
             messages=[{'role': 'system', 'content': prompt}, {'role': 'user', 'content': text}],
         )
+        usage.add(response.usage, self.model)
         content = (response.choices[0].message.content or '').strip()
         logger.debug(f'Summarize interface. response: {content!r}')
         return content or None
@@ -157,3 +213,42 @@ class Deepseek(OpenAI):
     def __init__(self, key: str, model: str = 'deepseek-flash', url: str = 'https://api.deepseek.com', **kwargs):
         super().__init__(url=url, key=key, model=model, **kwargs)
 
+
+
+def _self_check() -> None:
+    """ token 记账：两种供应商口径都要认（字段名错了会一直静默显示 0）。 """
+    import types
+
+    fresh = Usage()
+    assert fresh.snapshot() == {'calls': 0, 'prompt': 0, 'completion': 0, 'cached': 0,
+                                'cache_write': 0, 'cache_hit_rate': None, 'by_model': {}}
+    fresh.add(None)                                   # 拿不到 usage 也不能炸
+    assert fresh.calls == 0
+
+    # DeepSeek 原生：命中数在 model_extra
+    deepseek = types.SimpleNamespace(prompt_tokens=100, completion_tokens=40,
+                                     model_extra={'prompt_cache_hit_tokens': 80})
+    fresh.add(deepseek, 'm1')
+    # Anthropic 式代理：命中数在 prompt_tokens_details，创建数在 model_extra
+    anthropic = types.SimpleNamespace(
+        prompt_tokens=100, completion_tokens=10,
+        prompt_tokens_details=types.SimpleNamespace(cached_tokens=60),
+        model_extra={'cache_creation_input_tokens': 25})
+    fresh.add(anthropic, 'm2')
+
+    snap = fresh.snapshot()
+    assert snap['calls'] == 2 and snap['prompt'] == 200 and snap['completion'] == 50
+    assert snap['cached'] == 140, snap          # 80 + 60
+    assert snap['cache_write'] == 25
+    assert snap['cache_hit_rate'] == 0.7        # 140/200
+    assert snap['by_model']['m2'] == {'calls': 1, 'prompt': 100, 'completion': 10}
+
+    # 只有 prompt 没有 completion 的供应商也不能算错
+    odd = Usage()
+    odd.add(types.SimpleNamespace(prompt_tokens=7, model_extra={}))
+    assert odd.snapshot()['completion'] == 0 and odd.snapshot()['cache_hit_rate'] == 0.0
+    print('ai self-check ok')
+
+
+if __name__ == '__main__':
+    _self_check()

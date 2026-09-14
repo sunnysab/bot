@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -30,8 +31,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from dotenv import load_dotenv
+from jinja2 import StrictUndefined, Template, TemplateSyntaxError, UndefinedError
 from loguru import logger
 
+from ai import usage
 from config import DOTENV_PATH, Config, update_dotenv
 from context import SYSTEM_KINDS, MessageKind
 from events import Status, bus
@@ -42,6 +45,9 @@ from runtime import HOT_FIELDS, RESTART_FIELDS
 
 PAGE = Path(__file__).parent / 'admin.html'
 SIDECAR = Path(__file__).parent / 'admin.db'
+# 可以在面板上改的提示词。两块模板都不长，整体替换比行编辑简单也可控
+PROMPTS = {'planner': Path(__file__).parent / 'planner.txt',
+           'replyer': Path(__file__).parent / 'replyer.txt'}
 DEFAULT_PORT = 8099          # 8080 在本机被 iptv 占了，别用
 CHATS_LIMIT = 50
 MESSAGES_LIMIT = 300         # v1 一次拉满，relay 的 get_messages 还不能翻页
@@ -111,6 +117,21 @@ def _stale(new: Config, old: Config) -> list[str]:
     """ 改了、但热重载管不着的字段：得重启进程。 """
     return [f.name for f in dataclass_fields(Config)
             if f.name in RESTART_FIELDS and getattr(new, f.name) != getattr(old, f.name)]
+
+
+def _validate_prompt(text: str) -> None:
+    """ 拿假上下文渲染一遍，语法错和变量名拼错都在这儿拦下。
+
+    不验的后果很阴：热重载之后每一轮渲染都抛，而消息处理链把异常吞掉，
+    最后表现成「机器人突然不说话」——查起来要翻半天。
+    StrictUndefined：默认的 Undefined 会把拼错的变量名渲染成空串，验不出来。
+    """
+    context = {'behavior_style': '', 'self_name': '', 'contact': '', 'is_group': True,
+               'aliases': (), 'tools': (), 'identity': '', 'reply_style': ''}
+    try:
+        Template(text, undefined=StrictUndefined).render(**context)
+    except (TemplateSyntaxError, UndefinedError) as e:
+        raise ValueError(f'模板有问题：{e}') from e
 
 
 def _ratio(part: int, whole: int) -> float | None:
@@ -396,7 +417,53 @@ class Admin:
                         'n': len(latencies)},
             'focus': {'entered': self.runtime.focus.entered, 'exited': self.runtime.focus.exited},
             'counters': {'reply': bot.reply_count, 'emoji': bot.emoji_count, 'typo': bot.typo_count},
+            'usage': usage.snapshot(),
         }
+
+    # ---------- 提示词 / 重放 / 资料 ----------
+
+    def read_prompts(self) -> dict:
+        return {name: path.read_text(encoding='utf-8') for name, path in PROMPTS.items()}
+
+    def save_prompt(self, name: str, text: str) -> dict:
+        """ 校验 → 原子写 → 热重载（ChatPlugin 在 __init__ 里读模板，重建就生效）。 """
+        path = PROMPTS.get(name)
+        if path is None:
+            raise ValueError(f'没有这个提示词：{name}')
+        _validate_prompt(text)
+        tmp = path.parent / f'{path.name}.tmp'
+        tmp.write_text(text, encoding='utf-8')
+        os.replace(tmp, path)
+        self.runtime.apply(self.runtime.config)
+        logger.warning(f'管理后台改了提示词 {path.name}（{len(text)} 字节），已热重载')
+        return {'saved': name, 'bytes': len(text), 'lines': text.count('\n') + 1}
+
+    def replay(self, msg_id: str, stage: str = 'all') -> dict:
+        """ 用当前提示词重跑一轮。会真的花 token（面板上要确认）。 """
+        record = find_trace(self.runtime.config.trace_path, msg_id)
+        if not record:
+            raise ValueError('这一轮没有 trace——被门控拦下的没走到模型，重放不了')
+        return self.call(self.runtime.chat_plugin.replay(
+            record.get('transcript', ''), record.get('plan', ''),
+            self_name=getattr(self._wechat, 'nickname', ''),
+            contact=record.get('contact_name', ''), stage=stage))
+
+    def emojis(self, limit: int = 300) -> list[dict]:
+        return [{'md5': item.md5, 'desc': item.desc, 'scene': item.scene,
+                 'count': item.count, 'sendable': item.sendable}
+                for item in self.runtime.emojis.items()[:limit]]
+
+    def delete_emoji(self, md5: str) -> dict:
+        removed = self.runtime.emojis.remove(md5)
+        if removed:
+            self.runtime.bot.save_emojis()
+        return {'removed': removed}
+
+    def moments(self, chat: str = '', limit: int = 100) -> list[dict]:
+        return self.runtime.memories.list(chat, limit)
+
+    def delete_moment(self, moment_id: int) -> dict:
+        return {'removed': self.runtime.memories.delete(int(moment_id))}
 
     # ---------- 动作 ----------
 
@@ -542,6 +609,13 @@ class Admin:
             if route == '/api/stats':
                 hours = float((query.get('hours') or ['24'])[0])
                 return self._json(handler, self.stats(hours))
+            if route == '/api/prompts':
+                return self._json(handler, self.read_prompts())
+            if route == '/api/emojis':
+                return self._json(handler, {'emojis': self.emojis()})
+            if route == '/api/moments':
+                chat = (query.get('chat') or [''])[0]
+                return self._json(handler, {'moments': self.moments(chat)})
             if route.startswith('/api/trace/'):
                 return self._json(handler, self.trace(unquote(route[len('/api/trace/'):])))
             if route == '/api/config':
@@ -577,6 +651,16 @@ class Admin:
                 return self._json(handler, self.reload_config())
             if route == '/api/restart':
                 return self._json(handler, self.restart())
+            if route == '/api/prompts':
+                return self._json(handler, self.save_prompt(payload.get('name', ''),
+                                                            payload.get('text', '')))
+            if route == '/api/emoji_delete':
+                return self._json(handler, self.delete_emoji(payload.get('md5', '')))
+            if route == '/api/moment_delete':
+                return self._json(handler, self.delete_moment(payload.get('id', 0)))
+            if route.startswith('/api/replay/'):
+                msg_id = unquote(route[len('/api/replay/'):])
+                return self._json(handler, self.replay(msg_id, payload.get('stage', 'all')))
             self._json(handler, {'error': 'not found'}, 404)
         except ValueError as e:
             self._json(handler, {'error': str(e)}, 400)
@@ -824,6 +908,16 @@ def _self_check() -> None:
     missing = [f.name for f in dataclass_fields(Config) if f.name not in known]
     assert not missing, f'这些配置字段没归类（热重载还是重启）: {missing}'
     assert not (HOT_FIELDS & RESTART_FIELDS), HOT_FIELDS & RESTART_FIELDS
+    # 提示词校验：语法错 / 变量名拼错都要拦下来（不拦的话热重载后每轮都抛，
+    # 而消息链把异常吞掉，表现成「机器人突然不说话」）
+    _validate_prompt('你好 {{ self_name }}，{{ behavior_style }}')
+    for bad in ('{% if tools %}没有 endif', '{{ behaviour_style }}', '{% for x in %}'):
+        try:
+            _validate_prompt(bad)
+            raise AssertionError(f'应该被拒: {bad}')
+        except ValueError:
+            pass
+
     print('admin self-check ok')
 
 

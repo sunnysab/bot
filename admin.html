@@ -81,6 +81,9 @@
   .bar span{width:112px;flex:none;color:var(--dim)}
   .bar i{height:10px;background:var(--accent);border-radius:3px;min-width:2px}
   .bar em{font-style:normal;color:var(--dim)}
+  .mem{border-bottom:1px solid #f0f2f4;padding:4px 0;font-size:12.5px}
+  .mem .detail{font-size:11px}
+  .drawer textarea{min-height:170px}
 </style>
 </head>
 <body>
@@ -113,12 +116,14 @@
       <button data-tab="health">健康</button>
       <button data-tab="log">日志</button>
       <button data-tab="stats">统计</button>
+      <button data-tab="assets">资料</button>
       <button data-tab="config">配置</button>
     </div>
     <div id="panel-trace"></div>
     <div id="panel-health" style="display:none"></div>
     <div id="panel-log" style="display:none"></div>
     <div id="panel-stats" style="display:none"></div>
+    <div id="panel-assets" style="display:none"></div>
     <div id="panel-config" style="display:none"></div>
   </div>
 </main>
@@ -269,7 +274,7 @@ function pickedRow(){
   return el ? el.querySelector('.body').textContent : '';
 }
 
-const TABS = ['trace','health','log','stats','config'];
+const TABS = ['trace','health','log','stats','assets','config'];
 
 async function stats(){
   const hours = window.statsHours || 24;
@@ -297,12 +302,62 @@ async function stats(){
       <span>专注进 / 出</span><span>${s.focus.entered} / ${s.focus.exited}</span>
       <span>回复·表情·错别字</span><span>${s.counters.reply} · ${s.counters.emoji} · ${s.counters.typo}</span>
     </div>
+    <h3>token（进程内累计，重启归零）</h3>
+    <div class="kv">
+      <span>调用次数</span><span>${s.usage.calls}</span>
+      <span>prompt / completion</span><span>${s.usage.prompt} / ${s.usage.completion}</span>
+      <span>缓存命中 / 写入</span><span>${s.usage.cached} / ${s.usage.cache_write}（命中率 ${s.usage.cache_hit_rate == null ? '—' : (s.usage.cache_hit_rate*100).toFixed(1)+'%'}）</span>
+    </div>
     <h3>状态分布（共 ${total} 条事件）</h3>
     ${rows.map(([k,v]) => `<div class="bar"><span>${esc(LABEL[k]||k)}</span>
       <i style="width:${Math.max(2, v/total*100)}%"></i><em>${v}</em></div>`).join('')
       || '<div class="detail">这段时间没有事件（看板是从启用后台开始计的）</div>'}`;
 }
 window.setHours = h => { window.statsHours = h; stats(); };
+
+async function assets(){
+  const [p, e, m] = await Promise.all([get('/api/prompts'), get('/api/emojis'), get('/api/moments')]);
+  const prompts = Object.entries(p).map(([name, text]) => `
+    <div style="margin-bottom:10px">
+      <div class="detail">${name}.txt <button onclick="savePrompt('${name}')">保存并热重载</button></div>
+      <textarea id="prompt-${name}">${esc(text)}</textarea>
+    </div>`).join('');
+  const emojis = e.emojis.map(x => `<div class="bar">
+      <span title="${esc(x.md5)}">${esc(x.desc || '(无标签)')}${x.sendable ? '' : ' ⛔'}</span>
+      <em style="flex:1">${esc(x.scene || '（没写场景）')}</em><em>${x.count}</em>
+      <button onclick="delEmoji('${x.md5}')">删</button></div>`).join('')
+    || '<div class="detail">空库</div>';
+  const moments = m.moments.map(x => `<div class="mem">
+      <div class="detail">${esc(x.chat)} · ${new Date(x.t_start*1000).toLocaleString('zh-CN')}
+        <button style="float:right" onclick="delMoment(${x.id})">删</button></div>
+      <div>${esc(x.summary)}</div></div>`).join('')
+    || '<div class="detail">还没有记忆（消息滑出窗口 100 条才压一批）</div>';
+  $('#panel-assets').innerHTML = `
+    <h3>提示词（保存即热重载）</h3>${prompts}
+    <h3>表情库（${e.emojis.length} 张；⛔ = 缺下载地址发不出去）</h3>${emojis}
+    <h3>记忆（${m.moments.length} 条）</h3>${moments}`;
+}
+
+window.savePrompt = async name => {
+  const r = await post('/api/prompts', {name, text: document.querySelector('#prompt-'+name).value});
+  alert(r.error ? ('保存失败：' + r.error)
+                : `已保存 ${r.saved}（${r.lines} 行）并热重载`);
+};
+window.delEmoji = async md5 => {
+  if(!confirm('删掉这张表情？场景描述是花钱识图来的，删了不再补。')) return;
+  await post('/api/emoji_delete', {md5}); assets();
+};
+window.delMoment = async id => {
+  if(!confirm('删掉这条记忆？')) return;
+  await post('/api/moment_delete', {id}); assets();
+};
+window.replay = async (msgId, stage) => {
+  const box = $('#replay-out');
+  box.textContent = '重放中（会真的调模型）…';
+  const r = await post('/api/replay/' + encodeURIComponent(msgId), {stage});
+  box.textContent = r.error ? ('失败：' + r.error)
+    : `决策：${r.plan || '（不发言）'}\n\n表达（${r.latency_ms} ms）：\n${(r.reply || []).join('\n')}`;
+};
 
 function cfgInput(item){
   const label = esc(item.name) + (item.hot ? '' : ' ⚠');
@@ -375,12 +430,22 @@ async function showPanel(){
         <span>延迟</span><span>${tr.latency_ms} ms</span>
         <span>回复</span><span>${esc((tr.reply||[]).join(' / ')) || '（不发言）'}</span></div>
         <h3>决策</h3><pre>${esc(tr.plan) || '（无）'}</pre>
-        <h3>当时看到的聊天记录</h3><pre>${esc(tr.transcript)}</pre>`;
+        <h3>当时看到的聊天记录</h3><pre>${esc(tr.transcript)}</pre>
+        <h3>重放</h3>
+        <div class="detail">用当前提示词重跑这一轮：不碰历史、不进队列、也不发送，但会真的花 token。
+          上下文只能用当时存下的聊天记录（画像/群用语/记忆没留痕），决策那一步走单轮 JSON 模式。
+          比表达风格可靠，比决策质量不可靠。</div>
+        <div style="margin:6px 0">
+          <button onclick="replay('${d.msg_id}', 'all')">重放两步</button>
+          <button onclick="replay('${d.msg_id}', 'expressor')">只重放表达</button>
+        </div>
+        <pre id="replay-out"></pre>`;
     }
     $('#panel-trace').innerHTML = html;
   } else if(tab==='health') await health();
   else if(tab==='log') await logs();
   else if(tab==='stats') await stats();
+  else if(tab==='assets') await assets();
   else if(tab==='config') await config();
 }
 

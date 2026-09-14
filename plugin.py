@@ -667,6 +667,44 @@ class ChatPlugin(Plugin):
     def _elapsed(started: float) -> int:
         return int((time.perf_counter() - started) * 1000)
 
+    async def _complete(self, prompt: str, message: str,
+                        ai: AiProvider | None = None) -> list[str] | None:
+        """ 单轮纯文本调用。重放用——没有 ctx，不走 _ask 的图片分支。 """
+        try:
+            return await asyncio.wait_for((ai or self.ai).chat(prompt.strip(), message), self.timeout)
+        except Exception as e:
+            logger.warning(f'调用模型失败（重放）: {e}')
+            return None
+
+    async def replay(self, transcript: str, plan: str = '', self_name: str = '',
+                     contact: str = '', stage: str = 'all') -> dict:
+        """ 用**当前**提示词重跑这一轮，只看输出：不碰历史、不进队列、不发送。
+
+        三个如实说明的限制：
+        1. 上下文只能用 trace 里存的那份聊天记录——画像 / 群用语 / 中期记忆当时注入了
+           什么没有留痕，所以重放的输入比真实那一轮少几块；
+        2. 决策那一步走**单轮 JSON 模式**（线上是工具模式），两者提示词不同，
+           拿它比决策质量不可靠；
+        3. 比表达风格（replyer）是可靠的，那也是调得最多的那个。
+        """
+        started = time.perf_counter()
+        new_plan = plan
+        if stage == 'all' and self.enable_planner:
+            prompt = await self.planner_template.render_async(
+                behavior_style=self.persona.behavior_style, self_name=self_name, contact=contact,
+                is_group=True, aliases=self.persona.aliases, tools=())
+            raw = await self._complete(prompt, transcript, ai=self.planner_ai)
+            decided = Plan.parse('\n'.join(raw)) if raw else None
+            new_plan = decided.render() if decided and decided.speak else ''
+
+        replyer = await self.replyer_template.render_async(
+            identity=self.persona.identity(self_name), reply_style=self.persona.reply_style,
+            self_name=self_name, contact=contact, is_group=True)
+        body = f'{new_plan}\n\n{transcript}' if new_plan else transcript
+        reply = await self._complete(replyer, body)
+        return {'stage': stage, 'plan': new_plan, 'reply': reply or [],
+                'latency_ms': self._elapsed(started)}
+
     def _trace(self, ctx: MessageContext, necessity: NecessityScore, transcript: str,
                response: list[str] | None, latency_ms: int, plan: str) -> None:
         """ 记录这一轮：为什么开口、看到了什么、说了什么。 """

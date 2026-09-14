@@ -97,6 +97,14 @@ class EmojiLibrary:
     def get(self, md5: str) -> Emoji | None:
         return self._entries.get(md5)
 
+    def remove(self, md5: str) -> bool:
+        """ 删一张。面板上看到场景描述写得离谱的可以直接抹掉（描述是花钱识图来的）。 """
+        return self._entries.pop(md5, None) is not None
+
+    def items(self) -> list[Emoji]:
+        """ 全部表情，热度高的在前（面板浏览用）。 """
+        return sorted(self._entries.values(), key=lambda item: item.count, reverse=True)
+
     @property
     def sendable_count(self) -> int:
         """ 现在真能发出去的有几张——剩下的只是在等 relay 收到一次。 """
@@ -388,6 +396,13 @@ def _self_check() -> None:
         assert reloaded.get(stolen.md5).scene == '累到瘫在椅子上时发'
         assert reloaded.get(stolen.md5).desc == '摊倒'
     assert EmojiLibrary.load('/no/such/file.json').get('x') is None
+
+    # 面板浏览（热度排序）与删除
+    assert {e.md5 for e in library.items()} == {'h' * 32, stolen.md5}
+    assert [e.md5 for e in library.items()][0] == 'h' * 32      # 热度 2 > 0，排前面
+    assert library.remove('没这个') is False
+    assert library.remove('h' * 32) is True
+    assert library.get('h' * 32) is None and len(library) == 1
 
     # 节制：刚发过不让发，同一张短期不重复
     policy = EmojiPolicy(cooldown=300, repeat=1800)
