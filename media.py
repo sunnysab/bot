@@ -2,10 +2,31 @@
 
 表情消息（msg_type=47）的 desc 属性是 base64 编码的 protobuf，结构为 { locale: 描述 }，
 locale 形如 zh_cn / zh_tw / default。实测能解出「摊倒」「啧啧」「哇」这类中文含义，无需调模型。
+拿不到 desc 的表情（以及所有图片）只能靠 vision 描述，见 describer.py。
 """
 
 import base64
 import re
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class Media:
+    """ 一条媒体消息的可缓存表示。 """
+
+    kind: str  # 'image' | 'emoji'
+    md5: str
+    description: str | None = None
+
+    @property
+    def placeholder(self) -> str:
+        """ 写进历史记录的占位文本。 """
+        label = '图片' if self.kind == 'image' else '表情'
+        return f'[{label}：{self.description}]' if self.description else f'[{label}]'
+
+    @property
+    def needs_description(self) -> bool:
+        return not self.description and bool(self.md5)
 
 
 def _strip_prefix(content: str) -> str:
@@ -65,11 +86,13 @@ def parse_emoji_description(content: str) -> str | None:
     return text or None
 
 
-def parse_image_md5(content: str) -> str | None:
-    """ 图片消息 XML 的 md5，可作去重 / 缓存键。 """
-    if '<img' not in content:
-        return None
-    return _attr(_strip_prefix(content), 'md5') or None
+def parse_media(content: str) -> Media | None:
+    """ 解析图片 / 表情消息的 XML 载荷。非媒体消息返回 None。 """
+    if '<emoji' in content:
+        return Media('emoji', _attr(_strip_prefix(content), 'md5'), parse_emoji_description(content))
+    if '<img' in content:
+        return Media('image', _attr(_strip_prefix(content), 'md5'))
+    return None
 
 
 if __name__ == '__main__':
@@ -82,6 +105,16 @@ if __name__ == '__main__':
     assert parse_emoji_description('<msg><emoji /></msg>') is None
     assert parse_emoji_description('not xml') is None
     assert parse_emoji_description('<msg><img md5="abc" /></msg>') is None
-    assert parse_image_md5('wxid_x:\n<msg><img md5="f9bfba97" /></msg>') == 'f9bfba97'
-    assert parse_image_md5('<msg><emoji md5="x" /></msg>') is None
+
+    # parse_media：图片、带/不带 desc 的表情、非媒体
+    image = parse_media('wxid_x:\n<msg><img md5="f9bfba97" /></msg>')
+    assert image == Media('image', 'f9bfba97') and image.placeholder == '[图片]', image
+    assert image.needs_description
+    emoji = parse_media('<msg><emoji md5="m" desc="ChEKB2RlZmF1bHQSBuaRiuWAkg==" /></msg>')
+    assert emoji == Media('emoji', 'm', '摊倒') and emoji.placeholder == '[表情：摊倒]', emoji
+    assert not emoji.needs_description
+    blank = parse_media('<msg><emoji md5="m" desc="" /></msg>')
+    assert blank.placeholder == '[表情]' and blank.needs_description, blank
+    assert parse_media('hello world') is None
+    assert parse_media('<msg><img /></msg>').needs_description is False  # 没有 md5 就无法缓存，不描述
     print('ok')

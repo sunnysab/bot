@@ -5,6 +5,7 @@ from loguru import logger
 from ai import Deepseek
 from bot import Bot, MediaProcessor
 from config import Config
+from describer import MediaCache, MediaDescriber
 from plugin import ChatPlugin, EndProcessing, RepeatPlugin
 
 
@@ -12,16 +13,22 @@ def main():
     config = Config.from_env()
     logger.add(sink=config.log_path, level=config.log_level)
 
-    bot = Bot(config.relay_host, config.relay_port, unix_path=config.relay_unix, x_delay=0.5,
-              send_interval=config.send_interval)
-
     if not config.deepseek_key:
         logger.warning('DEEPSEEK_KEY 未设置，ChatPlugin 将无法调用模型')
+
+    ai_provider = Deepseek(key=config.deepseek_key, model=config.deepseek_model, temperature=0.85)
+
+    describer = None
+    if config.describe_media:
+        describer = MediaDescriber(ai_provider, MediaCache(config.media_cache_path),
+                                   model=config.deepseek_model, concurrency=config.describe_concurrency)
+
+    bot = Bot(config.relay_host, config.relay_port, unix_path=config.relay_unix, x_delay=0.5,
+              send_interval=config.send_interval, describer=describer)
 
     # 初始化预处理器和插件
     bot.add_preprocessor(MediaProcessor())
 
-    ai_provider = Deepseek(key=config.deepseek_key, model=config.deepseek_model, temperature=0.85)
     repeater = RepeatPlugin()
     chat_plugin = ChatPlugin(ai_provider, context_length=30)
 

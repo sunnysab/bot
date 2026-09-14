@@ -26,6 +26,7 @@ py-modules = [
     "bot",
     "config",
     "context",
+    "describer",
     "main",
     "media",
     "message",

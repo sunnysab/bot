@@ -6,7 +6,8 @@ from typing import TypeVar
 from loguru import logger
 
 from context import ContextManager, MessageContext, MessageKind
-from media import parse_emoji_description
+from describer import MediaDescriber
+from media import Media, parse_media
 from outbound import Outbound, OutboundQueue
 from plugin import Plugin, PluginManager, Reply
 from wechat import Message, Wechat
@@ -29,15 +30,12 @@ class Preprocessor:
 
 
 class MediaProcessor(Preprocessor):
-    """ 把图片/表情消息的正文替换为文字标记，真实图片在回复时随请求直接发送给模型。 """
+    """ 把图片/表情消息的正文替换为文字标记；缺描述的媒体由 describer 在后台补上。 """
 
-    async def process(self, msg: Message, **ctx) -> Message:
-        kind = MessageKind.of(msg.msg_type)
-        if kind is MessageKind.IMAGE:
-            msg.content = msg.clean_text = '[图片]'
-        elif kind is MessageKind.EMOJI:
-            desc = parse_emoji_description(msg.content)
-            msg.content = msg.clean_text = f'[表情：{desc}]' if desc else '[表情]'
+    async def process(self, msg: Message, media: Media | None = None, **ctx) -> Message:
+        media = media or parse_media(msg.content)
+        if media:
+            msg.content = msg.clean_text = media.placeholder
         return msg
 
 
@@ -45,7 +43,8 @@ class Bot:
     """ 微信机器人助手 """
 
     def __init__(self, host: str, port: int, unix_path: str = '', dry_run: bool = False,
-                 x_delay: float = 0, send_interval: float = 1.0, preprocessors: list[Preprocessor] = None):
+                 x_delay: float = 0, send_interval: float = 1.0, preprocessors: list[Preprocessor] = None,
+                 describer: MediaDescriber | None = None):
         """ 初始化机器人
 
         @param host: weixin-rs relay 服务器地址
@@ -54,6 +53,7 @@ class Bot:
         @param dry_run: 是否为测试模式
         @param x_delay: 每条消息回复的延迟时间系数（将根据消息长度乘此系数，再叠加随机抖动）
         @param send_interval: 全局最小发送间隔（秒），用于规避风控
+        @param describer: 媒体描述器，后台把图片/表情含义写回历史；为 None 则不做识图
         """
         async def callback(msg: Message) -> None:
             await self.on_message(msg)
@@ -66,6 +66,8 @@ class Bot:
         self._plugins = PluginManager()
         # 消息预处理插件
         self._preprocessors: list[Preprocessor] = preprocessors or []
+        # 媒体识图（可选）
+        self._describer = describer
 
         assert x_delay >= 0
         self.delay_coefficient = x_delay
@@ -84,6 +86,8 @@ class Bot:
     async def stop(self):
         await self._wechat.stop()
         await self.outbox.stop()
+        if self._describer:
+            await self._describer.stop()
 
     def register_ready(self, func) -> None:
         """ 注册连接就绪后的回调（如加载历史上下文） """
@@ -128,10 +132,10 @@ class Bot:
         await self._wechat.send_text(item.text, item.receiver)
         self._history.push_message(item.receiver, item.sender, item.text, int(time.time()))
 
-    async def _preprocess(self, msg: Message) -> Message | None:
+    async def _preprocess(self, msg: Message, **ctx) -> Message | None:
         """ 依次跑预处理器。任一预处理器返回空则放弃这条消息。 """
         for preprocessor in self._preprocessors:
-            msg = await preprocessor.process(msg)
+            msg = await preprocessor.process(msg, **ctx)
             if not msg:
                 logger.warning(f'Preprocessor {preprocessor.name()} refuse to process, return.')
                 return None
@@ -156,16 +160,24 @@ class Bot:
         if msg.is_self:
             return
 
+        # 图片/表情的原始 XML 在预处理后会被替换成占位标记，先解析出来
+        kind = MessageKind.of(msg.msg_type)
+        media = parse_media(msg.content) if kind in (MessageKind.IMAGE, MessageKind.EMOJI) else None
+
         # 自己的名字；消息来源：群消息取群名称，否则取联系人备注
         self_name: str = await self._wechat.get_display_name(self.wxid, msg.reply_target)
         source = self._wechat.all_contacts.get(msg.reply_target, msg.reply_target)
         logger.debug(msg)
 
-        msg = await self._preprocess(msg)
+        msg = await self._preprocess(msg, media=media)
         if msg is None:
             return
 
-        self._history.push_message(msg.reply_target, msg.sender_name, msg.content, msg.create_time)
+        record = self._history.push_message(msg.reply_target, msg.sender_name, msg.content, msg.create_time)
+        # 媒体描述缺失时后台识图，稍后原地回写这条记录，不阻塞本轮回复
+        if media and self._describer:
+            self._describer.schedule(media, msg, record)
+
         response_back = await self._run_plugins(msg, self_name, source)
         if not response_back:
             logger.debug('no response to send.')

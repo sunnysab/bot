@@ -1,4 +1,8 @@
+import base64
+
 from loguru import logger
+
+DESCRIBE_PROMPT = '用不超过 15 个字描述这张图片或表情包的内容和情绪，不要标点符号'
 
 
 class AiProvider:
@@ -12,6 +16,10 @@ class AiProvider:
     async def chat(self, prompt: str, message: str | list) -> list[str] | None:
         """ 聊天。message 为字符串，或 OpenAI content block 数组（含图片）。 """
         raise NotImplementedError
+
+    async def describe(self, image: bytes) -> str | None:
+        """ 描述图片/表情的含义，供历史记录使用。默认不支持，返回 None。 """
+        return None
 
 
 class OpenAI(AiProvider):
@@ -51,6 +59,20 @@ class OpenAI(AiProvider):
         # Deepseek-R1 的思维链过程在 ChatCompletion 的 extra 字段中
         # 无需单独处理，直接返回即可
         return [x.strip() for x in response_text.split('\n') if x.strip()]
+
+    async def describe(self, image: bytes) -> str | None:
+        """ 识图描述：把图片/表情压成一句短语，写入历史记录。 """
+        encoded = base64.b64encode(image).decode()
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            temperature=0.3,
+            messages=[{'role': 'user', 'content': [
+                {'type': 'text', 'text': DESCRIBE_PROMPT},
+                {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{encoded}'}},
+            ]}],
+        )
+        text = (response.choices[0].message.content or '').strip()
+        return text or None
 
 
 class Deepseek(OpenAI):
@@ -103,8 +125,6 @@ class Ollama(AiProvider):
 
 
 async def main():
-    import base64
-
     ds = Deepseek(key='your-key')
     image = base64.b64encode(open('image/dog.jpg', 'rb').read()).decode()
     response = await ds.chat('描述这张图片', [

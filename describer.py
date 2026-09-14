@@ -1,0 +1,103 @@
+""" 媒体（图片 / 表情）语义描述：按 md5 去重 + sqlite 持久化缓存。
+
+图片和缺 desc 的表情没有可读语义，只能靠 vision 描述。为避免重复付费，
+结果按 md5 缓存到 sqlite，同一张媒体（尤其是被反复使用的表情包）只描述一次，跨重启生效。
+"""
+
+import asyncio
+import sqlite3
+import time
+
+from loguru import logger
+
+from ai import AiProvider
+from context import SingleRecord
+from media import Media
+
+
+class MediaCache:
+    """ md5 -> 描述 的持久化缓存。 """
+
+    def __init__(self, path: str):
+        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn.execute(
+            'CREATE TABLE IF NOT EXISTS media ('
+            'md5 TEXT PRIMARY KEY, kind TEXT, description TEXT, model TEXT, updated_at INTEGER)')
+        self._conn.commit()
+
+    def get(self, md5: str) -> str | None:
+        row = self._conn.execute('SELECT description FROM media WHERE md5 = ?', (md5,)).fetchone()
+        return row[0] if row else None
+
+    def put(self, md5: str, kind: str, description: str, model: str) -> None:
+        self._conn.execute('INSERT OR REPLACE INTO media VALUES (?, ?, ?, ?, ?)',
+                           (md5, kind, description, model, int(time.time())))
+        self._conn.commit()
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+class MediaDescriber:
+    """ 后台把媒体描述回写到历史记录，不阻塞消息处理。 """
+
+    def __init__(self, ai: AiProvider, cache: MediaCache, model: str, concurrency: int = 2):
+        self._ai = ai
+        self._cache = cache
+        self._model = model
+        self._sem = asyncio.Semaphore(concurrency)
+        self._inflight: dict[str, asyncio.Task] = {}
+        self._tasks: set[asyncio.Task] = set()
+
+    def schedule(self, media: Media, msg, record: SingleRecord) -> None:
+        """ 只处理需要 vision 的媒体（无 desc 且 md5 可作缓存键）。 """
+        if not media.needs_description:
+            return
+        task = asyncio.create_task(self._apply(media, msg, record))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def join(self) -> None:
+        """ 等待所有在途描述完成（测试用）。 """
+        while self._tasks:
+            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+
+    async def stop(self) -> None:
+        for task in list(self._tasks):
+            task.cancel()
+        if self._tasks:
+            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+        self._cache.close()
+
+    async def _apply(self, media: Media, msg, record: SingleRecord) -> None:
+        try:
+            description = self._cache.get(media.md5) or await self._describe_once(media, msg)
+        except Exception as e:
+            logger.warning(f'描述媒体失败 md5={media.md5}: {e}')
+            return
+        if description:
+            label = '图片' if media.kind == 'image' else '表情'
+            record.text = f'[{label}：{description}]'
+
+    async def _describe_once(self, media: Media, msg) -> str | None:
+        """ 同一 md5 的并发请求合流，只下载 / 描述一次。 """
+        running = self._inflight.get(media.md5)
+        if running is not None:
+            return await running
+
+        async def fetch() -> str | None:
+            async with self._sem:
+                image = await msg.get_media_bytes()
+                if not image:
+                    return None
+                description = await self._ai.describe(image)
+                if description:
+                    self._cache.put(media.md5, media.kind, description, self._model)
+                return description
+
+        task = asyncio.create_task(fetch())
+        self._inflight[media.md5] = task
+        try:
+            return await task
+        finally:
+            self._inflight.pop(media.md5, None)

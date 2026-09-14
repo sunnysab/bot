@@ -15,6 +15,10 @@ class Config:
     ollama_host: str = 'http://localhost:11434'
     # 全局最小发送间隔（秒），规避微信风控
     send_interval: float = 1.0
+    # 媒体（图片 / 缺 desc 的表情）识图描述
+    describe_media: bool = True
+    media_cache_path: str = 'media_cache.db'
+    describe_concurrency: int = 2
     log_path: str = 'bot.log'
     log_level: str = 'DEBUG'
 
@@ -28,6 +32,9 @@ class Config:
             deepseek_model=os.getenv('DEEPSEEK_MODEL', cls.deepseek_model),
             ollama_host=os.getenv('OLLAMA_HOST', cls.ollama_host),
             send_interval=float(os.getenv('SEND_INTERVAL', str(cls.send_interval))),
+            describe_media=os.getenv('DESCRIBE_MEDIA', '1').lower() not in ('0', 'false', 'no'),
+            media_cache_path=os.getenv('MEDIA_CACHE_PATH', cls.media_cache_path),
+            describe_concurrency=int(os.getenv('DESCRIBE_CONCURRENCY', str(cls.describe_concurrency))),
             log_path=os.getenv('LOG_PATH', cls.log_path),
             log_level=os.getenv('LOG_LEVEL', cls.log_level),
         )

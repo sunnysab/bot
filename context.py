@@ -70,7 +70,7 @@ class ChatWindow:
         history: list[SingleRecord] = history or []
         self._history = history[:max_history]
 
-    def append(self, sender: str, text: str, t: int = 0):
+    def append(self, sender: str, text: str, t: int = 0) -> SingleRecord:
         """ 添加消息
 
         :param sender: 发送者的昵称
@@ -79,7 +79,9 @@ class ChatWindow:
         """
         if len(self._history) >= self.max_history:
             self._history.pop(0)
-        self._history.append(SingleRecord(sender, text, t))
+        record = SingleRecord(sender, text, t)
+        self._history.append(record)
+        return record
 
     def sort(self):
         """ 按照时间戳排序 """
@@ -128,15 +130,16 @@ class ContextManager:
             self._contexts[key] = ChatWindow()
         return self._contexts[key]
 
-    def push_message(self, contact: str, sender: str, text: str, t: int):
+    def push_message(self, contact: str, sender: str, text: str, t: int) -> SingleRecord:
         """ 存储消息
 
         :param contact: 联系人或群聊的 wxid
         :param sender: 发送者的群昵称或联系人昵称
         :param text: 消息内容（纯文本或针对特殊消息的描述）
         :param t: 时间戳（精确到秒，来源于微信消息中的 CreateTime 参数以及 WxMsg 的 ts 字段）
+        :return: 新插入的记录对象，可后续原地更新（如媒体描述就绪后回写）
         """
-        self.get_context(contact).append(sender, text, t)
+        return self.get_context(contact).append(sender, text, t)
 
 
 @dataclass(slots=True)

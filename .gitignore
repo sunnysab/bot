@@ -5,6 +5,7 @@ venv/
 *.dll
 *.exe
 *.log
+media_cache.db
 
 __pycache__/
 *.egg-info/
