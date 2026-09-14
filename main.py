@@ -32,8 +32,8 @@ def main():
     bot.add_preprocessor(PayloadProcessor())
 
     repeater = RepeatPlugin()
-    policy = ReplyPolicy(activity_window=config.reply_activity_window, factor=config.reply_activity_factor,
-                         wait_min=config.reply_wait_min, wait_max=config.reply_wait_max)
+    policy = ReplyPolicy(threshold=config.reply_necessity_threshold,
+                         activity_window=config.reply_activity_window)
     chat_plugin = ChatPlugin(ai_provider, context_length=30, policy=policy)
 
     bot.set_default_plugin([repeater, chat_plugin])

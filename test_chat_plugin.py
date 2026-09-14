@@ -1,4 +1,4 @@
-""" 插件自检：回复策略、群聊主动参与、私聊直通、图片直传，以及复读机不跟媒体占位标记。 """
+""" 插件自检：回复策略、群聊必要性门控、私聊直通、图片直传，以及复读机不跟媒体占位标记。 """
 
 import base64
 import time
@@ -6,6 +6,7 @@ import types
 import unittest
 
 from context import ChatWindow, MessageContext
+from necessity import NECESSITY_THRESHOLD
 from plugin import ChatPlugin, RepeatPlugin, ReplyPolicy
 
 
@@ -54,32 +55,29 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         self.ai = FakeAi()
         self.plugin = ChatPlugin(self.ai, context_length=10)
 
-    def throttle(self):
-        self.plugin.policy.note_reply('测试群', time.time())
-
-    async def test_group_message_participates_proactively(self):
-        reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=True)))
-        self.assertEqual(reply.texts, ['收到'])
-        self.assertEqual(len(self.ai.calls), 1)
-
-    async def test_group_proactive_is_throttled_after_speaking(self):
-        self.throttle()
-        reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=True)))
+    async def test_group_plain_message_is_silent(self):
+        reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=True, content='大家好啊')))
         self.assertIsNone(reply)
         self.assertEqual(self.ai.calls, [])
 
-    async def test_group_at_bypasses_throttle(self):
-        self.throttle()
+    async def test_active_group_question_participates(self):
+        history = history_with(12, now=time.time())
+        ctx = make_ctx(make_msg(is_chatroom=True, content='这个怎么弄啊'), history=history)
+        reply = await self.plugin.handle(ctx)
+        self.assertEqual(reply.texts, ['收到'])
+        self.assertIn('主动插话', self.ai.calls[0][0])
+
+    async def test_group_at_replies(self):
         reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=True, is_at_me=True)))
         self.assertEqual(reply.texts, ['收到'])
+        self.assertIn('@ 了你', self.ai.calls[0][0])
 
-    async def test_group_name_mention_bypasses_throttle(self):
-        self.throttle()
+    async def test_group_name_mention_replies(self):
         reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=True, content='Bot 在吗')))
         self.assertEqual(reply.texts, ['收到'])
+        self.assertIn('叫到了你的名字', self.ai.calls[0][0])
 
-    async def test_private_bypasses_throttle(self):
-        self.throttle()
+    async def test_private_replies(self):
         reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
         self.assertEqual(reply.texts, ['收到'])
 
@@ -103,43 +101,36 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
 
 class TestReplyPolicy(unittest.TestCase):
     def setUp(self):
-        self.policy = ReplyPolicy(activity_window=180.0, factor=2.0, wait_min=30.0, wait_max=180.0)
+        self.policy = ReplyPolicy(threshold=NECESSITY_THRESHOLD, activity_window=180.0)
 
     def ctx(self, is_chatroom=True, is_at_me=False, content='', history=None):
         history = history if history is not None else ChatWindow()
         return make_ctx(make_msg(is_chatroom=is_chatroom, is_at_me=is_at_me, content=content), history=history)
 
-    def test_private_always(self):
-        self.assertTrue(self.policy.should_reply(self.ctx(is_chatroom=False), now=1000.0))
+    def test_private_triggers(self):
+        self.assertIsNotNone(self.policy.evaluate(self.ctx(is_chatroom=False), now=1000.0))
 
-    def test_at_and_mention_bypass_throttle(self):
-        self.policy.note_reply('测试群', 1000.0)
-        self.assertTrue(self.policy.should_reply(self.ctx(is_at_me=True), now=1000.0))
-        self.assertTrue(self.policy.should_reply(self.ctx(content='Bot 在吗'), now=1000.0))
+    def test_at_and_mention_trigger(self):
+        self.assertEqual(self.policy.evaluate(self.ctx(is_at_me=True), now=1000.0).kind, 'at')
+        self.assertEqual(self.policy.evaluate(self.ctx(content='Bot 在吗'), now=1000.0).kind, 'mention')
 
-    def test_first_group_message_passes(self):
-        self.assertTrue(self.policy.should_reply(self.ctx(content='大家好啊'), now=1000.0))
+    def test_quiet_group_is_silent(self):
+        self.assertIsNone(self.policy.evaluate(self.ctx(content='大家好啊'), now=1000.0))
 
-    def test_quiet_group_waits_max(self):
-        self.policy.note_reply('测试群', 1000.0)
-        self.assertFalse(self.policy.should_reply(self.ctx(content='大家好啊'), now=1179.0))
-        self.assertTrue(self.policy.should_reply(self.ctx(content='大家好啊'), now=1180.0))
-
-    def test_active_group_waits_less(self):
-        # 12 条别人消息 → 2 * 180 / 12 = 30s
+    def test_active_group_question_triggers(self):
         history = history_with(12, now=1000.0)
-        self.policy.note_reply('测试群', 1000.0)
-        self.assertFalse(self.policy.should_reply(self.ctx(content='大家好啊', history=history), now=1029.0))
-        self.assertTrue(self.policy.should_reply(self.ctx(content='大家好啊', history=history), now=1030.0))
+        result = self.policy.evaluate(self.ctx(content='这个怎么弄啊', history=history), now=1000.0)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.kind, 'proactive')
 
-    def test_own_messages_do_not_count_as_activity(self):
+    def test_self_chatter_suppresses_trigger(self):
         history = ChatWindow()
-        for i in range(5):
-            history.append('Bot', f'我发的{i}', int(1000 - i), is_self=True)
-        history.append('张三', '别人说的', 1000)
-        self.policy.note_reply('测试群', 1000.0)
-        # 若把自己的消息也算进去 (6 条) 等待会是 60s；实际上只有 1 条别人消息，等待封顶 180s
-        self.assertFalse(self.policy.should_reply(self.ctx(content='大家好啊', history=history), now=1060.0))
+        for i in range(6):
+            history.append('Bot', f'我说的{i}', int(1000 - i), is_self=True)
+        for i in range(4):
+            history.append(f'用户{i}', '别人说的', int(1000 - i))
+        # 活跃度只数别人的消息；存在感 6/10 扣满，把分数压回阈值下
+        self.assertIsNone(self.policy.evaluate(self.ctx(content='这个怎么弄啊', history=history), now=1000.0))
 
 
 class TestRepeatPlugin(unittest.IsolatedAsyncioTestCase):

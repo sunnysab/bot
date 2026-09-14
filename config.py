@@ -22,11 +22,9 @@ class Config:
     describe_timeout: float = 30.0
     describe_max_tokens: int = 64
     describe_history_limit: int = 3
-    # 群聊主动参与：按群活跃度节流（等待 = clamp(factor × 窗口 / 别人消息数, min, max)）
+    # 群聊参与：必要性打分阈值（越高越沉默）与活跃度统计窗口
+    reply_necessity_threshold: int = 60
     reply_activity_window: float = 180.0
-    reply_activity_factor: float = 2.0
-    reply_wait_min: float = 30.0
-    reply_wait_max: float = 180.0
     log_path: str = 'bot.log'
     log_level: str = 'DEBUG'
 
@@ -46,10 +44,8 @@ class Config:
             describe_timeout=float(os.getenv('DESCRIBE_TIMEOUT', str(cls.describe_timeout))),
             describe_max_tokens=int(os.getenv('DESCRIBE_MAX_TOKENS', str(cls.describe_max_tokens))),
             describe_history_limit=int(os.getenv('DESCRIBE_HISTORY_LIMIT', str(cls.describe_history_limit))),
+            reply_necessity_threshold=int(os.getenv('REPLY_NECESSITY_THRESHOLD', str(cls.reply_necessity_threshold))),
             reply_activity_window=float(os.getenv('REPLY_ACTIVITY_WINDOW', str(cls.reply_activity_window))),
-            reply_activity_factor=float(os.getenv('REPLY_ACTIVITY_FACTOR', str(cls.reply_activity_factor))),
-            reply_wait_min=float(os.getenv('REPLY_WAIT_MIN', str(cls.reply_wait_min))),
-            reply_wait_max=float(os.getenv('REPLY_WAIT_MAX', str(cls.reply_wait_max))),
             log_path=os.getenv('LOG_PATH', cls.log_path),
             log_level=os.getenv('LOG_LEVEL', cls.log_level),
         )

@@ -9,6 +9,13 @@ from loguru import logger
 
 from ai import AiProvider
 from context import ChatWindow, MessageContext, SingleRecord
+from necessity import (
+    NECESSITY_THRESHOLD,
+    PRESENCE_WINDOW_SECONDS,
+    NecessityInput,
+    NecessityScore,
+    score_necessity,
+)
 
 
 @dataclass(slots=True)
@@ -120,54 +127,52 @@ class RepeatPlugin(Plugin):
 
 
 class ReplyPolicy:
-    """ 是否把一条消息交给模型判断。
+    """ 群聊里「这条消息要不要交给模型」。
 
-    结构性决策用便宜规则，内容决策仍由模型（说不出话时回「本轮不发言」）：
-    - 私聊 / 被 @ / 被叫到名字：直接交给模型
-    - 群聊其他消息：主动参与，按群活跃度节流。群越活跃参与越频繁：
-      等待时间 = clamp(倍数 × 活动窗口 / 别人的消息数, 下限, 上限)
-    - 模型真的发言后刷新时间戳，防止刚说完又插话
+    便宜的结构性判断，不花 token：私聊 / 被 @ / 被叫到名字直接放行；
+    其余群聊消息走必要性打分，过线才交给模型（见 necessity.py）。
+    模型仍可用「本轮不发言」做内容层的最终否决。
     """
 
-    def __init__(self, activity_window: float = 180.0, factor: float = 2.0,
-                 wait_min: float = 30.0, wait_max: float = 180.0):
-        """ :param activity_window: 统计活跃度的时间窗口（秒）
-        :param factor: 等待时长 = factor × 活动窗口内别人消息的平均间隔
-        :param wait_min: 热聊时的最小等待（秒）
-        :param wait_max: 冷清时的最大等待（秒）
+    def __init__(self, threshold: int = NECESSITY_THRESHOLD, activity_window: float = 180.0):
+        """ :param threshold: 必要性分数阈值，越高越沉默
+        :param activity_window: 统计群活跃度的时间窗口（秒）
         """
-        assert 0 < wait_min <= wait_max
+        self.threshold = threshold
         self.activity_window = activity_window
-        self.factor = factor
-        self.wait_min = wait_min
-        self.wait_max = wait_max
-        self._last_proactive: dict[str, float] = {}
 
-    def should_reply(self, ctx: MessageContext, now: float) -> bool:
-        """ now 用 epoch 秒，与 history 里的时间戳同源。 """
+    def evaluate(self, ctx: MessageContext, now: float) -> NecessityScore | None:
+        """ 返回 None 表示不交给模型；否则返回打分（可注入 prompt 说明触发原因）。
+
+        now 用 epoch 秒，与 history 里的时间戳同源。
+        """
         msg = ctx.msg
-        if not msg.is_chatroom:
-            return True
-        if msg.is_at_me or self._mentions_me(ctx):
-            return True
-        if now - self._last_proactive.get(ctx.contact, float('-inf')) < self._wait(ctx, now):
-            return False
-        # 记录一次主动考虑（不论模型最后说不说），节流后续调用
-        self._last_proactive[ctx.contact] = now
-        return True
+        result = score_necessity(NecessityInput(
+            text=msg.content,
+            is_group=msg.is_chatroom,
+            has_at=msg.is_at_me,
+            has_mention=self._mentions_me(ctx),
+            activity=self._activity(ctx, now),
+            self_replies=self._self_replies(ctx, now),
+            recent_messages=self._recent_messages(ctx, now),
+        ))
+        return result if result.score >= self.threshold else None
 
-    def note_reply(self, contact: str, now: float) -> None:
-        """ 模型真的发言了，把节流窗口推后。 """
-        self._last_proactive[contact] = now
+    def _activity(self, ctx: MessageContext, now: float) -> int:
+        """ 活动窗口内别人的消息数。 """
+        return sum(1 for r in ctx.history if not r.is_self and now - r.t <= self.activity_window)
 
-    def _wait(self, ctx: MessageContext, now: float) -> float:
-        """ 别人发言越密，等得越短；没人说话则封顶到 wait_max。 """
-        others = sum(1 for r in ctx.history if not r.is_self and now - r.t <= self.activity_window)
-        if others <= 0:
-            return self.wait_max
-        return min(self.wait_max, max(self.wait_min, self.factor * self.activity_window / others))
+    def _recent(self, ctx: MessageContext, now: float) -> list[SingleRecord]:
+        return [r for r in ctx.history if now - r.t <= PRESENCE_WINDOW_SECONDS]
 
-    def _mentions_me(self, ctx: MessageContext) -> bool:
+    def _self_replies(self, ctx: MessageContext, now: float) -> int:
+        return sum(1 for r in self._recent(ctx, now) if r.is_self)
+
+    def _recent_messages(self, ctx: MessageContext, now: float) -> int:
+        return len(self._recent(ctx, now))
+
+    @staticmethod
+    def _mentions_me(ctx: MessageContext) -> bool:
         return bool(ctx.self_name) and ctx.self_name in ctx.msg.content
 
 
@@ -193,18 +198,19 @@ class ChatPlugin(Plugin):
         if not (ctx.is_text or ctx.is_image):  # 只处理文本和图片消息
             return None
 
-        if not self.policy.should_reply(ctx, time.time()):
+        necessity = self.policy.evaluate(ctx, time.time())
+        if necessity is None:
             return None
 
         history: ChatWindow = ctx.history.latest_n(self.context_length)
         prompt = await self.prompt_template.render_async(self_name=ctx.self_name, contact=ctx.contact,
-                                                         is_group=msg.is_chatroom)
+                                                         is_group=msg.is_chatroom, trigger=necessity.kind,
+                                                         trigger_detail=necessity.detail)
 
         text = '回复你扮演的角色所要说的话。以下聊天记录供你参考：\n\n' + str(history)
         response = await self.ai.chat(prompt.strip(), await self._build_message(ctx, text))
         if not response:
             return Reply(stop=True)
-        self.policy.note_reply(ctx.contact, time.time())  # 真的发言了才推后节流窗口
 
         # 有时候模型返回数据中会带有 "昵称: " 的前缀，这里需要去掉
         prefix = ctx.self_name + ':'
