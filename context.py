@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from weixin_bot import Message
+
+    from media import Media
 
 
 class MessageKind(IntEnum):
@@ -31,16 +34,21 @@ class MessageKind(IntEnum):
 class SingleRecord:
     """ 单条记录 """
 
-    def __init__(self, sender: str, text: str, t: int):
+    def __init__(self, sender: str, text: str, t: int, media: Media | None = None,
+                 download: Callable[[], Awaitable[bytes]] | None = None):
         """ 维护单个会话中的记录.
 
         :param sender: 发送者的群昵称或者联系人昵称
         :param text: 消息内容（纯文本或针对特殊消息的描述）
         :param t: 时间戳（精确到秒，来源于微信消息中的 CreateTime 参数以及 WxMsg 的 ts 字段）
+        :param media: 媒体描述（图片/表情），可为 None
+        :param download: 媒体下载入口，供 describer 后台识图；描述就绪后原地回写 text
         """
         self.sender = sender
         self.text = text
         self.t = t
+        self.media = media
+        self.download = download
 
     def __str__(self):
         text = self.text.replace('\n', ' ')
@@ -70,16 +78,19 @@ class ChatWindow:
         history: list[SingleRecord] = history or []
         self._history = history[:max_history]
 
-    def append(self, sender: str, text: str, t: int = 0) -> SingleRecord:
+    def append(self, sender: str, text: str, t: int = 0, media: Media | None = None,
+               download: Callable[[], Awaitable[bytes]] | None = None) -> SingleRecord:
         """ 添加消息
 
         :param sender: 发送者的昵称
         :param text: 消息内容
         :param t: 时间戳
+        :param media: 图片/表情描述
+        :param download: 媒体下载入口
         """
         if len(self._history) >= self.max_history:
             self._history.pop(0)
-        record = SingleRecord(sender, text, t)
+        record = SingleRecord(sender, text, t, media, download)
         self._history.append(record)
         return record
 
@@ -130,16 +141,19 @@ class ContextManager:
             self._contexts[key] = ChatWindow()
         return self._contexts[key]
 
-    def push_message(self, contact: str, sender: str, text: str, t: int) -> SingleRecord:
+    def push_message(self, contact: str, sender: str, text: str, t: int, media: Media | None = None,
+                     download: Callable[[], Awaitable[bytes]] | None = None) -> SingleRecord:
         """ 存储消息
 
         :param contact: 联系人或群聊的 wxid
         :param sender: 发送者的群昵称或联系人昵称
         :param text: 消息内容（纯文本或针对特殊消息的描述）
         :param t: 时间戳（精确到秒，来源于微信消息中的 CreateTime 参数以及 WxMsg 的 ts 字段）
+        :param media: 图片/表情描述
+        :param download: 媒体下载入口
         :return: 新插入的记录对象，可后续原地更新（如媒体描述就绪后回写）
         """
-        return self.get_context(contact).append(sender, text, t)
+        return self.get_context(contact).append(sender, text, t, media, download)
 
 
 @dataclass(slots=True)

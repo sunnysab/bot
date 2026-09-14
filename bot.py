@@ -5,7 +5,7 @@ from typing import TypeVar
 
 from loguru import logger
 
-from context import ContextManager, MessageContext, MessageKind
+from context import ChatWindow, ContextManager, MessageContext, MessageKind
 from describer import MediaDescriber
 from media import Media, parse_media
 from outbound import Outbound, OutboundQueue
@@ -44,7 +44,7 @@ class Bot:
 
     def __init__(self, host: str, port: int, unix_path: str = '', dry_run: bool = False,
                  x_delay: float = 0, send_interval: float = 1.0, preprocessors: list[Preprocessor] = None,
-                 describer: MediaDescriber | None = None):
+                 describer: MediaDescriber | None = None, describe_history_limit: int = 3):
         """ 初始化机器人
 
         @param host: weixin-rs relay 服务器地址
@@ -54,6 +54,7 @@ class Bot:
         @param x_delay: 每条消息回复的延迟时间系数（将根据消息长度乘此系数，再叠加随机抖动）
         @param send_interval: 全局最小发送间隔（秒），用于规避风控
         @param describer: 媒体描述器，后台把图片/表情含义写回历史；为 None 则不做识图
+        @param describe_history_limit: 启动加载历史时，每个会话最多补描述多少条媒体
         """
         async def callback(msg: Message) -> None:
             await self.on_message(msg)
@@ -68,6 +69,7 @@ class Bot:
         self._preprocessors: list[Preprocessor] = preprocessors or []
         # 媒体识图（可选）
         self._describer = describer
+        self.describe_history_limit = describe_history_limit
 
         assert x_delay >= 0
         self.delay_coefficient = x_delay
@@ -116,8 +118,21 @@ class Bot:
             window = await self._wechat.fetch_history(contact, window_size)
             count_loaded += len(window)
             self._history.get_context(contact).extend(window)
+            self._schedule_history_media(window)
 
         logger.info(f'{len(sessions)} sessions, {count_loaded} messages loaded.')
+
+    def _schedule_history_media(self, window: ChatWindow) -> None:
+        """ 启动加载的历史媒体按会话限量补描述，避免一次烧太多识图调用。 """
+        if not self._describer:
+            return
+        scheduled = 0
+        for record in reversed(list(window)):
+            if scheduled >= self.describe_history_limit:
+                break
+            if record.media and record.media.needs_description and record.download:
+                self._describer.schedule(record)
+                scheduled += 1
 
     def _typing_delay(self, text: str) -> float:
         """ 拟人打字延迟 = 随机思考时间 + 与字数成比例的时间（再乘随机抖动），单条最多 50 秒。 """
@@ -163,6 +178,7 @@ class Bot:
         # 图片/表情的原始 XML 在预处理后会被替换成占位标记，先解析出来
         kind = MessageKind.of(msg.msg_type)
         media = parse_media(msg.content) if kind in (MessageKind.IMAGE, MessageKind.EMOJI) else None
+        download = msg.get_media_bytes if (media and media.needs_description) else None
 
         # 自己的名字；消息来源：群消息取群名称，否则取联系人备注
         self_name: str = await self._wechat.get_display_name(self.wxid, msg.reply_target)
@@ -173,10 +189,11 @@ class Bot:
         if msg is None:
             return
 
-        record = self._history.push_message(msg.reply_target, msg.sender_name, msg.content, msg.create_time)
+        record = self._history.push_message(msg.reply_target, msg.sender_name, msg.content, msg.create_time,
+                                            media=media, download=download)
         # 媒体描述缺失时后台识图，稍后原地回写这条记录，不阻塞本轮回复
-        if media and self._describer:
-            self._describer.schedule(media, msg, record)
+        if self._describer:
+            self._describer.schedule(record)
 
         response_back = await self._run_plugins(msg, self_name, source)
         if not response_back:

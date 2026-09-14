@@ -5,6 +5,8 @@ import types
 import unittest
 
 from bot import Bot, MediaProcessor
+from context import ChatWindow
+from media import Media
 from plugin import EndProcessing, Plugin, Reply
 
 
@@ -89,6 +91,34 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
 
         self.assertEqual(self.bot._wechat.sent, [])
+
+
+class FakeDescriber:
+    def __init__(self):
+        self.scheduled = []
+
+    def schedule(self, record):
+        self.scheduled.append(record)
+
+
+class TestHistoryMediaScheduling(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.bot = Bot('127.0.0.1', 9999, describe_history_limit=2)
+        self.bot._describer = FakeDescriber()
+
+    def test_only_newest_media_up_to_limit(self):
+        window = ChatWindow()
+        for i in range(5):
+            window.append('Alice', '[图片]', i, media=Media('image', f'md5-{i}'), download=lambda: None)
+        self.bot._schedule_history_media(window)
+
+        self.assertEqual([r.t for r in self.bot._describer.scheduled], [4, 3])
+
+    def test_no_describer_is_noop(self):
+        self.bot._describer = None
+        window = ChatWindow()
+        window.append('Alice', '[图片]', 1, media=Media('image', 'md5-x'), download=lambda: None)
+        self.bot._schedule_history_media(window)  # 不报错即可
 
 
 class TestMediaProcessor(unittest.IsolatedAsyncioTestCase):

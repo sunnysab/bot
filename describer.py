@@ -41,19 +41,27 @@ class MediaCache:
 class MediaDescriber:
     """ 后台把媒体描述回写到历史记录，不阻塞消息处理。 """
 
-    def __init__(self, ai: AiProvider, cache: MediaCache, model: str, concurrency: int = 2):
+    def __init__(self, ai: AiProvider, cache: MediaCache, model: str, concurrency: int = 2,
+                 timeout: float = 30.0, max_tokens: int = 64):
+        """ :param concurrency: 同时进行的识图上限，防止刷图打爆接口
+        :param timeout: 单张媒体的下载+识图超时（秒），超时保留占位符
+        :param max_tokens: 描述的最大 token 数，限制慢模型的输出长度
+        """
         self._ai = ai
         self._cache = cache
         self._model = model
+        self._timeout = timeout
+        self._max_tokens = max_tokens
         self._sem = asyncio.Semaphore(concurrency)
         self._inflight: dict[str, asyncio.Task] = {}
         self._tasks: set[asyncio.Task] = set()
 
-    def schedule(self, media: Media, msg, record: SingleRecord) -> None:
-        """ 只处理需要 vision 的媒体（无 desc 且 md5 可作缓存键）。 """
-        if not media.needs_description:
+    def schedule(self, record: SingleRecord) -> None:
+        """ 只处理需要 vision 的媒体（无 desc 且有下载入口）。 """
+        media = record.media
+        if media is None or not media.needs_description or record.download is None:
             return
-        task = asyncio.create_task(self._apply(media, msg, record))
+        task = asyncio.create_task(self._apply(media, record))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
@@ -69,9 +77,9 @@ class MediaDescriber:
             await asyncio.gather(*list(self._tasks), return_exceptions=True)
         self._cache.close()
 
-    async def _apply(self, media: Media, msg, record: SingleRecord) -> None:
+    async def _apply(self, media: Media, record: SingleRecord) -> None:
         try:
-            description = self._cache.get(media.md5) or await self._describe_once(media, msg)
+            description = self._cache.get(media.md5) or await self._describe_once(media, record.download)
         except Exception as e:
             logger.warning(f'描述媒体失败 md5={media.md5}: {e}')
             return
@@ -79,7 +87,7 @@ class MediaDescriber:
             label = '图片' if media.kind == 'image' else '表情'
             record.text = f'[{label}：{description}]'
 
-    async def _describe_once(self, media: Media, msg) -> str | None:
+    async def _describe_once(self, media: Media, download) -> str | None:
         """ 同一 md5 的并发请求合流，只下载 / 描述一次。 """
         running = self._inflight.get(media.md5)
         if running is not None:
@@ -87,13 +95,11 @@ class MediaDescriber:
 
         async def fetch() -> str | None:
             async with self._sem:
-                image = await msg.get_media_bytes()
-                if not image:
+                try:
+                    return await asyncio.wait_for(self._download_and_describe(media, download), self._timeout)
+                except TimeoutError:
+                    logger.warning(f'描述媒体超时 md5={media.md5}')
                     return None
-                description = await self._ai.describe(image)
-                if description:
-                    self._cache.put(media.md5, media.kind, description, self._model)
-                return description
 
         task = asyncio.create_task(fetch())
         self._inflight[media.md5] = task
@@ -101,3 +107,12 @@ class MediaDescriber:
             return await task
         finally:
             self._inflight.pop(media.md5, None)
+
+    async def _download_and_describe(self, media: Media, download) -> str | None:
+        image = await download()
+        if not image:
+            return None
+        description = await self._ai.describe(image, max_tokens=self._max_tokens)
+        if description:
+            self._cache.put(media.md5, media.kind, description, self._model)
+        return description

@@ -19,6 +19,9 @@ class Config:
     describe_media: bool = True
     media_cache_path: str = 'media_cache.db'
     describe_concurrency: int = 2
+    describe_timeout: float = 30.0
+    describe_max_tokens: int = 64
+    describe_history_limit: int = 3
     log_path: str = 'bot.log'
     log_level: str = 'DEBUG'
 
@@ -35,6 +38,9 @@ class Config:
             describe_media=os.getenv('DESCRIBE_MEDIA', '1').lower() not in ('0', 'false', 'no'),
             media_cache_path=os.getenv('MEDIA_CACHE_PATH', cls.media_cache_path),
             describe_concurrency=int(os.getenv('DESCRIBE_CONCURRENCY', str(cls.describe_concurrency))),
+            describe_timeout=float(os.getenv('DESCRIBE_TIMEOUT', str(cls.describe_timeout))),
+            describe_max_tokens=int(os.getenv('DESCRIBE_MAX_TOKENS', str(cls.describe_max_tokens))),
+            describe_history_limit=int(os.getenv('DESCRIBE_HISTORY_LIMIT', str(cls.describe_history_limit))),
             log_path=os.getenv('LOG_PATH', cls.log_path),
             log_level=os.getenv('LOG_LEVEL', cls.log_level),
         )

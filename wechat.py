@@ -5,7 +5,7 @@ from loguru import logger
 from weixin_bot import Message, WeChatBot
 
 from context import ChatWindow, MessageKind
-from media import parse_emoji_description
+from media import parse_media
 from message import parse_reference_message
 
 
@@ -145,6 +145,7 @@ class Wechat:
         for msg in messages:
             kind = MessageKind.of(msg.msg_type)
             content = ''
+            media = None
             if kind is MessageKind.TEXT:  # 纯文本消息
                 content = msg.text
             elif kind is MessageKind.QUOTE:  # 引用消息
@@ -153,15 +154,14 @@ class Wechat:
                     content = parsed['content'] + f'（引用前文的消息：{parsed["referred_message"]}）'
                 except Exception:
                     continue
-            elif kind is MessageKind.IMAGE:  # 图片消息（历史只留标记，真实图片在回复时随请求发送）
-                content = '[图片]'
-            elif kind is MessageKind.EMOJI:  # 表情消息（尽量带上中文含义）
-                desc = parse_emoji_description(msg.content)
-                content = f'[表情：{desc}]' if desc else '[表情]'
+            elif kind in (MessageKind.IMAGE, MessageKind.EMOJI):  # 图片 / 表情
+                media = parse_media(msg.content)
+                content = media.placeholder if media else ('[图片]' if kind is MessageKind.IMAGE else '[表情]')
 
             # 不知道为什么有的消息还是 xml 格式的，这里直接过滤掉吧
             if content and not content.startswith('<'):
-                result.append(msg.sender_name, content, msg.create_time)
+                download = msg.get_media_bytes if (media and media.needs_description) else None
+                result.append(msg.sender_name, content, msg.create_time, media=media, download=download)
 
         result.sort()
         return result

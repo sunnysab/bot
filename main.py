@@ -21,10 +21,12 @@ def main():
     describer = None
     if config.describe_media:
         describer = MediaDescriber(ai_provider, MediaCache(config.media_cache_path),
-                                   model=config.deepseek_model, concurrency=config.describe_concurrency)
+                                   model=config.deepseek_model, concurrency=config.describe_concurrency,
+                                   timeout=config.describe_timeout, max_tokens=config.describe_max_tokens)
 
     bot = Bot(config.relay_host, config.relay_port, unix_path=config.relay_unix, x_delay=0.5,
-              send_interval=config.send_interval, describer=describer)
+              send_interval=config.send_interval, describer=describer,
+              describe_history_limit=config.describe_history_limit)
 
     # 初始化预处理器和插件
     bot.add_preprocessor(MediaProcessor())
