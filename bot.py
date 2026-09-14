@@ -6,6 +6,7 @@ from typing import TypeVar
 from loguru import logger
 
 from context import ContextManager, MessageContext, MessageKind
+from media import parse_emoji_description
 from outbound import Outbound, OutboundQueue
 from plugin import Plugin, PluginManager, Reply
 from wechat import Message, Wechat
@@ -35,7 +36,8 @@ class MediaProcessor(Preprocessor):
         if kind is MessageKind.IMAGE:
             msg.content = msg.clean_text = '[图片]'
         elif kind is MessageKind.EMOJI:
-            msg.content = msg.clean_text = '[表情]'
+            desc = parse_emoji_description(msg.content)
+            msg.content = msg.clean_text = f'[表情：{desc}]' if desc else '[表情]'
         return msg
 
 

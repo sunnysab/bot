@@ -27,6 +27,7 @@ py-modules = [
     "config",
     "context",
     "main",
+    "media",
     "message",
     "outbound",
     "plugin",

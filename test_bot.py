@@ -4,7 +4,7 @@ import asyncio
 import types
 import unittest
 
-from bot import Bot
+from bot import Bot, MediaProcessor
 from plugin import EndProcessing, Plugin, Reply
 
 
@@ -89,6 +89,26 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
 
         self.assertEqual(self.bot._wechat.sent, [])
+
+
+class TestMediaProcessor(unittest.IsolatedAsyncioTestCase):
+    async def test_image_becomes_marker(self):
+        msg = make_msg(msg_type=3)
+        msg.content = msg.clean_text = '<?xml version="1.0"?><msg><img md5="abc" /></msg>'
+        out = await MediaProcessor().process(msg)
+        self.assertEqual(out.content, '[图片]')
+
+    async def test_emoji_keeps_description(self):
+        msg = make_msg(msg_type=47)
+        msg.content = msg.clean_text = '<msg><emoji desc="ChEKB2RlZmF1bHQSBuWVp+WVpw==" /></msg>'
+        out = await MediaProcessor().process(msg)
+        self.assertEqual(out.content, '[表情：啧啧]')
+
+    async def test_emoji_without_description_falls_back(self):
+        msg = make_msg(msg_type=47)
+        msg.content = msg.clean_text = '<msg><emoji desc="" /></msg>'
+        out = await MediaProcessor().process(msg)
+        self.assertEqual(out.content, '[表情]')
 
 
 if __name__ == '__main__':
