@@ -1,14 +1,18 @@
 """ 插件自检：回复策略、群聊必要性门控、私聊直通、图片直传，以及复读机不跟媒体占位标记。 """
 
 import base64
+import json
+import tempfile
 import time
 import types
 import unittest
+from pathlib import Path
 
 from context import ChatWindow, MessageContext
 from necessity import NECESSITY_THRESHOLD
 from plugin import ChatPlugin, RepeatPlugin, ReplyPolicy
 from profiles import Profile, ProfileStore
+from reply_trace import TraceLogger
 
 
 class FakeAi:
@@ -23,7 +27,7 @@ class FakeAi:
 
 def make_msg(msg_type=1, is_chatroom=False, is_at_me=False, media=b'', content=''):
     msg = types.SimpleNamespace(msg_type=msg_type, is_chatroom=is_chatroom, is_at_me=is_at_me,
-                                content=content, reply_target='456@chatroom')
+                                content=content, sender_name='Alice', reply_target='456@chatroom')
 
     async def get_media_bytes():
         return media
@@ -88,6 +92,30 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
         self.assertIn('群里这些人你大致认识', self.ai.calls[0][0])
         self.assertIn('口头禅：蛙趣', self.ai.calls[0][0])
+
+    async def test_tracer_records_the_round(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'trace.jsonl'
+            self.plugin.tracer = TraceLogger(path)
+            await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
+            record = json.loads(path.read_text(encoding='utf-8').strip())
+
+        self.assertEqual(record['trigger'], 'private')
+        self.assertEqual(record['score'], 100)
+        self.assertEqual(record['reply'], ['收到'])
+        self.assertEqual(record['sender'], 'Alice')
+        self.assertIn('在吗', record['transcript'])
+        self.assertGreaterEqual(record['latency_ms'], 0)
+
+    async def test_tracer_records_silent_turns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'trace.jsonl'
+            self.plugin.ai = FakeAi(response=None)
+            self.plugin.tracer = TraceLogger(path)
+            await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
+            record = json.loads(path.read_text(encoding='utf-8').strip())
+
+        self.assertEqual(record['reply'], [])  # 走到模型但没开口，也要留痕
 
     async def test_silent_model_does_not_reply(self):
         self.plugin.ai = FakeAi(response=None)

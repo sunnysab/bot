@@ -26,6 +26,8 @@ class Config:
     reply_activity_window: float = 180.0
     # 群友画像（离线生成，见 build_profiles.py）
     profile_path: str = 'memory/profiles.json'
+    # 回复轨迹 JSONL（攒数据给以后做效果评估）
+    trace_path: str = 'reply_trace.jsonl'
     log_path: str = 'bot.log'
     log_level: str = 'DEBUG'
 
@@ -47,6 +49,7 @@ class Config:
             reply_necessity_threshold=int(os.getenv('REPLY_NECESSITY_THRESHOLD', str(cls.reply_necessity_threshold))),
             reply_activity_window=float(os.getenv('REPLY_ACTIVITY_WINDOW', str(cls.reply_activity_window))),
             profile_path=os.getenv('PROFILE_PATH', cls.profile_path),
+            trace_path=os.getenv('TRACE_PATH', cls.trace_path),
             log_path=os.getenv('LOG_PATH', cls.log_path),
             log_level=os.getenv('LOG_LEVEL', cls.log_level),
         )

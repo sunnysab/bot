@@ -17,6 +17,7 @@ from necessity import (
     score_necessity,
 )
 from profiles import ProfileStore
+from reply_trace import TraceLogger, TraceRecord
 
 
 @dataclass(slots=True)
@@ -179,18 +180,20 @@ class ReplyPolicy:
 
 class ChatPlugin(Plugin):
     def __init__(self, ai_provider: AiProvider, context_length: int = 10, policy: ReplyPolicy | None = None,
-                 profiles: ProfileStore | None = None):
+                 profiles: ProfileStore | None = None, tracer: TraceLogger | None = None):
         """ 聊天插件
 
         :param ai_provider: AI 服务提供者
         :param context_length: 送入模型的上下文消息条数
         :param policy: 是否回复的策略；不传则用默认（必要性打分）
         :param profiles: 群友画像；传了就注入 prompt 让机器人认识人
+        :param tracer: 回复轨迹记录；传了就把每轮触发/上下文/回复写成 JSONL
         """
         self.ai = ai_provider
         self.context_length = context_length
         self.policy = policy or ReplyPolicy()
         self.profiles = profiles
+        self.tracer = tracer
 
         from jinja2 import Template
         template_file = (Path(__file__).parent / 'prompt.txt').read_text(encoding='utf-8')
@@ -215,13 +218,28 @@ class ChatPlugin(Plugin):
                                                          trigger_detail=necessity.detail, profiles=profiles)
 
         text = '回复你扮演的角色所要说的话。以下聊天记录供你参考：\n\n' + str(history)
+        started = time.perf_counter()
         response = await self.ai.chat(prompt.strip(), await self._build_message(ctx, text))
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        self._trace(ctx, necessity, text, response, latency_ms)
         if not response:
             return Reply(stop=True)
 
         # 有时候模型返回数据中会带有 "昵称: " 的前缀，这里需要去掉
         prefix = ctx.self_name + ':'
         return Reply(texts=[x.lstrip(prefix) for x in response])
+
+    def _trace(self, ctx: MessageContext, necessity: NecessityScore, transcript: str,
+               response: list[str] | None, latency_ms: int) -> None:
+        """ 记录这一轮：为什么开口、看到了什么、说了什么。 """
+        if not self.tracer:
+            return
+        msg = ctx.msg
+        self.tracer.log(TraceRecord(
+            ts=time.time(), contact=msg.reply_target, contact_name=ctx.contact,
+            sender=msg.sender_name, trigger=necessity.kind, score=necessity.score,
+            reasons=necessity.reasons, transcript=transcript, reply=tuple(response or ()),
+            latency_ms=latency_ms))
 
     @staticmethod
     async def _build_message(ctx: MessageContext, transcript: str) -> str | list:
