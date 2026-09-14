@@ -107,7 +107,9 @@ class Config:
     style_probability: float = 0.0
     # 两段式：Planner 判断说与不说，Expressor 负责说成人话
     enable_planner: bool = True
-    # Planner 可以走本地免费模型（OpenAI 兼容）；planner_url 留空则两段都用主模型
+    # Planner 可以单独配一个 OpenAI 兼容服务；**留空就走主模型（推荐）**。
+    # 不要指到本地小模型：实测 2B 那档「开口 0/9、推理原地打转」，
+    # 连「说一个字」都是 finish=length + content 空（见 notes/未完成.md）
     planner_url: str = ''
     planner_model: str = 'minicpm5'
     planner_key: str = 'local'

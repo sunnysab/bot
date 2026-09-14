@@ -6,6 +6,8 @@ from loguru import logger
 from tools import AssistantTurn, parse_tool_calls
 
 DESCRIBE_PROMPT = '用不超过 15 个字描述这张图片或表情包的内容和情绪，不要标点符号'
+# 识图被截断时最多翻倍到这里（见 OpenAI.describe）
+RETRY_CEILING = 4096
 
 
 @dataclass
@@ -79,7 +81,7 @@ class AiProvider:
         """ 带工具的一轮调用。返回 None 表示这个后端不支持，调用方自己决定退路。 """
         return None
 
-    async def describe(self, image: bytes, max_tokens: int = 64,
+    async def describe(self, image: bytes, max_tokens: int = 1024,
                        prompt: str = DESCRIBE_PROMPT) -> str | None:
         """ 识图。prompt 可换：读历史用短的，给表情库补使用场景用 emojis.EMOJI_DESCRIBE_PROMPT。 """
         return None
@@ -176,9 +178,27 @@ class OpenAI(AiProvider):
                      f'calls={[(call.name, call.arguments) for call in turn.tool_calls]}')
         return turn
 
-    async def describe(self, image: bytes, max_tokens: int = 64,
+    async def describe(self, image: bytes, max_tokens: int = 1024,
                        prompt: str = DESCRIBE_PROMPT) -> str | None:
-        """ 识图描述：把图片/表情压成一句短语，写入历史记录。 """
+        """ 识图描述：把图片/表情压成一句短语，写入历史记录。
+
+        **会重试一次**：这个模型是 thinking 的，推理也算在 max_tokens 里，而推理长度
+        看 prompt 心情（实测同一批表情 8 ~ >2048）。碰上截断就翻倍再试一次，
+        比事后看到「描述失败」好查。
+        """
+        text, truncated = await self._describe_once(image, prompt, max_tokens)
+        if truncated and max_tokens < RETRY_CEILING:
+            logger.debug(f'识图被截断（max_tokens={max_tokens}），翻倍重试一次')
+            text, truncated = await self._describe_once(image, prompt, max_tokens * 2)
+        if not text:
+            logger.warning(f'识图没拿到内容（{"推理吃完了预算" if truncated else "空回复"}，'
+                           f'max_tokens={max_tokens}）：thinking 模型的推理也算在生成预算里，'
+                           f'调大 DESCRIBE_MAX_TOKENS；prompt 越啰嗦它想得越久')
+        return text or None
+
+    async def _describe_once(self, image: bytes, prompt: str,
+                             max_tokens: int) -> tuple[str, bool]:
+        """ 返回 (文本, 是不是被预算截断的)。 """
         encoded = base64.b64encode(image).decode()
         response = await self.client.chat.completions.create(
             model=self.model,
@@ -195,14 +215,7 @@ class OpenAI(AiProvider):
         if not text:
             # 与 chat() 一样回退到 reasoning（有些供应商把答案放那里）
             text = ((choice.message.model_extra or {}).get('reasoning_content') or '').strip()
-        if not text:
-            # 不说清楚的话，调用方只看到「描述失败」。实测最常见的原因是**推理把生成预算吃完了**：
-            # thinking 模型要先想再答，finish_reason=length 时 content 就是空的，
-            # 而 completion_tokens 会全部算成 reasoning_tokens（识图 prompt 实测要 ~754）
-            logger.warning(f'识图没拿到内容（finish_reason={choice.finish_reason}，'
-                           f'max_tokens={max_tokens}）：thinking 模型的推理也算在生成预算里，'
-                           f'调大 DESCRIBE_MAX_TOKENS（实测 1024 够）；若一直如此再看模型是否支持图片')
-        return text or None
+        return text, choice.finish_reason == 'length'
 
     async def summarize(self, prompt: str, text: str, max_tokens: int = 400) -> str | None:
         """ 压缩一段文本，供中期记忆使用。 """
@@ -258,6 +271,38 @@ def _self_check() -> None:
     odd = Usage()
     odd.add(types.SimpleNamespace(prompt_tokens=7, model_extra={}))
     assert odd.snapshot()['completion'] == 0 and odd.snapshot()['cache_hit_rate'] == 0.0
+    # 识图被截断要翻倍重试一次（推理长度看 prompt 心情，8 ~ >2048）
+    async def retry_check():
+        provider = object.__new__(OpenAI)          # 不跑 __init__，不建 client
+        calls: list[int] = []
+
+        async def fake(image, prompt, budget):
+            calls.append(budget)
+            return ('', True) if budget < 2048 else ('好', False)
+
+        provider._describe_once = fake
+        assert await provider.describe(b'x', max_tokens=1024) == '好'
+        assert calls == [1024, 2048], calls
+        # 已经到顶就不再翻倍，返回 None（调用方会记警告）
+        calls.clear()
+
+        async def always_truncated(image, prompt, budget):
+            calls.append(budget)
+            return ('', True)
+
+        provider._describe_once = always_truncated
+        assert await provider.describe(b'x', max_tokens=RETRY_CEILING) is None
+        assert calls == [RETRY_CEILING], calls       # 到顶了就不再翻倍
+        # 没截断就不重试
+        calls.clear()
+        provider._describe_once = lambda *a: _ok()
+        assert await provider.describe(b'x', max_tokens=512) == '行'
+
+    async def _ok():
+        return ('行', False)
+
+    import asyncio
+    asyncio.run(retry_check())
     print('ai self-check ok')
 
 
