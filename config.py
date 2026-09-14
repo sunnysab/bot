@@ -16,8 +16,6 @@ class Config:
     deepseek_model: str = 'deepseek-flash'
     # 主模型的服务地址，可指向第三方 OpenAI 兼容服务（更便宜的代理/中转）
     deepseek_url: str = 'https://api.deepseek.com'
-    # 机器人自己的别名，逗号分隔（如 雨姐,烟姐,雨墨姐）。群里叫别名也算在叫它
-    bot_aliases: str = ''
     # 全局最小发送间隔（秒），规避微信风控
     send_interval: float = 1.0
     # 媒体（图片 / 缺 desc 的表情）识图描述
@@ -73,7 +71,6 @@ class Config:
             deepseek_key=os.getenv('DEEPSEEK_KEY', cls.deepseek_key),
             deepseek_model=os.getenv('DEEPSEEK_MODEL', cls.deepseek_model),
             deepseek_url=os.getenv('DEEPSEEK_URL', cls.deepseek_url),
-            bot_aliases=os.getenv('BOT_ALIASES', cls.bot_aliases),
             send_interval=float(os.getenv('SEND_INTERVAL', str(cls.send_interval))),
             describe_media=os.getenv('DESCRIBE_MEDIA', '1').lower() not in ('0', 'false', 'no'),
             media_cache_path=os.getenv('MEDIA_CACHE_PATH', cls.media_cache_path),

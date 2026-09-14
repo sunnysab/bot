@@ -169,7 +169,8 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         plugin = ChatPlugin(self.ai, context_length=10, persona=persona)
         await plugin.handle(make_ctx(make_msg(is_chatroom=False)))
         prompt = self.ai.reply_calls[0][0]
-        self.assertIn('你的名字是Bot。是一只猫', prompt)
+        self.assertIn('你的名字是Bot', prompt)
+        self.assertIn('是一只猫', prompt)
         self.assertIn('只会喵', prompt)
 
     async def test_image_is_sent_as_content_block(self):

@@ -29,8 +29,8 @@ class Persona:
         '不硬找话题，不复述别人刚说过的话，不连着自说自话。')
     alternates: tuple[str, ...] = ()
     alternate_probability: float = 0.0
-    # 群里对它的其他叫法；判断「是不是在叫我」和告诉模型自己叫什么都要用
-    aliases: tuple[str, ...] = ()
+    # 群里对它的其他叫法。跟 personality 一样属于「我是谁」，写在这里，不开环境变量
+    aliases: tuple[str, ...] = ('雨姐', '烟姐', '雨墨姐')
 
     def identity(self, name: str) -> str:
         """ expressor 开头的人设段。 """
@@ -49,11 +49,13 @@ class Persona:
 
 def _self_check() -> None:
     persona = Persona()
-    assert persona.identity('示例名') == '你的名字是示例名。是一个积极乐观、温暖阳光的女生，03 年出生。'
-    nicknamed = Persona(aliases=('雨姐', '烟姐'))
-    assert nicknamed.identity('雨墨蝉烟') == (
-        '你的名字是雨墨蝉烟，也有人叫你雨姐、烟姐。是一个积极乐观、温暖阳光的女生，03 年出生。')
-    # 没配备用风格时永远是空
+    assert persona.identity('示例名') == (
+        '你的名字是示例名，也有人叫你雨姐、烟姐、雨墨姐。是一个积极乐观、温暖阳光的女生，03 年出生。')
+    nicknamed = Persona(aliases=('小雨',))
+    assert '也有人叫你小雨。' in nicknamed.identity('雨墨蝉烟')
+    assert Persona(aliases=()).identity('雨墨蝉烟') == (
+        '你的名字是雨墨蝉烟。是一个积极乐观、温暖阳光的女生，03 年出生。')
+    # 不配备用风格时永远是空
     assert persona.maybe_alternate() == ''
 
     talkative = Persona(alternates=('用1-2个字回复', '带点翻译腔'), alternate_probability=1.0)

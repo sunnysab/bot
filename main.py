@@ -28,11 +28,6 @@ def main():
     ai_provider = Deepseek(key=config.deepseek_key, model=config.deepseek_model, url=config.deepseek_url,
                            temperature=0.85)
 
-    # 机器人自己的别名，逗号分隔；群里叫别名也算在叫它
-    aliases = tuple(alias.strip() for alias in config.bot_aliases.split(',') if alias.strip())
-    if aliases:
-        logger.info(f'机器人别名: {"、".join(aliases)}')
-
     # 决策者可以走本地免费模型；留空 PLANNER_URL 就两段都用主模型
     planner_ai = None
     if config.planner_url:
@@ -60,8 +55,16 @@ def main():
     bot.add_preprocessor(PayloadProcessor())
 
     repeater = RepeatPlugin()
+
+    # 人格：谁、怎么说话、怎么行动。别名也在这里
+    persona = Persona(
+        personality=config.personality, reply_style=config.reply_style, behavior_style=config.behavior_style,
+        alternates=tuple(style.strip() for style in config.reply_styles.split('|') if style.strip()),
+        alternate_probability=config.style_probability)
+    logger.info(f'机器人别名: {"、".join(persona.aliases)}')
+
     policy = ReplyPolicy(threshold=config.reply_necessity_threshold,
-                         activity_window=config.reply_activity_window, aliases=aliases)
+                         activity_window=config.reply_activity_window, aliases=persona.aliases)
     profiles = ProfileStore.load(config.profile_path)
     if profiles:
         logger.info(f'已加载 {len(profiles)} 个人的画像: {config.profile_path}')
@@ -69,10 +72,6 @@ def main():
     if habits:
         logger.info(f'已加载 {len(habits)} 条群用语: {config.habit_path}')
 
-    persona = Persona(
-        personality=config.personality, reply_style=config.reply_style, behavior_style=config.behavior_style,
-        alternates=tuple(style.strip() for style in config.reply_styles.split('|') if style.strip()),
-        alternate_probability=config.style_probability, aliases=aliases)
     chat_plugin = ChatPlugin(ai_provider, context_length=30, policy=policy, persona=persona, profiles=profiles,
                              habits=habits, memories=memory_store, tracer=TraceLogger(config.trace_path),
                              enable_planner=config.enable_planner, planner_ai=planner_ai,
