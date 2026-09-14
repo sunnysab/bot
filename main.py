@@ -9,6 +9,7 @@ from bot import Bot, PayloadProcessor
 from config import Config
 from describer import MediaCache, MediaDescriber
 from habits import HabitStore
+from moments import MomentKeeper, MomentStore
 from plugin import ChatPlugin, EndProcessing, RepeatPlugin, ReplyPolicy
 from profiles import ProfileStore
 from reply_trace import TraceLogger
@@ -30,9 +31,11 @@ def main():
                                    model=config.deepseek_model, concurrency=config.describe_concurrency,
                                    timeout=config.describe_timeout, max_tokens=config.describe_max_tokens)
 
+    memory_store = MomentStore(config.moment_path)
     bot = Bot(config.relay_host, config.relay_port, unix_path=config.relay_unix, x_delay=0.5,
               send_interval=config.send_interval, describer=describer,
-              describe_history_limit=config.describe_history_limit)
+              describe_history_limit=config.describe_history_limit,
+              keeper=MomentKeeper(ai_provider, memory_store, batch=config.moment_batch))
 
     # 初始化预处理器和插件
     bot.add_preprocessor(PayloadProcessor())
@@ -47,7 +50,7 @@ def main():
     if habits:
         logger.info(f'已加载 {len(habits)} 条群用语: {config.habit_path}')
     chat_plugin = ChatPlugin(ai_provider, context_length=30, policy=policy, profiles=profiles,
-                             habits=habits, tracer=TraceLogger(config.trace_path))
+                             habits=habits, memories=memory_store, tracer=TraceLogger(config.trace_path))
 
     bot.set_default_plugin([repeater, chat_plugin])
     bot.attach('研究生摆烂群', EndProcessing())

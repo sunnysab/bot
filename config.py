@@ -28,6 +28,9 @@ class Config:
     profile_path: str = 'memory/profiles.json'
     # 群里的特色用语（离线生成，见 build_habits.py）
     habit_path: str = 'memory/habits.json'
+    # 中期记忆：滑出上下文窗口的消息压成回想，存这个 sqlite
+    moment_path: str = 'memory/moments.db'
+    moment_batch: int = 20
     # 回复轨迹 JSONL（攒数据给以后做效果评估）
     trace_path: str = 'reply_trace.jsonl'
     log_path: str = 'bot.log'
@@ -52,6 +55,8 @@ class Config:
             reply_activity_window=float(os.getenv('REPLY_ACTIVITY_WINDOW', str(cls.reply_activity_window))),
             profile_path=os.getenv('PROFILE_PATH', cls.profile_path),
             habit_path=os.getenv('HABIT_PATH', cls.habit_path),
+            moment_path=os.getenv('MOMENT_PATH', cls.moment_path),
+            moment_batch=int(os.getenv('MOMENT_BATCH', str(cls.moment_batch))),
             trace_path=os.getenv('TRACE_PATH', cls.trace_path),
             log_path=os.getenv('LOG_PATH', cls.log_path),
             log_level=os.getenv('LOG_LEVEL', cls.log_level),

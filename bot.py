@@ -5,9 +5,10 @@ from typing import TypeVar
 
 from loguru import logger
 
-from context import ChatWindow, ContextManager, MessageContext, MessageKind
+from context import ChatWindow, ContextManager, MessageContext, MessageKind, SingleRecord
 from describer import MediaDescriber
 from media import parse_media, render
+from moments import MomentKeeper
 from outbound import Outbound, OutboundQueue
 from plugin import Plugin, PluginManager, Reply
 from wechat import Message, Wechat
@@ -44,7 +45,8 @@ class Bot:
 
     def __init__(self, host: str, port: int, unix_path: str = '', dry_run: bool = False,
                  x_delay: float = 0, send_interval: float = 1.0, preprocessors: list[Preprocessor] = None,
-                 describer: MediaDescriber | None = None, describe_history_limit: int = 3):
+                 describer: MediaDescriber | None = None, describe_history_limit: int = 3,
+                 keeper: MomentKeeper | None = None):
         """ 初始化机器人
 
         @param host: weixin-rs relay 服务器地址
@@ -55,14 +57,16 @@ class Bot:
         @param send_interval: 全局最小发送间隔（秒），用于规避风控
         @param describer: 媒体描述器，后台把图片/表情含义写回历史；为 None 则不做识图
         @param describe_history_limit: 启动加载历史时，每个会话最多补描述多少条媒体
+        @param keeper: 中期记忆：消息滑出上下文窗口时压缩成回想；为 None 则不记
         """
         async def callback(msg: Message) -> None:
             await self.on_message(msg)
 
         self._wechat = Wechat(host, port, callback=callback, dry_run=dry_run, unix_path=unix_path)
 
-        # 聊天上下文记录
-        self._history = ContextManager()
+        # 聊天上下文记录。消息滑出窗口时交给 keeper 压成中期记忆
+        self._history = ContextManager(on_evict=self._on_evicted)
+        self._keeper = keeper
         # 消息处理插件
         self._plugins = PluginManager()
         # 消息预处理插件
@@ -90,6 +94,13 @@ class Bot:
         await self.outbox.stop()
         if self._describer:
             await self._describer.stop()
+        if self._keeper:
+            await self._keeper.join()  # 收尾：等在跑的压缩任务写完
+
+    def _on_evicted(self, chat: str, record: SingleRecord) -> None:
+        """ 消息滑出上下文窗口，交给中期记忆。 """
+        if self._keeper:
+            self._keeper.schedule(chat, record)
 
     def register_ready(self, func) -> None:
         """ 注册连接就绪后的回调（如加载历史上下文） """

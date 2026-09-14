@@ -21,6 +21,10 @@ class AiProvider:
         """ 描述图片/表情的含义，供历史记录使用。默认不支持，返回 None。 """
         return None
 
+    async def summarize(self, prompt: str, text: str, max_tokens: int = 400) -> str | None:
+        """ 用给定 prompt 压缩一段文本，供中期记忆使用。默认不支持，返回 None。 """
+        return None
+
 
 class OpenAI(AiProvider):
     """ OpenAI 兼容接口 """
@@ -74,6 +78,18 @@ class OpenAI(AiProvider):
         )
         text = (response.choices[0].message.content or '').strip()
         return text or None
+
+    async def summarize(self, prompt: str, text: str, max_tokens: int = 400) -> str | None:
+        """ 压缩一段文本，供中期记忆使用。 """
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            temperature=0.3,
+            max_tokens=max_tokens,
+            messages=[{'role': 'system', 'content': prompt}, {'role': 'user', 'content': text}],
+        )
+        content = (response.choices[0].message.content or '').strip()
+        logger.debug(f'Summarize interface. response: {content!r}')
+        return content or None
 
 
 class Deepseek(OpenAI):

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from context import ChatWindow, MessageContext
 from habits import Habit, HabitStore
+from moments import Moment, MomentStore
 from necessity import NECESSITY_THRESHOLD
 from plugin import ChatPlugin, RepeatPlugin, ReplyPolicy
 from profiles import Profile, ProfileStore
@@ -86,6 +87,20 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
     async def test_private_replies(self):
         reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
         self.assertEqual(reply.texts, ['收到'])
+
+    async def test_memories_injected_on_keyword_hit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MomentStore(Path(tmp) / 'm.db')
+            store.add(Moment('456@chatroom', 1, 10, '上次大家在群里讨论过明天要不要上班请假', ('提到请假时',)))
+            self.plugin.memories = store
+
+            await self.plugin.handle(make_ctx(make_msg(is_chatroom=False, content='明天上班好烦')))
+            self.assertIn('你想起的旧事', self.ai.calls[0][0])
+            self.assertIn('要不要上班请假', self.ai.calls[0][0])
+
+            await self.plugin.handle(make_ctx(make_msg(is_chatroom=False, content='吃了没')))
+            self.assertNotIn('你想起的旧事', self.ai.calls[1][0])
+            store.close()
 
     async def test_habits_injected_only_on_hit(self):
         self.plugin.habits = HabitStore(habits=(Habit('蛙趣', 126, ('蛙趣 你的ID和小红书一样的吧',)),))

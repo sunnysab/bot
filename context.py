@@ -94,8 +94,10 @@ class SingleRecord:
 class ChatWindow:
     """ 维护单个聊天会话（群或联系人）的状态 """
 
-    def __init__(self, history: list[SingleRecord] | None=None, max_history: int = 100):
+    def __init__(self, history: list[SingleRecord] | None=None, max_history: int = 100,
+                 on_evict: Callable[[SingleRecord], None] | None = None):
         self.max_history = max_history
+        self._on_evict = on_evict
 
         history: list[SingleRecord] = history or []
         self._history = history[:max_history]
@@ -112,7 +114,9 @@ class ChatWindow:
         :param is_self: 是否为机器人自己发的消息
         """
         if len(self._history) >= self.max_history:
-            self._history.pop(0)
+            evicted = self._history.pop(0)
+            if self._on_evict:
+                self._on_evict(evicted)  # 滑出窗口，交给中期记忆压缩
         record = SingleRecord(sender, text, t, media, download, is_self)
         self._history.append(record)
         return record
@@ -166,13 +170,18 @@ class ChatWindow:
 class ContextManager:
     """ 上下文管理器 """
 
-    def __init__(self):
+    def __init__(self, on_evict: Callable[[str, SingleRecord], None] | None = None):
+        """ :param on_evict: 消息滑出窗口时的回调，入参为（会话 key, 记录） """
         self._contexts = {}
+        self._on_evict = on_evict
 
     def get_context(self, key: str) -> ChatWindow:
         """ 获取上下文 """
         if key not in self._contexts:
-            self._contexts[key] = ChatWindow()
+            callback = None
+            if self._on_evict:
+                callback = lambda record, key=key: self._on_evict(key, record)  # noqa: E731
+            self._contexts[key] = ChatWindow(on_evict=callback)
         return self._contexts[key]
 
     def push_message(self, contact: str, sender: str, text: str, t: int, media: Media | None = None,
