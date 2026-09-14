@@ -8,6 +8,7 @@ import unittest
 from context import ChatWindow, MessageContext
 from necessity import NECESSITY_THRESHOLD
 from plugin import ChatPlugin, RepeatPlugin, ReplyPolicy
+from profiles import Profile, ProfileStore
 
 
 class FakeAi:
@@ -80,6 +81,13 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
     async def test_private_replies(self):
         reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
         self.assertEqual(reply.texts, ['收到'])
+
+    async def test_profiles_are_injected_into_prompt(self):
+        store = ProfileStore(people={'wxid_x': Profile('wxid_x', names=('Alice',), phrases=('蛙趣',))})
+        self.plugin.profiles = store
+        await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
+        self.assertIn('群里这些人你大致认识', self.ai.calls[0][0])
+        self.assertIn('口头禅：蛙趣', self.ai.calls[0][0])
 
     async def test_silent_model_does_not_reply(self):
         self.plugin.ai = FakeAi(response=None)

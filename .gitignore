@@ -7,5 +7,10 @@ venv/
 *.log
 media_cache.db
 
+# 群聊记录与人物画像（含个人信息，不入库）
+memory/
+*（重生版）*.jsonl
+
 __pycache__/
 *.egg-info/
+.env

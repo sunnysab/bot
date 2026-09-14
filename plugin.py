@@ -16,6 +16,7 @@ from necessity import (
     NecessityScore,
     score_necessity,
 )
+from profiles import ProfileStore
 
 
 @dataclass(slots=True)
@@ -177,16 +178,19 @@ class ReplyPolicy:
 
 
 class ChatPlugin(Plugin):
-    def __init__(self, ai_provider: AiProvider, context_length: int = 10, policy: ReplyPolicy | None = None):
+    def __init__(self, ai_provider: AiProvider, context_length: int = 10, policy: ReplyPolicy | None = None,
+                 profiles: ProfileStore | None = None):
         """ 聊天插件
 
         :param ai_provider: AI 服务提供者
         :param context_length: 送入模型的上下文消息条数
-        :param policy: 是否回复的策略；不传则用默认（@/提名，带主动参与）
+        :param policy: 是否回复的策略；不传则用默认（必要性打分）
+        :param profiles: 群友画像；传了就注入 prompt 让机器人认识人
         """
         self.ai = ai_provider
         self.context_length = context_length
         self.policy = policy or ReplyPolicy()
+        self.profiles = profiles
 
         from jinja2 import Template
         template_file = (Path(__file__).parent / 'prompt.txt').read_text(encoding='utf-8')
@@ -203,9 +207,12 @@ class ChatPlugin(Plugin):
             return None
 
         history: ChatWindow = ctx.history.latest_n(self.context_length)
+        profiles = ''
+        if self.profiles:
+            profiles = self.profiles.render_for(record.sender for record in reversed(history))
         prompt = await self.prompt_template.render_async(self_name=ctx.self_name, contact=ctx.contact,
                                                          is_group=msg.is_chatroom, trigger=necessity.kind,
-                                                         trigger_detail=necessity.detail)
+                                                         trigger_detail=necessity.detail, profiles=profiles)
 
         text = '回复你扮演的角色所要说的话。以下聊天记录供你参考：\n\n' + str(history)
         response = await self.ai.chat(prompt.strip(), await self._build_message(ctx, text))
