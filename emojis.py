@@ -106,6 +106,11 @@ class EmojiLibrary:
         """ 现在真能发出去的有几张——剩下的只是在等 relay 收到一次。 """
         return sum(1 for item in self._entries.values() if item.sendable)
 
+    @property
+    def scene_count(self) -> int:
+        """ 已经写清「什么场合发它」的有几张。 """
+        return sum(1 for item in self._entries.values() if item.scene)
+
     @classmethod
     def load(cls, path: str | Path) -> EmojiLibrary:
         """ 读不到、读坏了都当空库——表情库不是关键路径，不能因此起不来。 """

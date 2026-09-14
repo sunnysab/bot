@@ -7,7 +7,7 @@ from loguru import logger
 from ai import Deepseek, OpenAI
 from bot import Bot, PayloadProcessor
 from config import Config
-from describer import MediaCache, MediaDescriber
+from describer import EmojiDescriber, MediaCache, MediaDescriber
 from emojis import EmojiLibrary
 from habits import HabitStore
 from moments import MomentKeeper, MomentStore
@@ -48,13 +48,24 @@ def main():
 
     memory_store = MomentStore(config.moment_path)
     emojis = EmojiLibrary.load(config.emoji_path)
+    # 给偷来的表情补「使用场景」：微信的 desc 只有一个标签，够搜标签不够搜场合。
+    # 复用识图模型——真看图比只看标签准。
+    emoji_describer = None
+    if config.describe_media:
+        emoji_describer = EmojiDescriber(ai_provider, emojis, model=config.deepseek_model,
+                                         timeout=config.describe_timeout,
+                                         max_tokens=config.describe_max_tokens)
     sendable = emojis.sendable_count
-    logger.info(f'已加载 {len(emojis)} 张表情（{sendable} 张能发）: {config.emoji_path}')
+    logger.info(f'已加载 {len(emojis)} 张表情（{sendable} 张能发，'
+                f'{emojis.scene_count} 张写了使用场景）: {config.emoji_path}')
     bot = Bot(config.relay_host, config.relay_port, unix_path=config.relay_unix, x_delay=0.5,
               send_interval=config.send_interval, describer=describer,
               describe_history_limit=config.describe_history_limit,
               keeper=MomentKeeper(ai_provider, memory_store, batch=config.moment_batch),
-              emojis=emojis, emoji_path=config.emoji_path)
+              emojis=emojis, emoji_path=config.emoji_path,
+              emoji_describer=emoji_describer)
+    if emoji_describer:
+        emoji_describer.on_update = bot.save_emojis
 
     # 初始化预处理器和插件
     bot.add_preprocessor(PayloadProcessor())

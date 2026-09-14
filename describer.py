@@ -7,11 +7,13 @@
 import asyncio
 import sqlite3
 import time
+from dataclasses import replace
 
 from loguru import logger
 
 from ai import AiProvider
 from context import SingleRecord
+from emojis import EMOJI_DESCRIBE_PROMPT, Emoji, EmojiLibrary, parse_description
 from media import Media
 
 
@@ -116,3 +118,148 @@ class MediaDescriber:
         if description:
             self._cache.put(media.md5, media.kind, description, self._model)
         return description
+
+
+class EmojiDescriber:
+    """ 后台给偷来的表情补「情绪|使用场景」。
+
+    微信的 desc 属性只给一个标签（「摊倒」）——够搜标签，不够搜场合。
+    看真图写一句「什么情况下发它」，模型才能拿当前局面去对，
+    也能用「想吐槽」「离谱」这类**不在标签里**的词搜到它。
+
+    只补本群真用过的那些（有热度），不然群里每张野生表情都要花一次识图。
+    """
+
+    def __init__(self, ai: AiProvider, library: EmojiLibrary, model: str, scene_limit: int = 60,
+                 concurrency: int = 1, timeout: float = 30.0, max_tokens: int = 80,
+                 on_update=None):
+        """ :param scene_limit: 最多补多少张——本群最常用的几十张搞懂就够了
+        :param on_update: 补成功后回调，一般用来落盘
+        """
+        self._ai = ai
+        self._library = library
+        self._model = model
+        self.scene_limit = scene_limit
+        self._timeout = timeout
+        self._max_tokens = max_tokens
+        # 公开属性：main 里建好 describer 之后才拿得到 bot.save_emojis
+        self.on_update = on_update
+        self._sem = asyncio.Semaphore(concurrency)
+        self._tasks: set[asyncio.Task] = set()
+
+    def needs(self, emoji: Emoji | None) -> bool:
+        """ 有热度（本群的梗）、还没写过场景、且没超过总量上限。 """
+        return (emoji is not None and bool(emoji.md5) and emoji.count > 0
+                and not emoji.scene and self._library.scene_count < self.scene_limit)
+
+    def schedule(self, emoji: Emoji | None, download) -> None:
+        """ download 为空（没图可下）就不做——宁可没场景，也不要编一个。 """
+        if download is None or not self.needs(emoji):
+            return
+        task = asyncio.create_task(self._apply(emoji, download))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def join(self) -> None:
+        while self._tasks:
+            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+
+    async def stop(self) -> None:
+        for task in list(self._tasks):
+            task.cancel()
+        if self._tasks:
+            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+
+    async def _apply(self, emoji: Emoji, download) -> None:
+        # 场景只用来帮模型挑表情，出任何问题都不该影响聊天
+        try:
+            async with self._sem:
+                image = await asyncio.wait_for(download(), self._timeout)
+                if not image:
+                    return
+                text = await asyncio.wait_for(
+                    self._ai.describe(image, max_tokens=self._max_tokens,
+                                      prompt=EMOJI_DESCRIBE_PROMPT), self._timeout)
+        except Exception as e:
+            logger.warning(f'补表情场景失败 md5={emoji.md5}: {e}')
+            return
+        current = self._library.get(emoji.md5)
+        desc, scene = parse_description(text or '')
+        # 没按「情绪|场景」来就别记，宁可没场景
+        if not scene or current is None:
+            return
+        # 微信给的标签比模型写的准，只填空缺
+        self._library.record(replace(current, desc=current.desc or desc, scene=scene))
+        logger.debug(f'表情场景 {emoji.md5} -> {desc}|{scene}')
+        if self.on_update:
+            self.on_update()
+
+
+if __name__ == '__main__':
+    class FakeAi:
+        def __init__(self, reply='累到不行|加班到很晚、只想趴着的时候'):
+            self.reply = reply
+            self.prompts: list[str] = []
+
+        async def describe(self, image, max_tokens=64, prompt=''):
+            self.prompts.append(prompt)
+            return self.reply
+
+    async def run():
+        ai = FakeAi()
+        library = EmojiLibrary()
+        saved: list[int] = []
+        describer = EmojiDescriber(ai, library, model='m', on_update=lambda: saved.append(1))
+
+        # 只有本群用过的（有热度）才值得花一次识图
+        assert not describer.needs(Emoji(md5='c' * 32, desc='摊倒'))
+        hot = Emoji(md5='h' * 32, desc='摊倒', count=30)
+        assert describer.needs(hot) and not describer.needs(None)
+        library.record(hot)
+
+        async def image():
+            return b'png'
+
+        describer.schedule(hot, None)               # 没图可下就不做
+        assert not describer._tasks
+
+        describer.schedule(hot, image)
+        await describer.join()
+        stored = library.get(hot.md5)
+        assert stored.scene == '加班到很晚、只想趴着的时候'
+        assert stored.desc == '摊倒'                 # 微信的标签不被模型覆盖
+        assert saved == [1] and '使用场景' in ai.prompts[0]
+        assert not describer.needs(stored)           # 补过的不再排
+
+        # 没按格式返回 → 不记
+        plain = EmojiLibrary()
+        plain.record(hot)
+        bad = EmojiDescriber(FakeAi('就是一张图'), plain, model='m')
+        bad.schedule(hot, image)
+        await bad.join()
+        assert plain.get(hot.md5).scene == ''
+
+        # 下载抛异常不能把消息链拖死
+        broken = EmojiLibrary()
+        broken.record(hot)
+
+        async def boom():
+            raise RuntimeError('relay 挂了')
+
+        safe = EmojiDescriber(FakeAi(), broken, model='m')
+        safe.schedule(hot, boom)
+        await safe.join()
+        assert broken.get(hot.md5).scene == ''
+
+        # 上限：够数了就不再补
+        capped = EmojiLibrary()
+        for i in range(3):
+            capped.record(Emoji(md5=f'{i:032x}', desc='x', scene='y', cdnurl='u'))
+        guard = EmojiDescriber(FakeAi(), capped, model='m', scene_limit=3)
+        assert capped.scene_count == 3
+        assert not guard.needs(Emoji(md5='z' * 32, count=5))
+
+        await describer.stop()
+
+    asyncio.run(run())
+    print('emoji describer self-check ok')

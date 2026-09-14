@@ -58,6 +58,10 @@ def make_msg(text='hello', is_self=False, msg_type=1):
                                  is_chatroom=True, is_at_me=True)
 
 
+async def _fake_image():
+    return b'png'
+
+
 def make_sticker(md5='a' * 32, cdnurl='http://cdn/x', aeskey='key'):
     """ 一条表情消息的 XML。微信的表情载荷自带下载信息，所以能原样发回去。 """
     return (f'<msg><emoji fromusername="wxid_alice" md5="{md5}" len="348401" '
@@ -211,6 +215,35 @@ class TestEmojiStealing(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(stolen.sendable)          # XML 自带 cdnurl/aeskey
         self.assertEqual(stolen.desc, '摊倒')      # desc 属性就是中文标签
         self.assertEqual(stolen.aeskey, 'key')
+
+    async def test_received_sticker_schedules_scene_enrichment(self):
+        """ 微信给的 desc 只有一个标签，场景要另看真图写。 """
+        from describer import EmojiDescriber
+
+        class FakeAi:
+            async def describe(self, image, max_tokens=64, prompt=''):
+                return '累到不行|加班到很晚、只想趴着的时候'
+
+        # 有热度的才补：先把这张标成本群梗
+        self.bot.emojis.record(Emoji(md5='a' * 32, count=801))
+        self.bot.emoji_describer = EmojiDescriber(FakeAi(), self.bot.emojis, model='m')
+
+        msg = make_msg(msg_type=47)
+        msg.content = msg.clean_text = make_sticker()
+        msg.get_media_bytes = _fake_image
+        await self.bot.on_message(msg)
+        await self.bot.emoji_describer.join()
+
+        stored = self.bot.emojis.get('a' * 32)
+        self.assertEqual(stored.scene, '加班到很晚、只想趴着的时候')
+        self.assertEqual(stored.desc, '摊倒')      # 微信的标签不被模型覆盖
+
+    async def test_no_describer_means_no_scene_work(self):
+        msg = make_msg(msg_type=47)
+        msg.content = msg.clean_text = make_sticker()
+        msg.get_media_bytes = _fake_image
+        await self.bot.on_message(msg)          # 不能抛
+        self.assertEqual(self.bot.emojis.get('a' * 32).scene, '')
 
     async def test_history_only_entry_becomes_sendable_once_seen(self):
         """ 历史挖出来的只有 md5 + 热度，收到一次补上元数据才能发。 """
