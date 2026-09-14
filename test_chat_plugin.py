@@ -561,6 +561,20 @@ class TestToolLoop(unittest.IsolatedAsyncioTestCase):
         reply = await plugin.handle(proactive_ctx())
         self.assertEqual(reply.texts, ['收到'])
 
+    async def test_emoji_cooldown_refuses_a_second_sticker(self):
+        """ 模型看不见自己上次什么时候发的表情，节制只能由程序管。 """
+        turns = [AssistantTurn(tool_calls=(_call('search_emoji', keyword='无语'),)),
+                 AssistantTurn(tool_calls=(_call('send_emoji', index=1),))]
+        plugin = self.plugin(turns, search={'无语': [_emoji()]})
+        self.assertIsNotNone((await plugin.handle(proactive_ctx())).emoji)
+
+        # 马上再来一次：搜得到，但不让发，得改用说话
+        self.ai.turns = [AssistantTurn(tool_calls=(_call('search_emoji', keyword='无语'),)),
+                         AssistantTurn(tool_calls=(_call('send_emoji', index=1),))]
+        second = await plugin.handle(proactive_ctx())
+        self.assertIsNone(second.emoji)
+        self.assertIn('刚发过表情', json.dumps(self.ai.rounds[-1], ensure_ascii=False))
+
     async def test_prompt_switches_between_tool_and_json_mode(self):
         """ 提示词的输出格式必须跟走哪条路一致，不能两个都写。 """
         plugin = self.plugin([])

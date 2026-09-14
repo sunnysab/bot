@@ -7,12 +7,17 @@ from loguru import logger
 
 from context import ChatWindow, ContextManager, MessageContext, MessageKind, SingleRecord
 from describer import MediaDescriber
-from emojis import Emoji
+from emojis import Emoji, EmojiLibrary, parse_emoji_xml
 from media import parse_media, render
 from moments import MomentKeeper
 from outbound import Outbound, OutboundQueue
 from plugin import Plugin, PluginManager, Reply
 from wechat import Message, Wechat
+
+# 本地表情够这么多就不再联网搜——本群用过的比商店里的更像人话
+EMOJI_LOCAL_ENOUGH = 3
+EMOJI_RESULT_LIMIT = 8
+EMOJI_SAVE_INTERVAL = 60.0     # 表情库最长隔这么久落一次盘
 
 T = TypeVar('T')
 
@@ -47,7 +52,8 @@ class Bot:
     def __init__(self, host: str, port: int, unix_path: str = '', dry_run: bool = False,
                  x_delay: float = 0, send_interval: float = 1.0, preprocessors: list[Preprocessor] = None,
                  describer: MediaDescriber | None = None, describe_history_limit: int = 3,
-                 keeper: MomentKeeper | None = None):
+                 keeper: MomentKeeper | None = None, emojis: EmojiLibrary | None = None,
+                 emoji_path: str = ''):
         """ 初始化机器人
 
         @param host: weixin-rs relay 服务器地址
@@ -59,6 +65,8 @@ class Bot:
         @param describer: 媒体描述器，后台把图片/表情含义写回历史；为 None 则不做识图
         @param describe_history_limit: 启动加载历史时，每个会话最多补描述多少条媒体
         @param keeper: 中期记忆：消息滑出上下文窗口时压缩成回想；为 None 则不记
+        @param emojis: 本地表情库：收到的表情顺手存下，以后能原样发回去；为 None 则不偷
+        @param emoji_path: 表情库落盘位置；留空则不落盘（重启就没了）
         """
         async def callback(msg: Message) -> None:
             await self.on_message(msg)
@@ -75,6 +83,10 @@ class Bot:
         # 媒体识图（可选）
         self._describer = describer
         self.describe_history_limit = describe_history_limit
+        # 表情库：群里收到的表情带完整下载信息，存下来就能原样发回去
+        self.emojis = emojis
+        self.emoji_path = emoji_path
+        self._emoji_saved_at = time.time()
 
         assert x_delay >= 0
         self.delay_coefficient = x_delay
@@ -87,8 +99,48 @@ class Bot:
         return self._wechat.wxid
 
     async def search_emoji(self, keyword: str) -> list[Emoji]:
-        """ 搜表情，给决策者的工具用。插件不碰 relay，只认得这个函数。 """
-        return await self._wechat.search_emoji(keyword)
+        """ 搜表情：先翻本群的梗，不够再联网，线上的顺手存进库里当缓存。
+
+        本群用过的表情比商店里的更像人话，所以本地够挑就不联网。
+        """
+        local = self.emojis.search(keyword) if self.emojis else []
+        if len(local) >= EMOJI_LOCAL_ENOUGH:
+            return local
+        try:
+            online = await self._wechat.search_emoji(keyword)
+        except Exception as e:
+            logger.warning(f'搜表情失败（{keyword}）: {e}')
+            return local
+        seen = {item.md5 for item in local}
+        merged = local + [item for item in online if item.md5 not in seen]
+        if self.emojis and online:
+            for item in online:
+                self.emojis.record(item)   # 当缓存，下次同类关键词不用再联网
+            self.save_emojis()
+        return merged[:EMOJI_RESULT_LIMIT]
+
+    def steal_emoji(self, content: str) -> None:
+        """ 群里发的表情顺手存下来。
+
+        微信的表情消息 XML 自带 cdnurl/aeskey，所以存下来就能原样发回去——
+        这就是「偷表情」的全部关键，不用找图，也不用视觉模型。
+        """
+        if not self.emojis:
+            return
+        emoji = parse_emoji_xml(content)
+        if emoji and self.emojis.record(emoji):
+            # 落盘不用每条都做，攒一会儿再写；stop() 里还会再存一次
+            if time.time() - self._emoji_saved_at >= EMOJI_SAVE_INTERVAL:
+                self.save_emojis()
+
+    def save_emojis(self) -> None:
+        if not (self.emojis and self.emoji_path):
+            return
+        try:
+            self.emojis.save(self.emoji_path)
+            self._emoji_saved_at = time.time()
+        except OSError as e:
+            logger.warning(f'表情库落盘失败 {self.emoji_path}: {e}')
 
     async def start(self):
         await self.outbox.start()
@@ -96,6 +148,7 @@ class Bot:
 
     async def stop(self):
         await self._wechat.stop()
+        self.save_emojis()
         await self.outbox.stop()
         if self._describer:
             await self._describer.stop()
@@ -210,6 +263,8 @@ class Bot:
         kind = MessageKind.of(msg.msg_type)
         media = parse_media(msg.content) if kind in (MessageKind.IMAGE, MessageKind.EMOJI) else None
         download = msg.get_media_bytes if (media and media.needs_description) else None
+        if kind is MessageKind.EMOJI:
+            self.steal_emoji(msg.content)
 
         # 自己的名字；消息来源：群消息取群名称，否则取联系人备注
         self_name: str = await self._wechat.get_display_name(self.wxid, msg.reply_target)

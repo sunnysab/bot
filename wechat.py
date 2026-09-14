@@ -110,7 +110,7 @@ class Wechat:
             logger.info(f'[DRY RUN] To {receiver}: 表情「{emoji.desc or emoji.md5}」')
             return
         logger.info(f'To {receiver}: 表情「{emoji.desc or emoji.md5}」')
-        await self._bot.send_emoji(to=receiver, emoji=emoji.to_dict())
+        await self._bot.send_emoji(to=receiver, emoji=emoji.to_relay())
 
     async def get_recent_sessions(self, count: int = 10) -> list[str]:
         """ 获取最近的聊天会话 """

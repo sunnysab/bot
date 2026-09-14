@@ -8,6 +8,7 @@ from ai import Deepseek, OpenAI
 from bot import Bot, PayloadProcessor
 from config import Config
 from describer import MediaCache, MediaDescriber
+from emojis import EmojiLibrary
 from habits import HabitStore
 from moments import MomentKeeper, MomentStore
 from persona import Persona
@@ -46,10 +47,14 @@ def main():
                                    timeout=config.describe_timeout, max_tokens=config.describe_max_tokens)
 
     memory_store = MomentStore(config.moment_path)
+    emojis = EmojiLibrary.load(config.emoji_path)
+    sendable = emojis.sendable_count
+    logger.info(f'已加载 {len(emojis)} 张表情（{sendable} 张能发）: {config.emoji_path}')
     bot = Bot(config.relay_host, config.relay_port, unix_path=config.relay_unix, x_delay=0.5,
               send_interval=config.send_interval, describer=describer,
               describe_history_limit=config.describe_history_limit,
-              keeper=MomentKeeper(ai_provider, memory_store, batch=config.moment_batch))
+              keeper=MomentKeeper(ai_provider, memory_store, batch=config.moment_batch),
+              emojis=emojis, emoji_path=config.emoji_path)
 
     # 初始化预处理器和插件
     bot.add_preprocessor(PayloadProcessor())

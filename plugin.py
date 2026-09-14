@@ -13,7 +13,7 @@ from loguru import logger
 
 from ai import AiProvider
 from context import ChatWindow, MessageContext, SingleRecord
-from emojis import Emoji
+from emojis import Emoji, EmojiPolicy
 from habits import HabitStore
 from moments import MomentStore, extract_keywords
 from necessity import (
@@ -306,7 +306,7 @@ class ChatPlugin(Plugin):
                  tracer: TraceLogger | None = None, enable_planner: bool = True,
                  planner_ai: AiProvider | None = None,
                  emoji_search: EmojiSearch | None = None, enable_tools: bool = True,
-                 planner_rounds: int = 3,
+                 planner_rounds: int = 3, emoji_policy: EmojiPolicy | None = None,
                  timeout: float = 60.0, rng: random.Random | None = None):
         """ 聊天插件
 
@@ -323,6 +323,7 @@ class ChatPlugin(Plugin):
         :param emoji_search: 搜表情的函数；不传就只剩说话，决策者看不到表情工具
         :param enable_tools: 决策者是否用工具调用；关掉就退回单轮 JSON 决策
         :param planner_rounds: 决策循环最多几轮（搜 → 发 两轮就够）
+        :param emoji_policy: 发表情的节制（间隔 + 不重复）；模型看不见自己上次什么时候发的
         :param timeout: 单次模型调用超时（秒）
         :param rng: 抽临时风格用的随机源，测试时可注入
         """
@@ -339,6 +340,7 @@ class ChatPlugin(Plugin):
         self.emoji_search = emoji_search
         self.enable_tools = enable_tools
         self.planner_rounds = planner_rounds
+        self.emoji_policy = emoji_policy or EmojiPolicy()
         self.timeout = timeout
         self.rng = rng
 
@@ -442,8 +444,14 @@ class ChatPlugin(Plugin):
             index = arg_int(arguments, 'index', 0)
             if not 1 <= index <= len(candidates):
                 return ToolResult(f'没有第 {index} 张，只有 1 到 {len(candidates)}。')
-            picked.append(candidates[index - 1])
-            return ToolResult(f'好，这一轮发这张：{picked[-1].desc or "选中的表情"}。', stop=True)
+            chosen = candidates[index - 1]
+            # 刚发过、或者这张刚发过，就别发了——模型不知道这些
+            refusal = self.emoji_policy.refuses(chosen.md5, time.time())
+            if refusal:
+                return ToolResult(refusal)
+            picked.append(chosen)
+            self.emoji_policy.note(chosen.md5, time.time())
+            return ToolResult(f'好，这一轮发这张：{chosen.desc or "选中的表情"}。', stop=True)
 
         async def speak(arguments: dict) -> ToolResult:
             said['intent'] = arg_str(arguments, 'intent')

@@ -11,7 +11,9 @@ relay 的 send_emoji 要完整元数据（md5 + cdnurl + encrypturl + aeskey + l
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, replace
+from pathlib import Path
 from typing import Any
 
 # 同一张表情在群里用过多少次，粗略分档——只在挑「本群的梗」时当排序依据
@@ -37,6 +39,157 @@ def parse_description(text: str) -> tuple[str, str]:
         return cleaned[:20], ''
     emotion, _, scene = cleaned.partition('|')
     return emotion.strip()[:20], scene.strip()[:60]
+
+
+# ---- 从收到的表情消息里偷 ----
+
+LIBRARY_LIMIT = 400      # 库上限，超过就按热度砍尾巴
+SEARCH_LIMIT = 8         # 一次搜索最多给模型看几张
+
+
+def parse_emoji_xml(content: str) -> Emoji | None:
+    """ 把收到的表情消息 XML 解析成可发送的 Emoji。
+
+    这一步是「偷表情」的全部关键：微信的表情消息本身就带 cdnurl/aeskey/len，
+    所以**群里收到的表情当场就能原样发回去**，不用再找图、不用视觉模型。
+    desc 属性是 base64 的 protobuf，解出来就是「摊倒」这类中文标签。
+    """
+    from media import attr, parse_emoji_description, strip_prefix
+
+    if '<emoji' not in content:
+        return None
+    xml = strip_prefix(content)
+    emoji = Emoji(
+        md5=attr(xml, 'md5'),
+        desc=parse_emoji_description(content) or '',
+        length=int(attr(xml, 'len') or 0),
+        cdnurl=attr(xml, 'cdnurl'),
+        encrypturl=attr(xml, 'encrypturl'),
+        aeskey=attr(xml, 'aeskey'),
+        thumburl=attr(xml, 'thumburl'),
+        width=int(attr(xml, 'width') or 0) or 400,
+        height=int(attr(xml, 'height') or 0) or 400)
+    return emoji if emoji.md5 else None
+
+
+class EmojiLibrary:
+    """ 本地表情库：md5 -> 描述 / 场景 / 元数据 / 群里用过多少次。
+
+    两个来源合到一起：
+      - build_emojis.py 从群历史导出里挖的（只有 md5 + 热度，发不出去）
+      - 运行时收到的（带完整 XML，能原样发回去）
+    能不能发只由 sendable 决定，所以历史那批要等真收到一次才变得可用。
+    """
+
+    def __init__(self, entries: dict[str, Emoji] | None = None):
+        self._entries: dict[str, Emoji] = dict(entries or {})
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def __bool__(self) -> bool:
+        """ 永远为真。
+
+        len() 也会参与真值判断，空库会被当成假，于是「没配表情库」和
+        「库还是空的」就分不出来了——偷表情永远不触发。这里必须盖住。
+        """
+        return True
+
+    def __contains__(self, md5: str) -> bool:
+        return md5 in self._entries
+
+    def get(self, md5: str) -> Emoji | None:
+        return self._entries.get(md5)
+
+    @property
+    def sendable_count(self) -> int:
+        """ 现在真能发出去的有几张——剩下的只是在等 relay 收到一次。 """
+        return sum(1 for item in self._entries.values() if item.sendable)
+
+    @classmethod
+    def load(cls, path: str | Path) -> EmojiLibrary:
+        """ 读不到、读坏了都当空库——表情库不是关键路径，不能因此起不来。 """
+        try:
+            raw = json.loads(Path(path).read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return cls()
+        entries = {}
+        for item in raw if isinstance(raw, list) else (raw or {}).values():
+            emoji = Emoji.from_dict(item)
+            if emoji.md5:
+                entries[emoji.md5] = emoji
+        return cls(entries)
+
+    def save(self, path: str | Path) -> None:
+        keep = self._trimmed()
+        Path(path).write_text(
+            json.dumps([item.to_dict() for item in keep], ensure_ascii=False, indent=1),
+            encoding='utf-8')
+
+    def record(self, emoji: Emoji | None) -> bool:
+        """ 记一笔，返回库内容是否变了（变了才值得落盘）。 """
+        if emoji is None or not emoji.md5:
+            return False
+        existing = self._entries.get(emoji.md5)
+        if existing is None:
+            self._entries[emoji.md5] = emoji
+            return True
+        merged = existing.merge(emoji)
+        if merged == existing:
+            return False
+        self._entries[emoji.md5] = merged
+        return True
+
+    def search(self, keyword: str, limit: int = SEARCH_LIMIT) -> list[Emoji]:
+        """ 按描述/场景找能发的表情，热度高的在前。 """
+        keyword = (keyword or '').strip()
+        if not keyword:
+            return []
+        hits = [item for item in self._entries.values()
+                if item.sendable and _mentions(item, keyword)]
+        hits.sort(key=lambda item: item.count, reverse=True)
+        return hits[:limit]
+
+    def _trimmed(self) -> list[Emoji]:
+        """ 能发的优先，其次经常用的——库里只留最有价值的那些。 """
+        items = sorted(self._entries.values(),
+                       key=lambda item: (item.sendable, item.count), reverse=True)
+        return items[:LIBRARY_LIMIT]
+
+
+def _mentions(emoji: Emoji, keyword: str) -> bool:
+    """ 双向包含：搜「无语」能中 desc=「无语」，搜「有点无语」也能中。 """
+    for field in (emoji.desc, emoji.scene):
+        if field and (keyword in field or field in keyword):
+            return True
+    return False
+
+
+class EmojiPolicy:
+    """ 发表情的节制：刚发过就先别发，同一张别短时间重复。
+
+    模型看不到自己上次是什么时候发的表情，这件事只能由程序管。
+    """
+
+    def __init__(self, cooldown: float = 300.0, repeat: float = 1800.0):
+        self.cooldown = cooldown
+        self.repeat = repeat
+        self._last_sent = 0.0
+        self._recent: dict[str, float] = {}
+
+    def refuses(self, md5: str, now: float) -> str:
+        """ 不能发就返回理由（发给模型看），能发返回空串。 """
+        if now - self._last_sent < self.cooldown:
+            return f'刚发过表情（{int(now - self._last_sent)} 秒前），这一轮先别发。'
+        sent_at = self._recent.get(md5)
+        if sent_at is not None and now - sent_at < self.repeat:
+            return '这张最近发过了，换一张或者干脆用文字。'
+        return ''
+
+    def note(self, md5: str, now: float) -> None:
+        self._last_sent = now
+        self._recent = {key: at for key, at in self._recent.items() if now - at < self.repeat}
+        self._recent[md5] = now
 
 
 @dataclass(frozen=True)
@@ -68,14 +221,20 @@ class Emoji:
             return '群里用过'
         return ''
 
-    def to_dict(self) -> dict[str, Any]:
-        """ relay 的 emoji 参数格式（字段名 len 不是 length）。 """
+    def to_relay(self) -> dict[str, Any]:
+        """ relay 的 emoji 参数格式（字段名 len 不是 length）。
+
+        热度和场景只在本地有意义，不发给 relay。
+        """
         data = asdict(self)
         data['len'] = data.pop('length')
-        # 热度和场景都是我们自己的事，不发给 relay
         data.pop('count', None)
         data.pop('scene', None)
         return data
+
+    def to_dict(self) -> dict[str, Any]:
+        """ 落盘用：全字段保留，能从 from_dict 完整读回来。 """
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> Emoji:
@@ -83,7 +242,7 @@ class Emoji:
         return cls(
             md5=str(data.get('md5') or data.get('Md5') or ''),
             desc=str(data.get('desc') or data.get('title') or data.get('word') or ''),
-            length=int(data.get('len') or data.get('size') or 0),
+            length=int(data.get('len') or data.get('length') or data.get('size') or 0),
             cdnurl=str(data.get('cdnurl') or data.get('cdnUrl') or data.get('url') or ''),
             encrypturl=str(data.get('encrypturl') or data.get('encryptUrl') or ''),
             aeskey=str(data.get('aeskey') or data.get('aesKey') or ''),
@@ -132,11 +291,13 @@ def _self_check() -> None:
     })
     assert emoji.sendable and emoji.desc == '高兴' and emoji.heat == '群里常用'
 
-    # 转回 relay 要的形状：字段名是 len，且不带上我们自己加的 count
-    payload = emoji.to_dict()
+    # 转回 relay 要的形状：字段名是 len，且不带上我们自己加的 count/scene
+    payload = emoji.to_relay()
     assert payload['len'] == 348401 and 'length' not in payload and 'count' not in payload
+    assert 'scene' not in payload
     assert payload['md5'].startswith('a56b') and payload['aeskey'].startswith('df54')
-    assert Emoji.from_dict(payload) == replace(emoji, count=0)
+    # 落盘格式要能完整往返
+    assert Emoji.from_dict(emoji.to_dict()) == emoji
 
     # 只有 md5（历史导出的那批）发不出去，只能当热度
     history = Emoji(md5='b' * 32, count=7)
@@ -160,7 +321,7 @@ def _self_check() -> None:
     # 场景是给决策者看的，候选行里要带上
     assert Emoji(md5='x', desc='无语', scene='别人说了很离谱的话').render(3) == \
         '3. 无语｜别人说了很离谱的话'
-    assert 'scene' not in Emoji(md5='x', desc='无语', scene='s').to_dict()
+    assert 'scene' not in Emoji(md5='x', desc='无语', scene='s').to_relay()
 
     # 描述拆解：不按格式来也不能丢
     assert parse_description('无语|别人说了很离谱的话，想吐槽又懒得打字的时候') == \
@@ -172,6 +333,58 @@ def _self_check() -> None:
     # 超长截断，不能让一条破描述把 prompt 撑爆
     assert len(parse_description('x' * 80)[0]) == 20
     assert len(parse_description('a|' + 'y' * 200)[1]) == 60
+
+    # 从群里的表情消息偷：微信的表情 XML 自带 cdnurl/aeskey，当场就能原样发回去
+    stolen = parse_emoji_xml(
+        '<msg><emoji md5="' + 'a' * 32 + '" len="348401" cdnurl="http://cdn/x" '
+        'encrypturl="http://cdn/y" aeskey="key" width="300" height="300" '
+        'desc="ChEKB2RlZmF1bHQSBuaRiuWAkg==" /></msg>')
+    assert stolen is not None and stolen.sendable
+    assert stolen.desc == '摊倒'          # base64 protobuf 解出来就是中文标签
+    assert stolen.length == 348401 and stolen.aeskey == 'key'
+    # 拼在 XML 前的 'wxid_xxx:' 前缀要能剃掉
+    assert parse_emoji_xml('wxid_x:\n<msg><emoji md5="m" cdnurl="u" /></msg>').md5 == 'm'
+    assert parse_emoji_xml('<msg><emoji cdnurl="u" /></msg>') is None   # 没 md5
+    assert parse_emoji_xml('<msg><img md5="m" /></msg>') is None
+    assert parse_emoji_xml('hello') is None
+
+    library = EmojiLibrary()
+    assert len(library) == 0 and library  # 空库仍然是真值，否则分不清「没配」和「空」
+    assert len(library.search('摊倒')) == 0
+    # 历史那批只有 md5 + 热度：进得了库，但发不出去
+    assert library.record(Emoji(md5='h' * 32, count=30)) is True
+    assert library.record(Emoji(md5='h' * 32, count=9)) is False    # 热度取大，没变
+    assert library.record(Emoji(md5='h' * 32, count=99)) is True    # 热度涨了，算变
+    assert library.get('h' * 32).count == 99
+    assert library.search('摊倒') == []              # 发不出去的不给模型挑
+    # 真收到一次就补上了元数据，随之变得可搜可发
+    library.record(stolen)
+    assert library.get('h' * 32).sendable is False
+    library.record(Emoji(md5=stolen.md5, desc='摊倒', scene='累到瘫在椅子上时发', cdnurl='http://cdn/x'))
+    assert len(library.search('摊倒')) == 1
+    assert len(library.search('累到瘫')) == 1        # 场景也能搜中
+    assert library.search('') == [] and library.search('无关词') == []
+    assert len(library.search('摊倒', limit=0)) == 0
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / 'emojis.json'
+        library.save(path)
+        reloaded = EmojiLibrary.load(path)
+        assert len(reloaded) == 2 and reloaded.get(stolen.md5).sendable
+        assert reloaded.get(stolen.md5).scene == '累到瘫在椅子上时发'
+        assert reloaded.get(stolen.md5).desc == '摊倒'
+    assert EmojiLibrary.load('/no/such/file.json').get('x') is None
+
+    # 节制：刚发过不让发，同一张短期不重复
+    policy = EmojiPolicy(cooldown=300, repeat=1800)
+    assert policy.refuses('a', 1000.0) == ''
+    policy.note('a', 1000.0)
+    assert '刚发过表情' in policy.refuses('b', 1100.0)
+    assert policy.refuses('b', 1400.0) == ''        # 过了冷却
+    assert '最近发过' in policy.refuses('a', 1400.0)
+    assert policy.refuses('b', 3000.0) == ''        # 过了重复期
 
     print('emojis self-check ok')
 

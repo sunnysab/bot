@@ -34,6 +34,7 @@ class Config:
     habit_path: str = 'memory/habits.json'
     # 中期记忆：滑出上下文窗口的消息压成回想，存这个 sqlite
     moment_path: str = 'memory/moments.db'
+    emoji_path: str = 'memory/emojis.json'
     moment_batch: int = 20
     # 人格：身份 / 表达风格 / 行动准则（分别喂给 expressor 和 planner）
     personality: str = Persona.personality
@@ -85,6 +86,7 @@ class Config:
             profile_path=os.getenv('PROFILE_PATH', cls.profile_path),
             habit_path=os.getenv('HABIT_PATH', cls.habit_path),
             moment_path=os.getenv('MOMENT_PATH', cls.moment_path),
+            emoji_path=os.getenv('EMOJI_PATH', cls.emoji_path),
             moment_batch=int(os.getenv('MOMENT_BATCH', str(cls.moment_batch))),
             personality=os.getenv('PERSONALITY', cls.personality),
             reply_style=os.getenv('REPLY_STYLE', cls.reply_style),
