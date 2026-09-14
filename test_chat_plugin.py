@@ -160,7 +160,9 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         persona = Persona(alternates=('用1-2个字回复',), alternate_probability=1.0)
         plugin = ChatPlugin(self.ai, context_length=10, persona=persona, rng=random.Random(0))
         await plugin.handle(make_ctx(make_msg(is_chatroom=False)))
-        self.assertIn('用1-2个字回复', self.ai.reply_calls[0][0])
+        # 临时风格是「这一轮」的事，放请求里，不进 system prompt
+        self.assertIn('【临时风格】用1-2个字回复', self.ai.reply_calls[0][1])
+        self.assertNotIn('用1-2个字回复', self.ai.reply_calls[0][0])
 
     async def test_personality_and_style_come_from_config(self):
         persona = Persona(personality='是一只猫', reply_style='只会喵')
@@ -181,22 +183,22 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         expected = 'data:image/jpeg;base64,' + base64.b64encode(image).decode()
         self.assertEqual(content[1]['image_url']['url'], expected)
 
-    async def test_profiles_are_injected_into_prompt(self):
+    async def test_profiles_are_injected_into_request(self):
         store = ProfileStore(people={'wxid_x': Profile('wxid_x', names=('Alice',), phrases=('蛙趣',))})
         self.plugin.profiles = store
         await self.plugin.handle(self.proactive())
-        self.assertIn('群里这些人你大致认识', self.ai.planner_calls[0][0])
-        self.assertIn('口头禅：蛙趣', self.ai.planner_calls[0][0])
+        self.assertIn('【群友画像】', self.ai.planner_calls[0][1])
+        self.assertIn('口头禅：蛙趣', self.ai.planner_calls[0][1])
 
     async def test_habits_injected_only_on_hit(self):
         self.plugin.habits = HabitStore(habits=(Habit('蛙趣', 126, ('蛙趣 你的ID和小红书一样的吧',)),))
 
         await self.plugin.handle(self.proactive('蛙趣，真的假的'))
-        self.assertIn('你的ID和小红书', self.ai.planner_calls[0][0])
-        self.assertIn('你的ID和小红书', self.ai.reply_calls[0][0])   # 表达者也要知道群里怎么说
+        self.assertIn('你的ID和小红书', self.ai.planner_calls[0][1])
+        self.assertIn('你的ID和小红书', self.ai.reply_calls[0][1])   # 表达者也要知道群里怎么说
 
         await self.plugin.handle(self.proactive('平平无奇的一句话'))
-        self.assertNotIn('黑话', self.ai.planner_calls[1][0])
+        self.assertNotIn('群里的说法', self.ai.planner_calls[1][1])
 
     async def test_memories_injected_on_keyword_hit(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -205,12 +207,30 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
             self.plugin.memories = store
 
             await self.plugin.handle(self.proactive('明天上班好烦'))
-            self.assertIn('你想起的旧事', self.ai.planner_calls[0][0])
-            self.assertIn('要不要上班请假', self.ai.planner_calls[0][0])
+            self.assertIn('【记忆', self.ai.planner_calls[0][1])
+            self.assertIn('要不要上班请假', self.ai.planner_calls[0][1])
 
             await self.plugin.handle(self.proactive('吃了没'))
-            self.assertNotIn('你想起的旧事', self.ai.planner_calls[1][0])
+            self.assertNotIn('【记忆', self.ai.planner_calls[1][1])
             store.close()
+
+    async def test_system_prompt_is_stable_across_turns(self):
+        """ 会变的东西（画像/群用语/临时风格）不能进 system prompt。
+
+        实测：这样并不提高 KV 缓存命中（前缀匹配本来就能命中静态前缀，128 对 128）。
+        但 system 只装人设和规则、请求只装本轮数据，职责更清楚，也不会因为
+        某个供应商改成「整段 system 才缓存」就失效。
+        """
+        self.plugin.profiles = ProfileStore(people={'wxid_x': Profile('wxid_x', names=('Alice',), phrases=('蛙趣',))})
+        self.plugin.habits = HabitStore(habits=(Habit('蛙趣', 126, ('蛙趣 你的ID和小红书一样的吧',)),))
+
+        await self.plugin.handle(self.proactive('蛙趣，真的假的'))
+        await self.plugin.handle(self.proactive('平平无奇的一句话'))
+
+        self.assertEqual(self.ai.planner_calls[0][0], self.ai.planner_calls[1][0])
+        self.assertEqual(self.ai.reply_calls[0][0], self.ai.reply_calls[1][0])
+        self.assertNotIn('你的ID和小红书', self.ai.planner_calls[0][0])
+        self.assertNotIn('口头禅', self.ai.reply_calls[0][0])
 
     async def test_model_failure_does_not_break_the_round(self):
         """ 一次 API 抽风不能把消息处理链拖死。 """

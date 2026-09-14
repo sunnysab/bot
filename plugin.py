@@ -276,8 +276,7 @@ class ChatPlugin(Plugin):
     def _context_blocks(self, ctx: MessageContext, history: ChatWindow) -> dict[str, str]:
         """ 画像 / 群用语 / 中期记忆，三者都是「能捞到才注入」。 """
         msg = ctx.msg
-        block = {'self_name': ctx.self_name, 'contact': ctx.contact, 'is_group': msg.is_chatroom,
-                 'profiles': '', 'habits': '', 'memories': ''}
+        block = {'profiles': '', 'habits': '', 'memories': ''}
         if self.profiles:
             block['profiles'] = self.profiles.render_for(record.sender for record in reversed(history))
         if self.habits:
@@ -287,11 +286,33 @@ class ChatPlugin(Plugin):
             block['memories'] = '\n'.join(moment.render() for moment in recalled)
         return block
 
+    @staticmethod
+    def _compose(ctx: MessageContext, blocks: dict[str, str], transcript: str,
+                 plan: str = '', alternate: str = '') -> str:
+        """ 拼请求正文。
+
+        所有会变的东西（本轮消息 / 决策 / 临时风格 / 画像 / 群用语 / 记忆）都放这里，
+        不放 system prompt——system 恒定才能吃到 KV 前缀缓存。
+        """
+        lines = [f'【本轮】{ctx.msg.sender_name}: {ctx.msg.content}']
+        if plan:
+            lines.append(f'【决策】\n{plan}')
+        if alternate:
+            lines.append(f'【临时风格】{alternate}')
+        for label, key in (('群友画像', 'profiles'), ('群里的说法', 'habits'), ('记忆（可能记错，别当准）', 'memories')):
+            if blocks.get(key):
+                lines.append(f'【{label}】\n{blocks[key]}')
+        lines.append(transcript)
+        return '\n\n'.join(lines)
+
     async def _plan(self, ctx: MessageContext, necessity: NecessityScore, blocks: dict[str, str],
                     transcript: str) -> Plan | None:
         """ 请决策者判断要不要主动插话；返回 None 表示这次没拿到决策（调用失败），不代表不开口。 """
-        prompt = await self.planner_template.render_async(behavior_style=self.persona.behavior_style, **blocks)
-        raw = await self._ask(prompt, transcript, ctx, image=ctx.is_image, ai=self.planner_ai)
+        prompt = await self.planner_template.render_async(behavior_style=self.persona.behavior_style,
+                                                          self_name=ctx.self_name, contact=ctx.contact,
+                                                          is_group=ctx.msg.is_chatroom)
+        raw = await self._ask(prompt, self._compose(ctx, blocks, transcript), ctx, image=ctx.is_image,
+                              ai=self.planner_ai)
         if not raw:
             return None
         # ai.chat 返回的是按行切好的列表，决策是一整块 JSON，拼回去再解析
@@ -302,11 +323,10 @@ class ChatPlugin(Plugin):
         """ 跑表达者。先把「本轮要回哪条」摆明，再给决策；没决策也不会跑偏到旧话题。 """
         prompt = await self.replyer_template.render_async(
             identity=self.persona.identity(ctx.self_name), reply_style=self.persona.reply_style,
-            alternate_style=self.persona.maybe_alternate(self.rng), **blocks)
-        head = [f'【本轮】{ctx.msg.sender_name}: {ctx.msg.content}']
-        if plan:
-            head.append(f'【决策】\n{plan}')
-        return await self._ask(prompt, '\n'.join(head) + '\n\n' + transcript, ctx, image=ctx.is_image)
+            self_name=ctx.self_name, contact=ctx.contact, is_group=ctx.msg.is_chatroom)
+        message = self._compose(ctx, blocks, transcript, plan=plan,
+                                alternate=self.persona.maybe_alternate(self.rng))
+        return await self._ask(prompt, message, ctx, image=ctx.is_image)
 
     async def _ask(self, prompt: str, message: str, ctx: MessageContext, image: bool = False,
                    ai: AiProvider | None = None) -> list[str] | None:
