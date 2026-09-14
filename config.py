@@ -14,4 +14,6 @@ CONFIG = {
     'relay-port': int(os.getenv('RELAY_PORT', __RELAY_PORT)),
     # 走 Unix domain socket 时填写（如 /tmp/weixin-relay.sock），否则留空走 TCP
     'relay-unix': os.getenv('RELAY_UNIX', ''),
+    # 全局最小发送间隔（秒），规避微信风控
+    'send-interval': float(os.getenv('SEND_INTERVAL', '1.0')),
 }

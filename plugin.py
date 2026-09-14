@@ -1,22 +1,32 @@
 import base64
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import override
 
 from loguru import logger
 
 from ai import AiProvider
-from context import ChatWindow, SingleRecord
+from context import ChatWindow, MessageContext, SingleRecord
 from wechat import Message
+
+
+@dataclass(slots=True)
+class Reply:
+    """ 插件对一条消息的决策。
+
+    :param texts: 要发送的文本，可以为空
+    :param stop: 是否终止后续插件的处理
+    """
+
+    texts: list[str] = field(default_factory=list)
+    stop: bool = False
 
 
 class Plugin(ABC):
     @abstractmethod
-    async def handle(self, msg: Message, **kwargs) -> tuple[list[str] | None, bool]:
-        """ 处理消息
-
-        :param msg: 消息对象
-        :return: 回复内容和一个布尔值。 如果阻止后续插件处理，则返回 False
-        """
+    async def handle(self, ctx: MessageContext) -> Reply | None:
+        """ 处理消息。返回 None 表示不回复且继续后续插件。 """
         pass
 
 
@@ -40,26 +50,17 @@ class PluginManager:
         logger.info(f'Mapped plugin {plugin.__class__.__name__} to contact {contact}')
 
     def get_plugins_for_contact(self, contact: str) -> list[Plugin]:
-        """Get plugins for a specific contact"""
+        """ 注意语义：只要为某个 contact 映射过插件，就完全覆盖默认插件链（例如用它静音某个群）。 """
         return self._contact_mappings.get(contact, self._defaults)
 
 
 class EndProcessing(Plugin):
-    @override
-    async def handle(self, msg: Message, **kwargs):
-        return None, False
+    """ 终止处理、不回复。用于给指定会话静音。 """
 
-class MessageTypeFilter(Plugin):
     @override
-    async def handle(self, msg: Message, **kwargs):
-        if msg.msg_type != 1 and msg.msg_type != 3 and msg.msg_type != 47:
-            return None, False
+    async def handle(self, ctx: MessageContext) -> Reply | None:
+        return Reply(stop=True)
 
-class ImagePlugin(Plugin):
-    @override
-    async def handle(self, msg: Message, **kwargs):
-        if msg.msg_type != 3:
-            return None, True
 
 class RepeatPlugin(Plugin):
     def __init__(self, repeat_count: int = 2, context_length: int = 10, max_length: int = 20):
@@ -81,46 +82,41 @@ class RepeatPlugin(Plugin):
         self.last_repeat = {}
 
     @override
-    async def handle(self, msg: Message, **kwargs):
+    async def handle(self, ctx: MessageContext) -> Reply | None:
         """ 跟队形回复。 如果去掉中文英文标点及表情后的消息连续重复特定数量，则凑个热闹跟着回复一句。 """
+        msg = ctx.msg
         if msg.msg_type != 1:  # 只处理文本消息
-            return None, True
+            return None
 
-        history: ChatWindow = kwargs['history']
-        if history.empty():
-            window = await kwargs['wechat'].fetch_history(msg.reply_target)
-            history.extend(window)
-
-        history: ChatWindow = history.latest_n(self.context_length)
+        history: ChatWindow = ctx.history.latest_n(self.context_length)
         if len(history) < self.repeat_count:
-            return None, True
+            return None
 
         # 对历史消息去除昵称、标点等操作
-        myself = kwargs['self_name']
+        myself = ctx.self_name
         # 队形跟过了就不要再跟了
-        blocked_set = set(map(lambda x: x.pure_text(), filter(lambda x: x.sender == myself, history)))
+        blocked_set = {x.pure_text() for x in history if x.sender == myself}
         clear_context: list[str] = [x.pure_text() for x in history if x.pure_text() and x.pure_text() not in blocked_set]
-        count_dict = dict()
+        count_dict: dict[str, list[int]] = {}
         for pos, text in enumerate(clear_context):
-            if text not in count_dict:
-                count_dict[text] = [pos]
-            else:
-                count_dict[text].append(pos)
+            count_dict.setdefault(text, []).append(pos)
 
         # 找到最多的重复元素及次数, 其实就是找 count_dict 中 value 最长的.
+        if not count_dict:
+            return None
         max_repeat = max(count_dict.values(), key=len)
         if len(max_repeat) < self.repeat_count:
-            return None, True
+            return None
 
         # 找一条别人说过的队形，跟上
         record: SingleRecord = history[max_repeat[-1]]
         text: str = record.text
         # 太长不跟
         if len(text) > self.max_length:
-            return None, True
+            return None
 
         self.last_repeat[msg.reply_target] = text
-        return [text], False
+        return Reply(texts=[text], stop=True)
 
 
 class ChatPlugin(Plugin):
@@ -134,38 +130,31 @@ class ChatPlugin(Plugin):
         self.context_length = context_length
 
         from jinja2 import Template
-        with open('prompt.txt', encoding='utf-8') as f:
-            template_file = f.read()
+        template_file = (Path(__file__).parent / 'prompt.txt').read_text(encoding='utf-8')
         self.prompt_template = Template(template_file, enable_async=True)
 
     @override
-    async def handle(self, msg: Message, **kwargs):
+    async def handle(self, ctx: MessageContext) -> Reply | None:
+        msg = ctx.msg
         if msg.msg_type not in (1, 3):  # 只处理文本和图片消息
-            return None, True
+            return None
 
         # 群聊只在被 @ 时回复；私聊始终回复
         if msg.is_chatroom and not msg.is_at_me:
-            return None, True
+            return None
 
-        history: ChatWindow = kwargs['history']
-        if history.empty():
-            window = await kwargs['wechat'].fetch_history(msg.reply_target)
-            history.extend(window)
-
-        history: ChatWindow = history.latest_n(self.context_length)
-        prompt = await self.prompt_template.render_async(self_name=kwargs['self_name'], contact=kwargs['contact'],
-                                             is_group=msg.is_chatroom)
+        history: ChatWindow = ctx.history.latest_n(self.context_length)
+        prompt = await self.prompt_template.render_async(self_name=ctx.self_name, contact=ctx.contact,
+                                                         is_group=msg.is_chatroom)
 
         text = '回复你扮演的角色所要说的话。以下聊天记录供你参考：\n\n' + str(history)
         response = await self.ai.chat(prompt.strip(), await self._build_message(msg, text))
         if not response:
-            return None, False
+            return Reply(stop=True)
 
         # 有时候模型返回数据中会带有 "昵称: " 的前缀，这里需要去掉
-        prefix = kwargs['self_name'] + ':'
-        response = [x.lstrip(prefix) for x in response]
-
-        return response, response is not None
+        prefix = ctx.self_name + ':'
+        return Reply(texts=[x.lstrip(prefix) for x in response])
 
     @staticmethod
     async def _build_message(msg: Message, transcript: str) -> str | list:

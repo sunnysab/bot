@@ -1,11 +1,11 @@
-""" ChatPlugin 自检：群聊 @ 门禁、私聊直通、图片作为 content block 直传。 """
+""" 插件自检：群聊 @ 门禁、私聊直通、图片直传，以及复读机不跟媒体占位标记。 """
 
 import base64
 import types
 import unittest
 
-from context import ChatWindow
-from plugin import ChatPlugin
+from context import ChatWindow, MessageContext
+from plugin import ChatPlugin, RepeatPlugin
 
 
 class FakeAi:
@@ -34,42 +34,58 @@ def sample_history():
     return window
 
 
+def make_ctx(msg, history=None):
+    return MessageContext(msg=msg, history=history or sample_history(), self_name='Bot', contact='测试群')
+
+
 class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.ai = FakeAi()
         self.plugin = ChatPlugin(self.ai, context_length=10)
-        self.kwargs = dict(wechat=None, self_name='Bot', contact='测试群')
 
     async def test_group_without_mention_is_silent(self):
-        reply, cont = await self.plugin.handle(make_msg(is_chatroom=True, is_at_me=False),
-                                               history=sample_history(), **self.kwargs)
+        reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=True, is_at_me=False)))
         self.assertIsNone(reply)
-        self.assertTrue(cont)
         self.assertEqual(self.ai.calls, [])
 
     async def test_group_with_mention_replies(self):
-        reply, _ = await self.plugin.handle(make_msg(is_chatroom=True, is_at_me=True),
-                                            history=sample_history(), **self.kwargs)
-        self.assertEqual(reply, ['收到'])
+        reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=True, is_at_me=True)))
+        self.assertEqual(reply.texts, ['收到'])
         self.assertEqual(len(self.ai.calls), 1)
         self.assertIsInstance(self.ai.calls[0][1], str)
 
     async def test_private_replies_without_mention(self):
-        reply, _ = await self.plugin.handle(make_msg(is_chatroom=False),
-                                            history=sample_history(), **self.kwargs)
-        self.assertEqual(reply, ['收到'])
+        reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
+        self.assertEqual(reply.texts, ['收到'])
 
     async def test_image_is_sent_as_content_block(self):
         image = b'\xff\xd8fake-jpeg'
-        reply, _ = await self.plugin.handle(make_msg(msg_type=3, is_chatroom=False, media=image),
-                                            history=sample_history(), **self.kwargs)
-        self.assertEqual(reply, ['收到'])
+        reply = await self.plugin.handle(make_ctx(make_msg(msg_type=3, is_chatroom=False, media=image)))
+        self.assertEqual(reply.texts, ['收到'])
         content = self.ai.calls[0][1]
         self.assertIsInstance(content, list)
         self.assertEqual(content[0]['type'], 'text')
         self.assertEqual(content[1]['type'], 'image_url')
         expected = 'data:image/jpeg;base64,' + base64.b64encode(image).decode()
         self.assertEqual(content[1]['image_url']['url'], expected)
+
+
+class TestRepeatPlugin(unittest.IsolatedAsyncioTestCase):
+    async def test_media_markers_are_not_repeated(self):
+        window = ChatWindow()
+        window.append('Alice', '[表情]', 1)
+        window.append('Bob', '[表情]', 2)
+        window.append('Alice', '在吗', 3)
+        reply = await RepeatPlugin().handle(make_ctx(make_msg(), history=window))
+        self.assertIsNone(reply)
+
+    async def test_repeats_and_stops(self):
+        window = ChatWindow()
+        window.append('Alice', '牛啊', 1)
+        window.append('Bob', '牛啊', 2)
+        reply = await RepeatPlugin().handle(make_ctx(make_msg(), history=window))
+        self.assertEqual(reply.texts, ['牛啊'])
+        self.assertTrue(reply.stop)
 
 
 if __name__ == '__main__':
