@@ -5,10 +5,10 @@ import random
 import types
 import unittest
 
-from bot import EMOJI_LOCAL_ENOUGH, Bot, PayloadProcessor
+from bot import EMOJI_LOCAL_ENOUGH, Bot
 from context import ChatWindow
 from emojis import Emoji, EmojiLibrary
-from media import Media
+from media import Media, render
 from plugin import EndProcessing, Plugin, Reply
 
 
@@ -180,39 +180,31 @@ class TestHistoryMediaScheduling(unittest.IsolatedAsyncioTestCase):
         self.bot._schedule_history_media(window)  # 不报错即可
 
 
-class TestPayloadProcessor(unittest.IsolatedAsyncioTestCase):
-    async def test_image_becomes_marker(self):
-        msg = make_msg(msg_type=3)
-        msg.content = msg.clean_text = '<?xml version="1.0"?><msg><img md5="abc" /></msg>'
-        out = await PayloadProcessor().process(msg)
-        self.assertEqual(out.content, '[图片]')
+class TestPayloadRender(unittest.TestCase):
+    """ render() 把非文本正文换成可读占位；媒体消息额外带回 Media。 """
 
-    async def test_emoji_keeps_description(self):
-        msg = make_msg(msg_type=47)
-        msg.content = msg.clean_text = '<msg><emoji desc="ChEKB2RlZmF1bHQSBuWVp+WVpw==" /></msg>'
-        out = await PayloadProcessor().process(msg)
-        self.assertEqual(out.content, '[表情：啧啧]')
+    def test_image_becomes_marker(self):
+        text, media = render(3, '<?xml version="1.0"?><msg><img md5="abc" /></msg>', '')
+        self.assertEqual(text, '[图片]')
+        self.assertEqual(media, Media('image', 'abc'))
 
-    async def test_emoji_without_description_falls_back(self):
-        msg = make_msg(msg_type=47)
-        msg.content = msg.clean_text = '<msg><emoji desc="" /></msg>'
-        out = await PayloadProcessor().process(msg)
-        self.assertEqual(out.content, '[表情]')
+    def test_emoji_keeps_description(self):
+        text, _ = render(47, '<msg><emoji desc="ChEKB2RlZmF1bHQSBuWVp+WVpw==" /></msg>', '')
+        self.assertEqual(text, '[表情：啧啧]')
 
-    async def test_link_does_not_leak_xml(self):
-        msg = make_msg(msg_type=49)
-        msg.content = msg.clean_text = ('<msg><appmsg><title>一篇文章</title><type>5</type>'
-                                        '<appname>某公众号</appname></appmsg></msg>')
-        out = await PayloadProcessor().process(msg)
-        self.assertEqual(out.content, '[某公众号] 一篇文章')
+    def test_emoji_without_description_falls_back(self):
+        text, _ = render(47, '<msg><emoji desc="" /></msg>', '')
+        self.assertEqual(text, '[表情]')
 
-    async def test_location_and_video(self):
-        msg = make_msg(msg_type=48)
-        msg.content = msg.clean_text = '<msg><location label="海淀区京新高速" /></msg>'
-        self.assertEqual((await PayloadProcessor().process(msg)).content, '[位置：海淀区京新高速]')
-        video = make_msg(msg_type=43)
-        video.content = video.clean_text = '<msg><videomsg /></msg>'
-        self.assertEqual((await PayloadProcessor().process(video)).content, '[视频]')
+    def test_link_does_not_leak_xml(self):
+        text, _ = render(49, '<msg><appmsg><title>一篇文章</title><type>5</type>'
+                             '<appname>某公众号</appname></appmsg></msg>', '')
+        self.assertEqual(text, '[某公众号] 一篇文章')
+
+    def test_location_and_video(self):
+        self.assertEqual(render(48, '<msg><location label="海淀区京新高速" /></msg>', '')[0],
+                         '[位置：海淀区京新高速]')
+        self.assertEqual(render(43, '<msg><videomsg /></msg>', '')[0], '[视频]')
 
 
 class TestEmojiStealing(unittest.IsolatedAsyncioTestCase):

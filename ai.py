@@ -157,23 +157,3 @@ class Deepseek(OpenAI):
     def __init__(self, key: str, model: str = 'deepseek-flash', url: str = 'https://api.deepseek.com', **kwargs):
         super().__init__(url=url, key=key, model=model, **kwargs)
 
-
-class Doubao(OpenAI):
-    """ Doubao """
-
-    def __init__(self, key: str, model: str = 'doubao-chat', **kwargs):
-        super().__init__(url='https://ark.cn-beijing.volces.com/api/v3', key=key, model=model, **kwargs)
-
-
-async def main():
-    ds = Deepseek(key='your-key')
-    image = base64.b64encode(open('image/dog.jpg', 'rb').read()).decode()
-    response = await ds.chat('描述这张图片', [
-        {'type': 'text', 'text': '描述这张图片'},
-        {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image}'}},
-    ])
-    print('dog: ', response)
-
-if __name__ == '__main__':
-    import asyncio
-    asyncio.run(main())

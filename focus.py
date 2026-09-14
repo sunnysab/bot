@@ -88,11 +88,6 @@ class FocusMode:
             self._blocked_until[contact] = now + self.cooldown
         logger.info(f'退出专注模式：{contact}（{reason}）')
 
-    def active(self, contact: str, now: float) -> bool:
-        """ 只读判断，不推进状态；给日志和测试用。 """
-        session = self.sessions.get(contact)
-        return session is not None and not session.expired(now, self.idle, self.maximum)
-
     def describe(self, contact: str) -> str:
         """ 注入 prompt 的一句话：现在在专注，可以比平时主动。 """
         session = self.sessions.get(contact)
@@ -109,17 +104,17 @@ def _self_check() -> None:
 
     # 不够热不进去
     assert focus.tick('g', now, activity=2) is False
-    assert not focus.active('g', now)
+    assert 'g' not in focus.sessions
 
     # 够热就进，进去之后哪怕只有一条消息也算专注
     assert focus.tick('g', now, activity=3) is True
-    assert focus.active('g', now) and focus.sessions['g'].reason == '活跃度 3 条'
+    assert focus.sessions['g'].reason == '活跃度 3 条'
     assert focus.tick('g', now + 10, activity=0) is True
     assert focus.sessions['g'].rounds == 2
 
     # 闲太久自己出来，而且有冷却期不能立刻再进
     assert focus.tick('g', now + 10 + 100, activity=0) is False   # 1110 退出，冷却到 1160
-    assert not focus.active('g', now + 200)
+    assert 'g' not in focus.sessions
     assert focus.tick('g', now + 130, activity=99) is False        # 1130，还在冷却
     assert focus.tick('g', now + 170, activity=99) is True         # 1170，冷却过了
 
@@ -128,7 +123,7 @@ def _self_check() -> None:
     assert capped.tick('g', 0.0, activity=1) is True
     assert capped.tick('g', 59.0, activity=1) is True
     assert capped.tick('g', 60.0, activity=1) is False
-    assert not capped.active('g', 60.0)
+    assert 'g' not in capped.sessions
 
     # 关掉就永远不进
     off = FocusMode(enabled=False, enter_activity=1, cooldown=0.0)
@@ -137,7 +132,7 @@ def _self_check() -> None:
     # 手动进入 / 手动退出不进冷却
     manual = FocusMode(enter_activity=99, cooldown=50.0)
     manual.enter('g', 0.0)
-    assert manual.active('g', 1.0) and '专注' in manual.describe('g')
+    assert 'g' in manual.sessions and '专注' in manual.describe('g')
     manual.exit('g', 1.0, '手动', cooldown=False)
     assert manual.tick('g', 2.0, activity=99) is True   # 手动退出没有冷却
 

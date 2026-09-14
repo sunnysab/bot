@@ -53,7 +53,6 @@ class TestFocusGate(unittest.TestCase):
         result = policy.evaluate(make_ctx(3), now=time.time())
         self.assertIsNotNone(result)
         self.assertTrue(result.focused)
-        self.assertIn('专注', result.detail)
 
     def test_focus_bypasses_idle_backoff(self):
         now = time.time()

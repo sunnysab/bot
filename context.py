@@ -127,15 +127,8 @@ class ChatWindow:
 
     def extend(self, other: ChatWindow):
         """ 扩展历史记录 """
-        if len(self._history) + len(other._history) > self.max_history:
-            self._history = self._history[-(self.max_history - len(other._history)):]
-        else:
-            self._history.extend(other._history)
+        self._history = (self._history + other._history)[-self.max_history:]
         self.sort()
-
-    def empty(self):
-        """ 是否为空 """
-        return not self._history
 
     def latest_n(self, n: int) -> ChatWindow:
         """ 返回最近 n 条的副本，避免插件直接改到真实历史。 """

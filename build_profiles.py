@@ -19,13 +19,14 @@ from collections.abc import Collection, Iterable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
+from profiles import normalize_name
+
 TEXT_TYPES = (0, 25)          # 普通文字 / 引用文字
 STICKER_TYPE = 5              # 动画表情
 PLACEHOLDER = re.compile(r'^\[[^\]]{0,16}\][^\[\]]*$')
 BRACKET = re.compile(r'\[[^\]]{1,16}\]')
 MENTION = re.compile(r'@([^\s@\u2005]{1,24})[\u2005\s]')
 CLAUSE_SPLIT = re.compile(r'[，。！？!?~～…、,;；:：\s"\'“”‘’()（）\[\]【】]+')
-SUFFIX = re.compile(r'[（(\[【][^）)\]】]{0,20}[）)\]】]\s*$')
 
 MIN_TEXT_COUNT = 30           # 少于这么多条文字消息的人不进画像
 MIN_PHRASE_COUNT = 5
@@ -56,17 +57,6 @@ TOPIC_KEYWORDS: dict[str, tuple[str, ...]] = {
 PHRASE_STOPLIST = frozenset((
     '什么', '这个', '那个', '怎么', '不是', '没有', '可以', '一个', '自己', '就是',
     '这样', '这里', '时候', '东西', '问题', '还是', '因为', '所以', '但是', '然后'))
-
-
-def normalize_name(name: str) -> str:
-    """ 去掉群昵称尾部的括注和空格，得到匹配用的基名。 """
-    cleaned = (name or '').strip()
-    while cleaned:
-        stripped = SUFFIX.sub('', cleaned).strip()
-        if stripped == cleaned:
-            break
-        cleaned = stripped
-    return cleaned
 
 
 def iter_records(path: str | Path) -> Iterator[dict]:

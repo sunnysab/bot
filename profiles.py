@@ -32,8 +32,6 @@ class Profile:
 
     wxid: str
     names: tuple[str, ...] = ()
-    message_count: int = 0
-    text_count: int = 0
     sticker_ratio: float = 0.0
     avg_len: float = 0.0
     short_ratio: float = 0.0
@@ -95,8 +93,6 @@ class ProfileStore:
             people[wxid] = Profile(
                 wxid=wxid,
                 names=tuple(raw.get('names') or [wxid]),
-                message_count=raw.get('message_count', 0),
-                text_count=raw.get('text_count', 0),
                 sticker_ratio=raw.get('sticker_ratio', 0.0),
                 avg_len=raw.get('avg_len', 0.0),
                 short_ratio=raw.get('short_ratio', 0.0),

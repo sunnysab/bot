@@ -63,12 +63,6 @@ class NecessityScore:
     reasons: tuple[str, ...] = ()
     focused: bool = False      # 专注模式里的一轮：门控和沉默退避都不拦
 
-    @property
-    def detail(self) -> str:
-        suffix = f'（{"，".join(self.reasons)}）' if self.reasons else ''
-        focus = '专注 ' if self.focused else ''
-        return f'{focus}{self.kind} {self.score}分{suffix}'
-
 
 def score_necessity(inp: NecessityInput) -> NecessityScore:
     """ 打分。调用方自己跟阈值比较。 """
@@ -203,11 +197,6 @@ class IdleBackoff:
             steps = state.silences - self.start_after
             state.until = now + min(self.base * (2 ** steps), self.maximum)
 
-    def wait_left(self, contact: str, now: float) -> float:
-        """ 还要等多久；只用于日志和测试。 """
-        state = self._states.get(contact)
-        return max(0.0, state.until - now) if state else 0.0
-
 
 def _self_check() -> None:
     def score(text, **kwargs) -> NecessityScore:
@@ -251,7 +240,7 @@ def _self_check() -> None:
     feed(history, [2.0])
     backoff.record('g', spoke=False, now=2.0, history=history)
     assert not backoff.allows('g', 3.0, history)      # 连着两轮没开口，开始歇
-    assert backoff.wait_left('g', 3.0) == 14.0        # 第一档 15s
+    assert backoff._states['g'].until == 17.0         # 第一档 15s
 
     # 冷却到期就放行
     assert backoff.allows('g', 17.0, history)
@@ -259,7 +248,7 @@ def _self_check() -> None:
     # 再沉默一轮，冷却变成 30s（直到 48.0）
     feed(history, [18.0])
     backoff.record('g', spoke=False, now=18.0, history=history)
-    assert backoff.wait_left('g', 18.0) == 30.0
+    assert backoff._states['g'].until == 48.0
 
     # 冷却中，但群里又刷够 6 条就立刻放行
     feed(history, [19.0 + i for i in range(IDLE_BYPASS_MESSAGES - 1)])

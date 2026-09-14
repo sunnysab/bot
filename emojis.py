@@ -94,9 +94,6 @@ class EmojiLibrary:
         """
         return True
 
-    def __contains__(self, md5: str) -> bool:
-        return md5 in self._entries
-
     def get(self, md5: str) -> Emoji | None:
         return self._entries.get(md5)
 

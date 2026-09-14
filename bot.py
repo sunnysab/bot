@@ -1,6 +1,5 @@
 import random
 import time
-from abc import abstractmethod
 from typing import TypeVar
 
 from loguru import logger
@@ -8,7 +7,7 @@ from loguru import logger
 from context import ChatWindow, ContextManager, MessageContext, MessageKind, SingleRecord
 from describer import MediaDescriber
 from emojis import Emoji, EmojiLibrary, parse_emoji_xml
-from media import parse_media, render
+from media import render
 from moments import MomentKeeper
 from outbound import Outbound, OutboundQueue
 from plugin import Plugin, PluginManager, Reply
@@ -28,30 +27,11 @@ def _aslist(x: T | list[T]) -> list[T]:
     return x if isinstance(x, list) else [x]
 
 
-class Preprocessor:
-    def name(self) -> str:
-        return self.__class__.__name__
-
-    @abstractmethod
-    async def process(self, msg: Message, **ctx) -> Message:
-        pass
-
-
-class PayloadProcessor(Preprocessor):
-    """ 把非文本消息的正文替换成可读标记：图片/表情/位置/视频/语音/链接/文件/引用。 """
-
-    async def process(self, msg: Message, **ctx) -> Message:
-        text, _ = render(msg.msg_type, msg.content, msg.text)
-        if text:
-            msg.content = msg.clean_text = text
-        return msg
-
-
 class Bot:
     """ 微信机器人助手 """
 
     def __init__(self, host: str, port: int, unix_path: str = '', dry_run: bool = False,
-                 x_delay: float = 0, send_interval: float = 1.0, preprocessors: list[Preprocessor] = None,
+                 x_delay: float = 0, send_interval: float = 1.0,
                  describer: MediaDescriber | None = None, describe_history_limit: int = 3,
                  keeper: MomentKeeper | None = None, emojis: EmojiLibrary | None = None,
                  emoji_path: str = '', emoji_describer=None, typo_rate: float = 0.0,
@@ -83,8 +63,6 @@ class Bot:
         self._keeper = keeper
         # 消息处理插件
         self._plugins = PluginManager()
-        # 消息预处理插件
-        self._preprocessors: list[Preprocessor] = preprocessors or []
         # 媒体识图（可选）
         self._describer = describer
         self.describe_history_limit = describe_history_limit
@@ -182,9 +160,6 @@ class Bot:
         """ 注册连接就绪后的回调（如加载历史上下文） """
         self._wechat.on_ready(func)
 
-    def add_preprocessor(self, preprocessor: Preprocessor | list[Preprocessor]):
-        self._preprocessors.extend(_aslist(preprocessor))
-
     def set_default_plugin(self, plugin: Plugin | list[Plugin]):
         for p in _aslist(plugin):
             self._plugins.register(p)
@@ -249,15 +224,6 @@ class Bot:
             return
         self._history.push_message(item.receiver, item.sender, text, int(time.time()), is_self=True)
 
-    async def _preprocess(self, msg: Message, **ctx) -> Message | None:
-        """ 依次跑预处理器。任一预处理器返回空则放弃这条消息。 """
-        for preprocessor in self._preprocessors:
-            msg = await preprocessor.process(msg, **ctx)
-            if not msg:
-                logger.warning(f'Preprocessor {preprocessor.name()} refuse to process, return.')
-                return None
-        return msg
-
     async def _run_plugins(self, msg: Message, self_name: str, source: str) -> Reply:
         """ 把当前消息交给该会话的插件链，收集要回复的文本和表情。 """
         ctx = MessageContext(msg=msg, history=self._history.get_context(msg.reply_target),
@@ -279,10 +245,8 @@ class Bot:
         if msg.is_self:
             return
 
-        # 图片/表情的原始 XML 在预处理后会被替换成占位标记，先解析出来
+        # 图片/表情的原始 XML 要在被替换成占位标记前解析出来
         kind = MessageKind.of(msg.msg_type)
-        media = parse_media(msg.content) if kind in (MessageKind.IMAGE, MessageKind.EMOJI) else None
-        download = msg.get_media_bytes if (media and media.needs_description) else None
         if kind is MessageKind.EMOJI:
             self.steal_emoji(msg)
 
@@ -291,9 +255,11 @@ class Bot:
         source = self._wechat.all_contacts.get(msg.reply_target, msg.reply_target)
         logger.debug(msg)
 
-        msg = await self._preprocess(msg, media=media)
-        if msg is None:
-            return
+        # 非文本消息的正文换成可读标记：图片/表情/位置/视频/语音/链接/文件/引用
+        text, media = render(msg.msg_type, msg.content, msg.text)
+        if text:
+            msg.content = msg.clean_text = text
+        download = msg.get_media_bytes if (media and media.needs_description) else None
 
         record = self._history.push_message(msg.reply_target, msg.sender_name, msg.content, msg.create_time,
                                             media=media, download=download)

@@ -22,7 +22,7 @@ from pathlib import Path
 from loguru import logger
 
 from ai import AiProvider
-from context import SingleRecord, _format_time
+from context import ChatWindow, SingleRecord, _format_time
 
 # 压缩用的提示词：强调「不许编」，因为记忆失真比没有记忆更糟
 SUMMARY_PROMPT = '''请把下面这段群聊压缩成一条「聊天回想」，供以后回忆。
@@ -113,11 +113,7 @@ def parse_summary(raw: str) -> tuple[str, tuple[str, ...]]:
 
 def transcript(records: Sequence[SingleRecord]) -> str:
     """ 把滑出的消息拼成给模型看的文本。 """
-    lines = []
-    for record in records:
-        who = '我' if record.is_self else record.sender
-        lines.append(f'[{_format_time(record.t)}] {who}: {record.text}')
-    return '\n'.join(lines)
+    return str(ChatWindow(list(records), max_history=len(records)))
 
 
 class MomentStore:

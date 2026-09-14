@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 from persona import Persona
 
@@ -74,52 +74,14 @@ class Config:
 
     @classmethod
     def from_env(cls) -> 'Config':
-        return cls(
-            relay_host=os.getenv('RELAY_HOST', cls.relay_host),
-            relay_port=int(os.getenv('RELAY_PORT', str(cls.relay_port))),
-            relay_unix=os.getenv('RELAY_UNIX', cls.relay_unix),
-            deepseek_key=os.getenv('DEEPSEEK_KEY', cls.deepseek_key),
-            deepseek_model=os.getenv('DEEPSEEK_MODEL', cls.deepseek_model),
-            deepseek_url=os.getenv('DEEPSEEK_URL', cls.deepseek_url),
-            send_interval=float(os.getenv('SEND_INTERVAL', str(cls.send_interval))),
-            describe_media=os.getenv('DESCRIBE_MEDIA', '1').lower() not in ('0', 'false', 'no'),
-            media_cache_path=os.getenv('MEDIA_CACHE_PATH', cls.media_cache_path),
-            describe_concurrency=int(os.getenv('DESCRIBE_CONCURRENCY', str(cls.describe_concurrency))),
-            describe_timeout=float(os.getenv('DESCRIBE_TIMEOUT', str(cls.describe_timeout))),
-            describe_max_tokens=int(os.getenv('DESCRIBE_MAX_TOKENS', str(cls.describe_max_tokens))),
-            describe_history_limit=int(os.getenv('DESCRIBE_HISTORY_LIMIT', str(cls.describe_history_limit))),
-            reply_necessity_threshold=int(os.getenv('REPLY_NECESSITY_THRESHOLD', str(cls.reply_necessity_threshold))),
-            reply_activity_window=float(os.getenv('REPLY_ACTIVITY_WINDOW', str(cls.reply_activity_window))),
-            enable_focus=os.getenv('ENABLE_FOCUS', '1').lower() not in ('0', 'false', 'no'),
-            focus_enter_activity=int(os.getenv('FOCUS_ENTER_ACTIVITY', str(cls.focus_enter_activity))),
-            focus_idle_seconds=float(os.getenv('FOCUS_IDLE_SECONDS', str(cls.focus_idle_seconds))),
-            focus_max_seconds=float(os.getenv('FOCUS_MAX_SECONDS', str(cls.focus_max_seconds))),
-            typo_rate=float(os.getenv('TYPO_RATE', str(cls.typo_rate))),
-            profile_path=os.getenv('PROFILE_PATH', cls.profile_path),
-            habit_path=os.getenv('HABIT_PATH', cls.habit_path),
-            moment_path=os.getenv('MOMENT_PATH', cls.moment_path),
-            emoji_path=os.getenv('EMOJI_PATH', cls.emoji_path),
-            moment_batch=int(os.getenv('MOMENT_BATCH', str(cls.moment_batch))),
-            personality=os.getenv('PERSONALITY', cls.personality),
-            reply_style=os.getenv('REPLY_STYLE', cls.reply_style),
-            behavior_style=os.getenv('BEHAVIOR_STYLE', cls.behavior_style),
-            reply_styles=os.getenv('REPLY_STYLES', cls.reply_styles),
-            style_probability=float(os.getenv('STYLE_PROBABILITY', str(cls.style_probability))),
-            enable_planner=os.getenv('ENABLE_PLANNER', '1').lower() not in ('0', 'false', 'no'),
-            planner_url=os.getenv('PLANNER_URL', cls.planner_url),
-            planner_model=os.getenv('PLANNER_MODEL', cls.planner_model),
-            planner_key=os.getenv('PLANNER_KEY', cls.planner_key),
-            planner_temperature=float(os.getenv('PLANNER_TEMPERATURE', str(cls.planner_temperature))),
-            planner_max_tokens=int(os.getenv('PLANNER_MAX_TOKENS', str(cls.planner_max_tokens))),
-            enable_tools=os.getenv('ENABLE_TOOLS', '1').lower() not in ('0', 'false', 'no'),
-            planner_rounds=int(os.getenv('PLANNER_ROUNDS', str(cls.planner_rounds))),
-            planner_json_schema=os.getenv('PLANNER_JSON_SCHEMA', '0').lower() not in ('0', 'false', 'no'),
-            planner_thinking=os.getenv('PLANNER_THINKING', '1').lower() not in ('0', 'false', 'no'),
-            request_timeout=float(os.getenv('REQUEST_TIMEOUT', str(cls.request_timeout))),
-            trace_path=os.getenv('TRACE_PATH', cls.trace_path),
-            log_path=os.getenv('LOG_PATH', cls.log_path),
-            log_level=os.getenv('LOG_LEVEL', cls.log_level),
-        )
+        """ 环境变量名 = 字段名大写；布尔按 '0/false/no' 为假解析。 """
+        values = {}
+        for f in fields(cls):
+            raw = os.getenv(f.name.upper())
+            if raw is None:
+                continue
+            values[f.name] = (raw.lower() not in ('0', 'false', 'no')) if f.type is bool else f.type(raw)
+        return cls(**values)
 
 
 if __name__ == '__main__':

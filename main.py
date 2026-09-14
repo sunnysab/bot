@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from ai import Deepseek, OpenAI
-from bot import Bot, PayloadProcessor
+from bot import Bot
 from config import Config
 from describer import EmojiDescriber, MediaCache, MediaDescriber
 from emojis import EmojiLibrary
@@ -68,9 +68,7 @@ def main():
     if emoji_describer:
         emoji_describer.on_update = bot.save_emojis
 
-    # 初始化预处理器和插件
-    bot.add_preprocessor(PayloadProcessor())
-
+    # 初始化插件
     repeater = RepeatPlugin()
 
     # 人格：谁、怎么说话、怎么行动。别名也在这里
