@@ -75,6 +75,8 @@ def main():
     chat_plugin = ChatPlugin(ai_provider, context_length=30, policy=policy, persona=persona, profiles=profiles,
                              habits=habits, memories=memory_store, tracer=TraceLogger(config.trace_path),
                              enable_planner=config.enable_planner, planner_ai=planner_ai,
+                             emoji_search=bot.search_emoji, enable_tools=config.enable_tools,
+                             planner_rounds=config.planner_rounds,
                              timeout=config.request_timeout)
 
     bot.set_default_plugin([repeater, chat_plugin])

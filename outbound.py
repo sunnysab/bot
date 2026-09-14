@@ -10,12 +10,15 @@ from dataclasses import dataclass
 
 from loguru import logger
 
+from emojis import Emoji
+
 
 @dataclass(slots=True)
 class Outbound:
     receiver: str
-    text: str
+    text: str = ''
     sender: str = ''
+    emoji: Emoji | None = None
 
 
 class OutboundQueue:
@@ -36,6 +39,10 @@ class OutboundQueue:
         # ponytail: 无界队列，个人 bot 量级够用；刷屏再换成有界 + 丢弃策略
         self._queue.put_nowait(Outbound(receiver, text, sender))
 
+    def put_emoji(self, receiver: str, emoji: Emoji, sender: str = '') -> None:
+        """ 发表情。同样过队列——不然它会绕过限速和打字延迟。 """
+        self._queue.put_nowait(Outbound(receiver, '', sender, emoji))
+
     async def start(self) -> None:
         self._task = asyncio.create_task(self._worker(), name='outbound')
 
@@ -48,7 +55,7 @@ class OutboundQueue:
         next_at = 0.0
         while True:
             item = await self._queue.get()
-            if self._typing_delay:
+            if item.text and self._typing_delay:
                 await asyncio.sleep(self._typing_delay(item.text))
             await asyncio.sleep(max(0.0, next_at - loop.time()))
             next_at = loop.time() + self._min_interval

@@ -4,7 +4,7 @@ import random
 import re
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import override
@@ -13,6 +13,7 @@ from loguru import logger
 
 from ai import AiProvider
 from context import ChatWindow, MessageContext, SingleRecord
+from emojis import Emoji
 from habits import HabitStore
 from moments import MomentStore, extract_keywords
 from necessity import (
@@ -27,6 +28,47 @@ from persona import Persona
 from planner import Plan
 from profiles import ProfileStore
 from reply_trace import TraceLogger, TraceRecord
+from tools import (
+    AssistantTurn,
+    Toolbox,
+    ToolResult,
+    ToolSpec,
+    arg_int,
+    arg_str,
+    assistant_message,
+    tool_message,
+)
+
+# 搜表情：给个关键词，还一堆能发出去的候选。由 Bot 提供（它才连 relay）。
+# 插件自己不发表情——发送统一走 OutboundQueue，那里的限速不能绕过去。
+EmojiSearch = Callable[[str], Awaitable[list[Emoji]]]
+
+# 决策者的工具。规则的细节写在这里，planner.txt 里只列一行——
+# 模型看得到每个工具自己的说明书，比在系统提示里堆一大段更不容易漏。
+SEARCH_EMOJI = ToolSpec(
+    name='search_emoji',
+    description='按关键词搜表情包，返回带序号的候选。关键词用一个短的情绪或动作词'
+                '（如「无语」「狗头」「点赞」「撑不住了」），不要写一整句话。'
+                '一次只搜一个词；没合适的就换个词再搜一次，别反复搜同一个。',
+    parameters={'type': 'object',
+                'properties': {'keyword': {'type': 'string', 'description': '短的情绪或动作词'}},
+                'required': ['keyword']})
+SEND_EMOJI = ToolSpec(
+    name='send_emoji',
+    description='发出上一次 search_emoji 结果里的第 index 张表情。必须先搜再发。'
+                '表情是情绪，不是回答——别人在问问题还是得用 speak 答。'
+                '调用这个工具本轮就结束了；想配一句话就同一轮里一起调 speak。',
+    parameters={'type': 'object',
+                'properties': {'index': {'type': 'integer', 'description': '候选里的序号，从 1 开始'}},
+                'required': ['index']})
+SPEAK = ToolSpec(
+    name='speak',
+    description='让机器人用文字说一句。intent 是你想表达什么，不是台词本身——'
+                '台词由别人负责写。调用这个工具本轮就结束了。',
+    parameters={'type': 'object',
+                'properties': {'intent': {'type': 'string', 'description': '想表达什么'},
+                               'emotion': {'type': 'string', 'description': '什么情绪'}},
+                'required': ['intent']})
 
 
 @dataclass(slots=True)
@@ -39,6 +81,7 @@ class Reply:
 
     texts: list[str] = field(default_factory=list)
     stop: bool = False
+    emoji: Emoji | None = None      # 本轮要发的表情；发送由 Bot 统一走队列，插件不发
 
 
 # 模型爱顺手包上的东西：只剥真正在「包裹」的引号，括号不动
@@ -262,6 +305,8 @@ class ChatPlugin(Plugin):
                  habits: HabitStore | None = None, memories: MomentStore | None = None,
                  tracer: TraceLogger | None = None, enable_planner: bool = True,
                  planner_ai: AiProvider | None = None,
+                 emoji_search: EmojiSearch | None = None, enable_tools: bool = True,
+                 planner_rounds: int = 3,
                  timeout: float = 60.0, rng: random.Random | None = None):
         """ 聊天插件
 
@@ -275,6 +320,9 @@ class ChatPlugin(Plugin):
         :param tracer: 回复轨迹记录；传了就把每轮触发/上下文/回复写成 JSONL
         :param enable_planner: 是否跑两段式；False 则只调 Expressor
         :param planner_ai: 决策者专用模型；留空则和 Expressor 用同一个
+        :param emoji_search: 搜表情的函数；不传就只剩说话，决策者看不到表情工具
+        :param enable_tools: 决策者是否用工具调用；关掉就退回单轮 JSON 决策
+        :param planner_rounds: 决策循环最多几轮（搜 → 发 两轮就够）
         :param timeout: 单次模型调用超时（秒）
         :param rng: 抽临时风格用的随机源，测试时可注入
         """
@@ -288,6 +336,9 @@ class ChatPlugin(Plugin):
         self.memories = memories
         self.tracer = tracer
         self.enable_planner = enable_planner
+        self.emoji_search = emoji_search
+        self.enable_tools = enable_tools
+        self.planner_rounds = planner_rounds
         self.timeout = timeout
         self.rng = rng
 
@@ -317,32 +368,127 @@ class ChatPlugin(Plugin):
 
         started = time.perf_counter()
         plan = ''
+        emoji: Emoji | None = None
         # 只有「没人点名」才需要决策者判断要不要插话；其余情形直接回，省一次调用
         if self.enable_planner and necessity.kind == 'proactive':
-            decided = await self._plan(ctx, necessity, blocks, transcript)
+            if self._tools_ready:
+                decided, emoji, tool_log = await self._plan_with_tools(ctx, blocks, transcript)
+            else:
+                decided, tool_log = await self._plan(ctx, necessity, blocks, transcript), ''
             if decided is not None and not decided.speak:
-                self._trace(ctx, necessity, transcript, None, self._elapsed(started), '')
-                return self._silent(ctx, now)
-            plan = decided.render() if decided else ''
+                self._trace(ctx, necessity, transcript, None, self._elapsed(started), tool_log)
+                return self._silent(ctx, now, emoji=emoji)
+            if decided is not None:
+                plan = decided.render()
+            if tool_log:
+                plan = f'{plan}\n【工具】\n{tool_log}' if plan else f'【工具】\n{tool_log}'
 
         response = await self._express(ctx, blocks, transcript, plan)
         latency_ms = self._elapsed(started)
         self._trace(ctx, necessity, transcript, response, latency_ms, plan)
         if not response:
-            return self._silent(ctx, now)
+            return self._silent(ctx, now, emoji=emoji)
 
         # 模型常顺手带上「昵称：」前缀或引号包裹，不能直接漏到群里
         names = (ctx.self_name, *self.persona.aliases)
         texts = [text for text in (clean_reply(x, names) for x in response) if text]
         if not texts:
-            return self._silent(ctx, now)
+            return self._silent(ctx, now, emoji=emoji)
         self.policy.record(ctx, spoke=True, now=now)
-        return Reply(texts=texts)
+        return Reply(texts=texts, emoji=emoji)
 
-    def _silent(self, ctx: MessageContext, now: float) -> Reply:
-        """ 这一轮没说话，记一笔给连续沉默退避用。 """
-        self.policy.record(ctx, spoke=False, now=now)
-        return Reply(stop=True)
+    @property
+    def _tools_ready(self) -> bool:
+        """ 决策者能不能用工具。后端不支持就退回单轮 JSON，功能不受影响。 """
+        return self.enable_tools and self.planner_ai.supports_tools
+
+    def _silent(self, ctx: MessageContext, now: float, emoji: Emoji | None = None) -> Reply:
+        """ 这一轮没说话（最多只发了个表情），记一笔给连续沉默退避用。 """
+        self.policy.record(ctx, spoke=emoji is not None, now=now)
+        return Reply(stop=True, emoji=emoji)
+
+    async def _plan_with_tools(self, ctx: MessageContext, blocks: dict[str, str],
+                               transcript: str) -> tuple[Plan | None, Emoji | None, str]:
+        """ 带工具的决策循环。返回（决策, 选中的表情, 工具调用记录）。
+
+        模型只挑动作（搜表情 / 选一张 / 说要说话），不写台词——台词还是表达者的事。
+        一个工具都不调 = 本轮不发言；调了动作类工具本轮就结束。
+        """
+        candidates: list[Emoji] = []   # 上一次搜索的结果，send_emoji 的序号就是它
+        picked: list[Emoji] = []
+        said = {'intent': '', 'emotion': ''}
+
+        async def search(arguments: dict) -> ToolResult:
+            keyword = arg_str(arguments, 'keyword')
+            if not keyword:
+                return ToolResult('没给关键词，什么也没搜到。')
+            if self.emoji_search is None:
+                return ToolResult('这会儿搜不了表情。')
+            found = await self.emoji_search(keyword)
+            if not found:
+                return ToolResult(f'没搜到跟「{keyword}」有关的表情。换个词，或者不用表情。')
+            candidates[:] = found
+            listing = '\n'.join(item.render(i) for i, item in enumerate(found, 1))
+            return ToolResult(f'搜到这些，序号可以直接给 send_emoji：\n{listing}')
+
+        async def send(arguments: dict) -> ToolResult:
+            if not candidates:
+                return ToolResult('还没搜过。先用 search_emoji 搜一个词。')
+            index = arg_int(arguments, 'index', 0)
+            if not 1 <= index <= len(candidates):
+                return ToolResult(f'没有第 {index} 张，只有 1 到 {len(candidates)}。')
+            picked.append(candidates[index - 1])
+            return ToolResult(f'好，这一轮发这张：{picked[-1].desc or "选中的表情"}。', stop=True)
+
+        async def speak(arguments: dict) -> ToolResult:
+            said['intent'] = arg_str(arguments, 'intent')
+            said['emotion'] = arg_str(arguments, 'emotion')
+            return ToolResult('好，交给表达者。', stop=True)
+
+        tools = [(SEARCH_EMOJI, search)]
+        if self.emoji_search is not None:
+            tools.append((SEND_EMOJI, send))
+        tools.append((SPEAK, speak))
+        toolbox = Toolbox(tools)
+
+        prompt = await self._planner_prompt(ctx)
+        messages = [{'role': 'user',
+                     'content': await self._build_message(ctx, self._compose(ctx, blocks, transcript),
+                                                          ctx.is_image)}]
+        analysis = ''
+        for _ in range(max(1, self.planner_rounds)):
+            turn = await self._ask_tools(prompt, messages, toolbox.schema(), ctx)
+            if turn is None:
+                return None, None, toolbox.render_calls()      # 这次没拿到决策
+            analysis = turn.content or turn.reasoning or analysis
+            if not turn.tool_calls:                    # 什么都不调 = 不发言
+                break
+            messages.append(assistant_message(turn))
+            stopped = False
+            for call in turn.tool_calls:
+                result = await toolbox.call(call)
+                stopped = stopped or result.stop
+                messages.append(tool_message(call, result.content))
+            if stopped:
+                break
+
+        emoji = picked[0] if picked else None
+        log = toolbox.render_calls()
+        if emoji is None and not said['intent']:
+            return Plan(speak=False, analysis=analysis), None, log
+        plan = Plan(speak=bool(said['intent']), analysis=analysis, intent=said['intent'],
+                    emotion=said['emotion'], emoji=emoji.desc if emoji else '')
+        return plan, emoji, log
+
+    async def _ask_tools(self, prompt: str, messages: list[dict], tools: list[dict],
+                         ctx: MessageContext) -> AssistantTurn | None:
+        """ 调一轮工具。超时或报错只当这次没结果，不能让一次 API 抽风拖死消息处理链。 """
+        try:
+            return await asyncio.wait_for(
+                self.planner_ai.chat_tools(prompt.strip(), messages, tools), self.timeout)
+        except Exception as e:
+            logger.warning(f'决策工具调用失败（{ctx.contact}）: {e}')
+            return None
 
     def _context_blocks(self, ctx: MessageContext, history: ChatWindow) -> dict[str, str]:
         """ 画像 / 群用语 / 中期记忆，三者都是「能捞到才注入」。 """
@@ -376,15 +522,17 @@ class ChatPlugin(Plugin):
         lines.append(transcript)
         return '\n\n'.join(lines)
 
+    async def _planner_prompt(self, ctx: MessageContext) -> str:
+        return await self.planner_template.render_async(behavior_style=self.persona.behavior_style,
+                                                        self_name=ctx.self_name, contact=ctx.contact,
+                                                        is_group=ctx.msg.is_chatroom,
+                                                        aliases=self.persona.aliases)
+
     async def _plan(self, ctx: MessageContext, necessity: NecessityScore, blocks: dict[str, str],
                     transcript: str) -> Plan | None:
-        """ 请决策者判断要不要主动插话；返回 None 表示这次没拿到决策（调用失败），不代表不开口。 """
-        prompt = await self.planner_template.render_async(behavior_style=self.persona.behavior_style,
-                                                          self_name=ctx.self_name, contact=ctx.contact,
-                                                          is_group=ctx.msg.is_chatroom,
-                                                          aliases=self.persona.aliases)
-        raw = await self._ask(prompt, self._compose(ctx, blocks, transcript), ctx, image=ctx.is_image,
-                              ai=self.planner_ai)
+        """ 单轮 JSON 决策。后端不支持工具时走这条。 """
+        raw = await self._ask(await self._planner_prompt(ctx), self._compose(ctx, blocks, transcript),
+                              ctx, image=ctx.is_image, ai=self.planner_ai)
         if not raw:
             return None
         # ai.chat 返回的是按行切好的列表，决策是一整块 JSON，拼回去再解析

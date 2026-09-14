@@ -41,6 +41,7 @@ class Plan:
     analysis: str = ''
     intent: str = ''
     emotion: str = ''
+    emoji: str = ''            # 本轮同时要发的表情（描述）；写进决策块让表达者避开重复
 
     @classmethod
     def parse(cls, raw: str | None) -> Plan:
@@ -70,6 +71,8 @@ class Plan:
             lines.append(f'想表达：{self.intent}')
         if self.emotion:
             lines.append(f'情绪：{self.emotion}')
+        if self.emoji:
+            lines.append(f'同时会发一张表情：{self.emoji}（文字不要重复这个情绪）')
         return '\n'.join(lines)
 
 
@@ -94,6 +97,9 @@ def _self_check() -> None:
 
     assert Plan.parse('{"speak": false, "analysis": "接不上"}').speak is False
     assert Plan.parse('{"speak": false}').render() == ''
+
+    # 表情写进决策块，让表达者知道文字别重复这个情绪
+    assert '同时会发一张表情：无语' in Plan(speak=True, intent='附和', emoji='无语').render()
 
     # 带代码块 / 前后有废话
     assert Plan.parse('```json\n{"speak": true, "intent": "x"}\n```').intent == 'x'

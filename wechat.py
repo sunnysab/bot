@@ -5,6 +5,7 @@ from loguru import logger
 from weixin_bot import Message, WeChatBot
 
 from context import SYSTEM_KINDS, ChatWindow, MessageKind
+from emojis import Emoji
 from media import render
 
 
@@ -93,6 +94,23 @@ class Wechat:
         text = f'{ats}\n\n{msg}' if ats else msg
         logger.info(f'To {receiver}: {text}')
         await self._bot.send_text(to=receiver, text=text, at_users=at_users, at_names=at_names)
+
+    async def search_emoji(self, keyword: str, limit: int = 10) -> list[Emoji]:
+        """ 按关键词搜表情。返回的已经是可直接发送的完整元数据。 """
+        found = await self._bot.search_emoji(keyword)
+        emojis = [Emoji.from_dict(item.to_dict() if hasattr(item, 'to_dict') else item) for item in found]
+        return [item for item in emojis if item.sendable][:limit]
+
+    async def send_emoji(self, emoji: Emoji, receiver: str) -> None:
+        """ 发一张表情 """
+        if not emoji.sendable:
+            logger.warning(f'表情缺下载地址，发不出去：{emoji.md5}')
+            return
+        if self.dry_run:
+            logger.info(f'[DRY RUN] To {receiver}: 表情「{emoji.desc or emoji.md5}」')
+            return
+        logger.info(f'To {receiver}: 表情「{emoji.desc or emoji.md5}」')
+        await self._bot.send_emoji(to=receiver, emoji=emoji.to_dict())
 
     async def get_recent_sessions(self, count: int = 10) -> list[str]:
         """ 获取最近的聊天会话 """

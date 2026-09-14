@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from context import ChatWindow, MessageContext
+from emojis import Emoji
 from habits import Habit, HabitStore
 from moments import Moment, MomentStore
 from necessity import NECESSITY_THRESHOLD
@@ -16,12 +17,15 @@ from persona import Persona
 from plugin import ChatPlugin, RepeatPlugin, ReplyPolicy, clean_reply
 from profiles import Profile, ProfileStore
 from reply_trace import TraceLogger
+from tools import AssistantTurn, ToolCall
 
 PLANNER_MARK = '决策者'          # planner.txt 里独有的字眼，用来区分两次调用
 
 
 class FakeAi:
     """ Planner 和 Expressor 共用，用 prompt 里的标记区分。 """
+
+    supports_tools = False      # 不支持工具的假后端；工具路径另外用 ToolAi 测
 
     def __init__(self, reply=('收到',), plan='{"speak": true, "intent": "附和一句", "emotion": "无奈"}'):
         self.reply = list(reply) if reply else None
@@ -41,6 +45,50 @@ class FakeAi:
     @property
     def reply_calls(self):
         return [call for call in self.calls if PLANNER_MARK not in call[0]]
+
+
+def _call(name, **arguments):
+    return ToolCall(call_id=f'{name}-1', name=name, arguments=arguments)
+
+
+def _emoji(md5='a' * 32, desc='无语', scene='别人说了很离谱的话', count=0):
+    return Emoji(md5=md5, desc=desc, scene=scene, cdnurl='http://cdn/x', aeskey='k', count=count)
+
+
+class ToolAi:
+    """ 会用工具的假决策者：turns 是每轮依次返回的东西。 """
+
+    supports_tools = True
+
+    def __init__(self, turns=(), reply=('收到',)):
+        self.turns = list(turns)
+        self.reply = list(reply) if reply else None
+        self.rounds = []            # 每次 chat_tools 收到的 messages
+        self.tools_seen = []        # 每次暴露的工具名
+        self.reply_calls = []
+
+    async def chat_tools(self, prompt, messages, tools):
+        self.rounds.append([dict(item) for item in messages])
+        self.tools_seen.append([item['function']['name'] for item in tools])
+        if not self.turns:
+            return AssistantTurn()
+        return self.turns.pop(0)
+
+    async def chat(self, prompt, message):
+        self.reply_calls.append((prompt, message))
+        return self.reply
+
+
+class FakeEmojiSearch:
+    """ 假的表情搜索：关键词到结果的映射，没配的关键词返回空。 """
+
+    def __init__(self, table=None):
+        self.table = table or {}
+        self.queries = []
+
+    async def __call__(self, keyword):
+        self.queries.append(keyword)
+        return list(self.table.get(keyword, []))
 
 
 def make_msg(msg_type=1, is_chatroom=False, is_at_me=False, media=b'', content=''):
@@ -396,6 +444,122 @@ class TestIdleBackoffInPlugin(unittest.IsolatedAsyncioTestCase):
         await plugin.handle(make_ctx(make_msg(is_chatroom=True, is_at_me=True)))
         await plugin.handle(proactive_ctx())
         self.assertEqual(len(self.ai.planner_calls), planned + 1)
+
+
+class TestToolLoop(unittest.IsolatedAsyncioTestCase):
+    """ 决策者用工具：搜表情 → 选一张 → （顺带）说要说话。 """
+
+    def plugin(self, turns, search=None, **kwargs):
+        self.ai = ToolAi(turns)
+        self.search = FakeEmojiSearch(search or {})
+        return ChatPlugin(self.ai, context_length=10, emoji_search=self.search, **kwargs)
+
+    async def test_speak_only_is_one_round(self):
+        plugin = self.plugin([AssistantTurn(content='在吐槽加班',
+                                            tool_calls=(_call('speak', intent='附和一句', emotion='无奈'),))])
+        reply = await plugin.handle(proactive_ctx())
+        self.assertEqual(reply.texts, ['收到'])
+        self.assertIsNone(reply.emoji)
+        self.assertEqual(len(self.ai.rounds), 1)
+        # 决策进决策块，表达者能看见
+        self.assertIn('想表达：附和一句', self.ai.reply_calls[0][1])
+
+    async def test_search_then_send_sends_only_the_sticker(self):
+        plugin = self.plugin(
+            [AssistantTurn(tool_calls=(_call('search_emoji', keyword='无语'),)),
+             AssistantTurn(tool_calls=(_call('send_emoji', index=2),))],
+            search={'无语': [_emoji(md5='1' * 32, desc='无语'),
+                            _emoji(md5='2' * 32, desc='翻白眼', count=30)]})
+        reply = await plugin.handle(proactive_ctx())
+        self.assertEqual(self.search.queries, ['无语'])
+        self.assertEqual(reply.emoji.md5, '2' * 32)
+        # 只发表情不说话：不叫表达者
+        self.assertEqual(reply.texts, [])
+        self.assertEqual(self.ai.reply_calls, [])
+
+    async def test_sticker_and_text_in_one_turn(self):
+        plugin = self.plugin(
+            [AssistantTurn(tool_calls=(_call('search_emoji', keyword='狗头'),)),
+             AssistantTurn(tool_calls=(_call('send_emoji', index=1),
+                                       _call('speak', intent='补一句')))],
+            search={'狗头': [_emoji(desc='狗头')]})
+        reply = await plugin.handle(proactive_ctx())
+        self.assertEqual(reply.texts, ['收到'])
+        self.assertEqual(reply.emoji.desc, '狗头')
+        # 表达者要知道同时发了表情，免得文字重复那个情绪
+        self.assertIn('同时会发一张表情：狗头', self.ai.reply_calls[0][1])
+
+    async def test_no_tool_call_means_silent(self):
+        plugin = self.plugin([AssistantTurn(content='接不上话')])
+        reply = await plugin.handle(proactive_ctx())
+        self.assertEqual(reply.texts, [])
+        self.assertTrue(reply.stop)
+        self.assertEqual(self.ai.reply_calls, [])
+
+    async def test_search_result_is_shown_as_text(self):
+        plugin = self.plugin(
+            [AssistantTurn(tool_calls=(_call('search_emoji', keyword='无语'),)),
+             AssistantTurn()],
+            search={'无语': [_emoji(desc='无语', scene='别人说了很离谱的话', count=30)]})
+        await plugin.handle(proactive_ctx())
+        # 第二轮里模型看得到候选：序号 + 情绪 + 场景 + 热度
+        transcript = json.dumps(self.ai.rounds[1], ensure_ascii=False)
+        self.assertIn('无语｜别人说了很离谱的话', transcript)
+        self.assertIn('群里常用', transcript)
+
+    async def test_tool_protocol_is_kept_between_rounds(self):
+        """ function calling 要求 assistant 的 tool_calls 后面必须跟同 id 的 tool 结果。 """
+        plugin = self.plugin(
+            [AssistantTurn(tool_calls=(_call('search_emoji', keyword='无语'),)),
+             AssistantTurn(tool_calls=(_call('send_emoji', index=1),))],
+            search={'无语': [_emoji()]})
+        await plugin.handle(proactive_ctx())
+        second = self.ai.rounds[1]
+        self.assertEqual([item['role'] for item in second], ['user', 'assistant', 'tool'])
+        self.assertEqual(second[2]['tool_call_id'], second[1]['tool_calls'][0]['id'])
+
+    async def test_send_without_search_is_refused(self):
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('send_emoji', index=1),))])
+        reply = await plugin.handle(proactive_ctx())
+        self.assertIsNone(reply.emoji)
+        # 第 1 轮的工具结果（在下一轮的消息里）告诉模型要先搜
+        self.assertIn('还没搜过', json.dumps(self.ai.rounds[1], ensure_ascii=False))
+
+    async def test_index_out_of_range_is_refused(self):
+        plugin = self.plugin(
+            [AssistantTurn(tool_calls=(_call('search_emoji', keyword='无语'),)),
+             AssistantTurn(tool_calls=(_call('send_emoji', index=9),))],
+            search={'无语': [_emoji()]})
+        reply = await plugin.handle(proactive_ctx())
+        self.assertIsNone(reply.emoji)
+        self.assertIn('没有第 9 张', json.dumps(self.ai.rounds[2], ensure_ascii=False))
+        # 越界也不能整轮算废：模型还有一轮机会改
+        self.assertEqual(len(self.ai.rounds), 3)
+
+    async def test_empty_search_tells_the_model_to_try_another_word(self):
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('search_emoji', keyword='不存在的词'),)),
+                              AssistantTurn()])
+        await plugin.handle(proactive_ctx())
+        self.assertIn('没搜到', json.dumps(self.ai.rounds[1], ensure_ascii=False))
+
+    async def test_loop_stops_at_max_rounds(self):
+        endless = AssistantTurn(tool_calls=(_call('search_emoji', keyword='无语'),))
+        plugin = self.plugin([endless, endless, endless, endless], search={'无语': [_emoji()]})
+        reply = await plugin.handle(proactive_ctx())
+        self.assertEqual(len(self.ai.rounds), 3)      # planner_rounds 默认 3
+        self.assertTrue(reply.stop)
+
+    async def test_send_tool_is_hidden_without_a_searcher(self):
+        ai = ToolAi([AssistantTurn()])
+        plugin = ChatPlugin(ai, context_length=10)      # 没传 emoji_search
+        await plugin.handle(proactive_ctx())
+        self.assertEqual(ai.tools_seen[0], ['search_emoji', 'speak'])
+
+    async def test_backend_without_tool_support_falls_back_to_json(self):
+        """ 不支持工具的后端要回到单轮 JSON 决策，功能不能少。 """
+        plugin = ChatPlugin(FakeAi(), context_length=10, emoji_search=FakeEmojiSearch())
+        reply = await plugin.handle(proactive_ctx())
+        self.assertEqual(reply.texts, ['收到'])
 
 
 class TestCleanReply(unittest.TestCase):

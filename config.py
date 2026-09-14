@@ -50,6 +50,8 @@ class Config:
     planner_key: str = 'local'
     planner_temperature: float = 0.3
     planner_max_tokens: int = 1024   # 生成上限，不是上下文；thinking 模型会先吐 reasoning，给够即可
+    enable_tools: bool = True        # 决策者是否用工具调用（搜表情等）；关掉退回单轮 JSON
+    planner_rounds: int = 3          # 决策循环最多几轮：搜一轮、发一轮就够
     # 开 thinking：判断质量更好，但慢很多（中位 3.2s、最坏 8s）
     planner_thinking: bool = True
     # 用 json_schema 强制输出合法 JSON。注意：开 schema 会压掉 thinking
@@ -95,6 +97,8 @@ class Config:
             planner_key=os.getenv('PLANNER_KEY', cls.planner_key),
             planner_temperature=float(os.getenv('PLANNER_TEMPERATURE', str(cls.planner_temperature))),
             planner_max_tokens=int(os.getenv('PLANNER_MAX_TOKENS', str(cls.planner_max_tokens))),
+            enable_tools=os.getenv('ENABLE_TOOLS', '1').lower() not in ('0', 'false', 'no'),
+            planner_rounds=int(os.getenv('PLANNER_ROUNDS', str(cls.planner_rounds))),
             planner_json_schema=os.getenv('PLANNER_JSON_SCHEMA', '0').lower() not in ('0', 'false', 'no'),
             planner_thinking=os.getenv('PLANNER_THINKING', '1').lower() not in ('0', 'false', 'no'),
             request_timeout=float(os.getenv('REQUEST_TIMEOUT', str(cls.request_timeout))),

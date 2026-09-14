@@ -7,6 +7,7 @@ from loguru import logger
 
 from context import ChatWindow, ContextManager, MessageContext, MessageKind, SingleRecord
 from describer import MediaDescriber
+from emojis import Emoji
 from media import parse_media, render
 from moments import MomentKeeper
 from outbound import Outbound, OutboundQueue
@@ -85,6 +86,10 @@ class Bot:
     def wxid(self) -> str:
         return self._wechat.wxid
 
+    async def search_emoji(self, keyword: str) -> list[Emoji]:
+        """ 搜表情，给决策者的工具用。插件不碰 relay，只认得这个函数。 """
+        return await self._wechat.search_emoji(keyword)
+
     async def start(self):
         await self.outbox.start()
         await self._wechat.start()
@@ -156,12 +161,19 @@ class Bot:
     async def _deliver(self, item: Outbound) -> None:
         """ 真正发送并写入上下文，由 OutboundQueue 串行调用。 """
         try:
-            await self._wechat.send_text(item.text, item.receiver)
+            if item.text:
+                await self._wechat.send_text(item.text, item.receiver)
+            if item.emoji:
+                await self._wechat.send_emoji(item.emoji, item.receiver)
         except Exception as e:
             # relay 长链发送回执解析有 bug：消息通常已经投递出去，重发会重复发。
             # 所以只告警不重试，但仍然写历史，否则下一轮模型看不到自己说过的话。
             # ponytail: 真·投递失败时历史会多一条，靠日志排查
             logger.warning(f'发送报错，按已投递处理（不重试）{item.receiver}: {e}')
+        if not item.text:
+            self._history.push_message(item.receiver, item.sender,
+                                       f'[表情：{item.emoji.desc or "表情"}]', int(time.time()), is_self=True)
+            return
         self._history.push_message(item.receiver, item.sender, item.text, int(time.time()), is_self=True)
 
     async def _preprocess(self, msg: Message, **ctx) -> Message | None:
@@ -173,17 +185,19 @@ class Bot:
                 return None
         return msg
 
-    async def _run_plugins(self, msg: Message, self_name: str, source: str) -> list[str]:
-        """ 把当前消息交给该会话的插件链，收集要回复的文本。 """
+    async def _run_plugins(self, msg: Message, self_name: str, source: str) -> Reply:
+        """ 把当前消息交给该会话的插件链，收集要回复的文本和表情。 """
         ctx = MessageContext(msg=msg, history=self._history.get_context(msg.reply_target),
                              self_name=self_name, contact=source)
-        response_back: list[str] = []
+        texts: list[str] = []
+        emoji = None
         for plugin in self._plugins.get_plugins_for_contact(source):
             reply = await plugin.handle(ctx) or Reply()
-            response_back.extend(reply.texts)
+            texts.extend(reply.texts)
+            emoji = emoji or reply.emoji
             if reply.stop:
                 break
-        return response_back
+        return Reply(texts=texts, emoji=emoji)
 
     async def on_message(self, msg: Message) -> None:
         """ 消息处理函数 """
@@ -212,12 +226,15 @@ class Bot:
         if self._describer:
             self._describer.schedule(record)
 
-        response_back = await self._run_plugins(msg, self_name, source)
-        if not response_back:
+        response = await self._run_plugins(msg, self_name, source)
+        if not response.texts and not response.emoji:
             logger.debug('no response to send.')
             return  # 没有回复内容
 
         # 交给全局发送队列统一限流和拟人延迟，避免阻塞消息接收循环
-        for text in response_back:
+        for text in response.texts:
             self.outbox.put(msg.reply_target, text, sender=self_name)
-        logger.debug(f'{len(response_back)} responses queued.')
+        if response.emoji:
+            # 表情排在文字后面：先说一句，再补个表情收尾
+            self.outbox.put_emoji(msg.reply_target, response.emoji, sender=self_name)
+        logger.debug(f'{len(response.texts)} responses queued.')
