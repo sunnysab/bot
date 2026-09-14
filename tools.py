@@ -104,10 +104,6 @@ class Toolbox:
         """ 给模型的工具清单；没有工具时返回空列表（不能传 None）。 """
         return [spec.to_openai() for spec in self._specs]
 
-    def add(self, spec: ToolSpec, handler: ToolHandler) -> None:
-        self._handlers[spec.name] = handler
-        self._specs.append(spec)
-
     async def call(self, call: ToolCall) -> ToolResult:
         """ 执行一次调用。工具自己出错不能把整条消息处理链拖死。 """
         handler = self._handlers.get(call.name)
