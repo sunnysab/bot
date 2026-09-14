@@ -4,7 +4,7 @@ from typing import Any
 from loguru import logger
 from weixin_bot import Message, WeChatBot
 
-from context import ChatWindow
+from context import ChatWindow, MessageKind
 from message import parse_reference_message
 
 
@@ -53,22 +53,15 @@ class Wechat:
         """ 分发消息到回调函数 """
         logger.debug(msg)
 
-        match msg.msg_type:
-            case 1:  # 文本消息
-                await self._message_callback(msg)
-            case 3:  # 图片（预处理器按需下载）
-                await self._message_callback(msg)
-            case 37:  # 好友请求
-                pass
-            case 47:  # 表情
-                await self._message_callback(msg)
-            case 49:  # 引用消息
-                self._process_reference(msg)
-                await self._message_callback(msg)
-            case 10000:  # 系统信息
-                pass
-            case _:
-                logger.warning(f'Unknown message type: {msg.msg_type}')
+        kind = MessageKind.of(msg.msg_type)
+        if kind is MessageKind.QUOTE:  # 引用消息：先把被引用的正文拼进 content
+            self._process_reference(msg)
+        if kind in (MessageKind.FRIEND_REQUEST, MessageKind.SYSTEM):  # 好友请求 / 系统信息
+            return
+        if kind is MessageKind.OTHER:
+            logger.warning(f'Unknown message type: {msg.msg_type}')
+            return
+        await self._message_callback(msg)
 
     @staticmethod
     def _process_reference(msg: Message) -> None:
@@ -149,18 +142,19 @@ class Wechat:
 
         result = ChatWindow()
         for msg in messages:
+            kind = MessageKind.of(msg.msg_type)
             content = ''
-            if msg.msg_type == 1:  # 纯文本消息
+            if kind is MessageKind.TEXT:  # 纯文本消息
                 content = msg.text
-            elif msg.msg_type == 49:  # 引用消息
+            elif kind is MessageKind.QUOTE:  # 引用消息
                 try:
                     parsed = parse_reference_message(msg.content)
                     content = parsed['content'] + f'（引用前文的消息：{parsed["referred_message"]}）'
                 except Exception:
                     continue
-            elif msg.msg_type == 3:  # 图片消息（历史只留标记，真实图片在回复时随请求发送）
+            elif kind is MessageKind.IMAGE:  # 图片消息（历史只留标记，真实图片在回复时随请求发送）
                 content = '[图片]'
-            elif msg.msg_type == 47:  # 表情消息
+            elif kind is MessageKind.EMOJI:  # 表情消息
                 content = '[表情]'
 
             # 不知道为什么有的消息还是 xml 格式的，这里直接过滤掉吧

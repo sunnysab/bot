@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import override
 
 from loguru import logger
-from weixin_bot import Message
 
 from ai import AiProvider
 from context import ChatWindow, MessageContext, SingleRecord
@@ -85,7 +84,7 @@ class RepeatPlugin(Plugin):
     async def handle(self, ctx: MessageContext) -> Reply | None:
         """ 跟队形回复。 如果去掉中文英文标点及表情后的消息连续重复特定数量，则凑个热闹跟着回复一句。 """
         msg = ctx.msg
-        if msg.msg_type != 1:  # 只处理文本消息
+        if not ctx.is_text:  # 只处理文本消息
             return None
 
         history: ChatWindow = ctx.history.latest_n(self.context_length)
@@ -136,7 +135,7 @@ class ChatPlugin(Plugin):
     @override
     async def handle(self, ctx: MessageContext) -> Reply | None:
         msg = ctx.msg
-        if msg.msg_type not in (1, 3):  # 只处理文本和图片消息
+        if not (ctx.is_text or ctx.is_image):  # 只处理文本和图片消息
             return None
 
         # 群聊只在被 @ 时回复；私聊始终回复
@@ -148,7 +147,7 @@ class ChatPlugin(Plugin):
                                                          is_group=msg.is_chatroom)
 
         text = '回复你扮演的角色所要说的话。以下聊天记录供你参考：\n\n' + str(history)
-        response = await self.ai.chat(prompt.strip(), await self._build_message(msg, text))
+        response = await self.ai.chat(prompt.strip(), await self._build_message(ctx, text))
         if not response:
             return Reply(stop=True)
 
@@ -157,12 +156,12 @@ class ChatPlugin(Plugin):
         return Reply(texts=[x.lstrip(prefix) for x in response])
 
     @staticmethod
-    async def _build_message(msg: Message, transcript: str) -> str | list:
+    async def _build_message(ctx: MessageContext, transcript: str) -> str | list:
         """ 文本消息直接发送；图片消息把真实图片作为 content block 附在文本后（DeepSeek 原生识图）。 """
-        if msg.msg_type != 3:
+        if not ctx.is_image:
             return transcript
 
-        image = await msg.get_media_bytes()
+        image = await ctx.msg.get_media_bytes()
         if not image:
             return transcript
 

@@ -8,7 +8,7 @@ from loguru import logger
 
 from ai import Deepseek
 from config import Config
-from context import ContextManager, MessageContext
+from context import ContextManager, MessageContext, MessageKind
 from outbound import Outbound, OutboundQueue
 from plugin import ChatPlugin, EndProcessing, Plugin, PluginManager, RepeatPlugin, Reply
 from wechat import Message, Wechat
@@ -34,9 +34,10 @@ class MediaProcessor(Preprocessor):
     """ 把图片/表情消息的正文替换为文字标记，真实图片在回复时随请求直接发送给模型。 """
 
     async def process(self, msg: Message, **ctx) -> Message:
-        if msg.msg_type == 3:
+        kind = MessageKind.of(msg.msg_type)
+        if kind is MessageKind.IMAGE:
             msg.content = msg.clean_text = '[图片]'
-        elif msg.msg_type == 47:
+        elif kind is MessageKind.EMOJI:
             msg.content = msg.clean_text = '[表情]'
         return msg
 

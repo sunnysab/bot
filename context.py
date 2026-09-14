@@ -2,10 +2,30 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from enum import IntEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from weixin_bot import Message
+
+
+class MessageKind(IntEnum):
+    """ 微信消息的语义分类。数值来自 relay，是全仓唯一一处 msg_type 映射。 """
+
+    OTHER = 0
+    TEXT = 1
+    IMAGE = 3
+    FRIEND_REQUEST = 37
+    EMOJI = 47
+    QUOTE = 49
+    SYSTEM = 10000
+
+    @classmethod
+    def of(cls, msg_type: int) -> MessageKind:
+        try:
+            return cls(msg_type)
+        except ValueError:
+            return cls.OTHER
 
 
 class SingleRecord:
@@ -121,9 +141,36 @@ class ContextManager:
 
 @dataclass(slots=True)
 class MessageContext:
-    """ 插件处理一条消息时所需的全部输入。插件不直接接触传输层。 """
+    """ 插件处理一条消息时所需的全部输入。
+
+    history 的生命周期（加载 / 写入）由 Bot 负责，插件只读；插件不直接接触传输层。
+    """
 
     msg: Message
     history: ChatWindow
     self_name: str
     contact: str
+
+    @property
+    def kind(self) -> MessageKind:
+        return MessageKind.of(self.msg.msg_type)
+
+    @property
+    def is_text(self) -> bool:
+        return self.kind is MessageKind.TEXT
+
+    @property
+    def is_image(self) -> bool:
+        return self.kind is MessageKind.IMAGE
+
+
+if __name__ == '__main__':
+    # 自检：已知类型映射到语义，未知类型落到 OTHER
+    assert MessageKind.of(1) is MessageKind.TEXT
+    assert MessageKind.of(3) is MessageKind.IMAGE
+    assert MessageKind.of(47) is MessageKind.EMOJI
+    assert MessageKind.of(49) is MessageKind.QUOTE
+    assert MessageKind.of(10000) is MessageKind.SYSTEM
+    assert MessageKind.of(2) is MessageKind.OTHER
+    assert MessageKind.of(-1) is MessageKind.OTHER
+    print('ok')
