@@ -38,16 +38,31 @@ SPLIT = re.compile(r'[，。！？!?~～…、,;；:：\s"\'“”‘’()（）
 STOPWORDS = frozenset((
     '什么', '这个', '那个', '怎么', '不是', '没有', '可以', '一个', '自己', '就是',
     '这样', '这里', '时候', '东西', '问题', '还是', '因为', '所以', '但是', '然后',
-    '我们', '你们', '他们', '现在', '今天', '明天', '昨天', '真的', '感觉', '应该'))
+    '我们', '你们', '他们', '现在', '今天', '明天', '昨天', '真的', '感觉', '应该',
+    # 碎词：够高频但没有任何信息量，留着只会招来无关的回想
+    '没事', '没事儿', '事儿', '一下', '一些', '这些', '那些', '其他', '反正', '好像',
+    '知道', '看看', '说的', '看到', '过来', '起来', '出来', '回来', '一个样'))
+
+# 二元组的头/尾落在这些字上基本是碎词（我吃 / 太踩 / 坑了）
+LEADING_JUNK = frozenset('我你他她它是在有不就都也很太这那还又才把被和跟给让对从到而且如果')
+TRAILING_JUNK = frozenset('的了嘛呢吧啊呀哦嗯吗么着过和跟给在是有不也就都还很太')
 
 DEFAULT_BATCH = 20
 DEFAULT_TIMEOUT = 60.0
 
 
-def extract_keywords(text: str, limit: int = 8) -> list[str]:
-    """ 粗粒度关键词：按标点切短句，长句再切成 2 字滑窗。
+def _usable(piece: str) -> bool:
+    if len(piece) < 2 or piece in STOPWORDS:
+        return False
+    if len(piece) == 2:
+        return piece[0] not in LEADING_JUNK and piece[1] not in TRAILING_JUNK
+    return True
 
-    中文没分词器，这里用「短句 + 二元组」近似召回。
+
+def extract_keywords(text: str, limit: int = 8) -> list[str]:
+    """ 粗粒度关键词：短句整体 + 拆出的二元组。
+
+    中文没分词器，这里用「短句 + 二元组」近似召回；碎词用头尾字过滤掉。
     # ponytail: 粗召回，个人群聊够用；漏召回了再上分词或 embedding
     """
     cleaned = BRACKET.sub('', text or '')
@@ -56,9 +71,11 @@ def extract_keywords(text: str, limit: int = 8) -> list[str]:
         part = part.strip()
         if len(part) < 2 or part in STOPWORDS:
             continue
-        pieces = [part] if len(part) <= 4 else [part[i:i + 2] for i in range(len(part) - 1)]
+        pieces = [part] if len(part) <= 6 else []
+        if len(part) >= 3:
+            pieces.extend(part[i:i + 2] for i in range(len(part) - 1))
         for piece in pieces:
-            if piece not in STOPWORDS and piece not in keywords:
+            if _usable(piece) and piece not in keywords:
                 keywords.append(piece)
     return keywords[:limit]
 
@@ -182,14 +199,15 @@ class MomentKeeper:
         buffer.append(record)
         if len(buffer) >= self.batch:
             batch, self._buffers[chat] = list(buffer), []
-            self._spawn(self._compress(chat, batch))
+            self._spawn(self.compress(chat, batch))
 
     def _spawn(self, coro) -> None:
         task = asyncio.create_task(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def _compress(self, chat: str, records: list[SingleRecord]) -> None:
+    async def compress(self, chat: str, records: Sequence[SingleRecord]) -> None:
+        """ 把一批消息压成一条回想存下来。 """
         t_end = records[-1].t
         if t_end <= self.store.last_end(chat):  # 重启后重新淘汰的老消息，不要重复记
             return
@@ -218,8 +236,10 @@ class MomentKeeper:
 def _self_check() -> None:
     import tempfile
 
-    assert extract_keywords('这个怎么弄啊') == ['这个怎么弄啊'] or '怎么' not in extract_keywords('这个怎么弄啊')
+    assert extract_keywords('这个怎么弄啊') == ['这个怎么弄啊', '个怎', '么弄']
     assert '上班' in extract_keywords('我明天还要去上班，烦死了')
+    assert '踩坑' in extract_keywords('太踩坑了，我吃饭体验感太差了')
+    assert '我吃' not in extract_keywords('太踩坑了，我吃饭体验感太差了')
     assert extract_keywords('') == []
 
     summary, cues = parse_summary('{"summary":"在聊加班","cues":["提到加班时"]}')

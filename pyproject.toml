@@ -39,6 +39,7 @@ py-modules = [
     "outbound",
     "plugin",
     "profiles",
+    "replay_memory",
     "reply_trace",
     "wechat",
 ]
