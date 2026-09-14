@@ -11,6 +11,11 @@ from dataclasses import dataclass
 from loguru import logger
 
 from emojis import Emoji
+from events import Status, bus
+
+
+def _key(value) -> str:
+    return '' if value in (None, '') else str(value)
 
 
 @dataclass(slots=True)
@@ -19,6 +24,10 @@ class Outbound:
     text: str = ''
     sender: str = ''
     emoji: Emoji | None = None
+    # 这条回复针对的入站消息。出站要等 relay 收下之后才有自己的 msg_id，
+    # 在那之前面板只能靠 reply_to 把「排队中/输入中」挂到对应的入站气泡上
+    reply_to: str = ''
+    chat_name: str = ''
 
 
 class OutboundQueue:
@@ -34,14 +43,22 @@ class OutboundQueue:
         self._queue: asyncio.Queue[Outbound] = asyncio.Queue()
         self._task: asyncio.Task | None = None
 
-    def put(self, receiver: str, text: str, sender: str = '') -> None:
+    def put(self, receiver: str, text: str, sender: str = '',
+            reply_to=None, chat_name: str = '') -> None:
         # 非阻塞入队，避免拖住 SDK 的顺序事件循环
         # ponytail: 无界队列，个人 bot 量级够用；刷屏再换成有界 + 丢弃策略
-        self._queue.put_nowait(Outbound(receiver, text, sender))
+        bus.publish(Status.QUEUED, chat_id=receiver, chat_name=chat_name,
+                    reply_to=reply_to, origin='bot', detail=f'{len(text)} 字')
+        self._queue.put_nowait(Outbound(receiver, text, sender,
+                                        reply_to=_key(reply_to), chat_name=chat_name))
 
-    def put_emoji(self, receiver: str, emoji: Emoji, sender: str = '') -> None:
+    def put_emoji(self, receiver: str, emoji: Emoji, sender: str = '',
+                  reply_to=None, chat_name: str = '') -> None:
         """ 发表情。同样过队列——不然它会绕过限速和打字延迟。 """
-        self._queue.put_nowait(Outbound(receiver, '', sender, emoji))
+        bus.publish(Status.QUEUED, chat_id=receiver, chat_name=chat_name,
+                    reply_to=reply_to, origin='bot', detail='表情')
+        self._queue.put_nowait(Outbound(receiver, '', sender, emoji,
+                                        reply_to=_key(reply_to), chat_name=chat_name))
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._worker(), name='outbound')
@@ -56,7 +73,11 @@ class OutboundQueue:
         while True:
             item = await self._queue.get()
             if item.text and self._typing_delay:
-                await asyncio.sleep(self._typing_delay(item.text))
+                delay = self._typing_delay(item.text)
+                bus.publish(Status.TYPING, chat_id=item.receiver, chat_name=item.chat_name,
+                            reply_to=item.reply_to, origin='bot',
+                            detail=f'拟人延迟 {delay:.1f}s')
+                await asyncio.sleep(delay)
             await asyncio.sleep(max(0.0, next_at - loop.time()))
             next_at = loop.time() + self._min_interval
             try:

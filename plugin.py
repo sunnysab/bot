@@ -14,6 +14,7 @@ from loguru import logger
 from ai import AiProvider
 from context import ChatWindow, MessageContext, SingleRecord
 from emojis import Emoji, EmojiPolicy
+from events import Status, bus
 from focus import FocusMode
 from habits import HabitStore
 from moments import MomentStore, extract_keywords
@@ -129,6 +130,12 @@ def clean_reply(text: str, names: Iterable[str] = ()) -> str:
     return cleaned.strip()
 
 
+def _brief(text: str, limit: int = 80) -> str:
+    """ 压成一行短摘要，给面板显示「为什么选择不发言」。 """
+    one = ' '.join((text or '').split())
+    return one if len(one) <= limit else one[:limit] + '…'
+
+
 class Plugin(ABC):
     @abstractmethod
     async def handle(self, ctx: MessageContext) -> Reply | None:
@@ -229,6 +236,33 @@ class RepeatPlugin(Plugin):
         return Reply(texts=[text], stop=True)
 
 
+@dataclass(frozen=True)
+class GateDecision:
+    """ 门控的判断结果。
+
+    比 NecessityScore 多一层「为什么没放行」——原来 evaluate() 只返回
+    NecessityScore | None，把「是分数不够还是退避中」丢了，而那正是管理后台
+    最需要的原因。所以单开一个详细版，evaluate() 保留原签名不动。
+    """
+
+    allowed: bool
+    score: int = 0
+    kind: str = ''
+    reasons: tuple[str, ...] = ()
+    blocked_by: str = ''            # 'score' | 'backoff' | ''
+    score_obj: NecessityScore | None = None
+    threshold: int = 0
+    remaining: float = 0.0          # 退避里还剩多少秒
+
+    @property
+    def detail(self) -> str:
+        if self.blocked_by == 'backoff':
+            return f'沉默退避中，剩 {int(self.remaining)}s'
+        if self.blocked_by == 'score':
+            return f'门控 {self.score}/{self.threshold} · {"+".join(self.reasons) or "无"}'
+        return ''
+
+
 class ReplyPolicy:
     """ 群聊里「这条消息要不要交给模型」。
 
@@ -252,11 +286,8 @@ class ReplyPolicy:
         self.backoff = backoff if backoff is not None else IdleBackoff()
         self.focus = focus
 
-    def evaluate(self, ctx: MessageContext, now: float) -> NecessityScore | None:
-        """ 返回 None 表示不交给模型；否则返回打分（可注入 prompt 说明触发原因）。
-
-        now 用 epoch 秒，与 history 里的时间戳同源。
-        """
+    def evaluate_detailed(self, ctx: MessageContext, now: float) -> GateDecision:
+        """ 门控 + 理由。面板要显示「跳过的原因」，所以不能再只给 None。 """
         msg = ctx.msg
         activity = self._activity(ctx, now)
         result = score_necessity(NecessityInput(
@@ -273,12 +304,27 @@ class ReplyPolicy:
             if self.focus.tick(ctx.contact, now, activity):
                 result = replace(result, focused=True, reasons=(*result.reasons, '专注'))
         if result.score < self.threshold and not result.focused:
-            return None
+            return GateDecision(allowed=False, score=result.score, kind=result.kind,
+                                reasons=result.reasons, blocked_by='score',
+                                threshold=self.threshold)
         # 只有主动参与才退避：被 @ / 叫名字 / 私聊是必须回应的
         if (result.kind == 'proactive' and not result.focused
                 and not self.backoff.allows(ctx.contact, now, ctx.history)):
-            return None
-        return result
+            return GateDecision(allowed=False, score=result.score, kind=result.kind,
+                                reasons=result.reasons, blocked_by='backoff',
+                                threshold=self.threshold,
+                                remaining=self.backoff.remaining(ctx.contact, now))
+        return GateDecision(allowed=True, score=result.score, kind=result.kind,
+                            reasons=result.reasons, score_obj=result,
+                            threshold=self.threshold)
+
+    def evaluate(self, ctx: MessageContext, now: float) -> NecessityScore | None:
+        """ 返回 None 表示不交给模型；否则返回打分（可注入 prompt 说明触发原因）。
+
+        now 用 epoch 秒，与 history 里的时间戳同源。要「为什么没过」用 evaluate_detailed。
+        """
+        decision = self.evaluate_detailed(ctx, now)
+        return decision.score_obj if decision.allowed else None
 
     def record(self, ctx: MessageContext, spoke: bool, now: float) -> None:
         """ 记下这一轮最后说没说，给连续沉默退避用。 """
@@ -378,9 +424,12 @@ class ChatPlugin(Plugin):
             return None
 
         now = time.time()
-        necessity = self.policy.evaluate(ctx, now)
-        if necessity is None:
+        decision = self.policy.evaluate_detailed(ctx, now)
+        if not decision.allowed:
+            self._emit(ctx, Status.GATED if decision.blocked_by == 'score' else Status.BACKOFF,
+                       decision.detail, score=decision.score)
             return None
+        necessity = decision.score_obj
 
         history: ChatWindow = ctx.history.latest_n(self.context_length)
         blocks = self._context_blocks(ctx, history)
@@ -396,33 +445,49 @@ class ChatPlugin(Plugin):
         plan = ''
         emoji: Emoji | None = None
         if self.enable_planner:
+            self._emit(ctx, Status.DECIDING, f'{necessity.kind} · 分数 {necessity.score}')
             if self._tools_ready:
                 decided, emoji, tool_log = await self._plan_with_tools(ctx, blocks, transcript)
             else:
                 decided, tool_log = await self._plan(ctx, necessity, blocks, transcript), ''
+            # 决策本身没跑通（超时/报错）：不算「不发言」，照走表达者
+            if decided is None:
+                self._emit(ctx, Status.PLANNER_FAILED, '决策调用失败，直接表达')
             # 必须回应的场景忽略「不发言」，但采纳它挑的表情——
             # 被 @ 时配个表情本来就是最自然的
             if decided is not None and not decided.speak and not must_speak:
                 self._trace(ctx, necessity, transcript, None, self._elapsed(started), tool_log)
+                self._emit(ctx, Status.PLANNER_SILENT, _brief(decided.analysis))
                 return self._silent(ctx, now, emoji=emoji)
             if decided is not None and decided.speak:
                 plan = decided.render()
             if tool_log:
                 plan = f'{plan}\n【工具】\n{tool_log}' if plan else f'【工具】\n{tool_log}'
 
+        self._emit(ctx, Status.EXPRESSING)
         response = await self._express(ctx, blocks, transcript, plan)
         latency_ms = self._elapsed(started)
         self._trace(ctx, necessity, transcript, response, latency_ms, plan)
-        if not response:
+        if response is None:
+            self._emit(ctx, Status.EXPRESS_FAILED, '表达者调用失败')
             return self._silent(ctx, now, emoji=emoji)
 
         # 模型常顺手带上「昵称：」前缀或引号包裹，不能直接漏到群里
         names = (ctx.self_name, *self.persona.aliases)
         texts = [text for text in (clean_reply(x, names) for x in response) if text]
         if not texts:
+            self._emit(ctx, Status.EMPTY_REPLY)
             return self._silent(ctx, now, emoji=emoji)
         self.policy.record(ctx, spoke=True, now=now)
         return Reply(texts=texts, emoji=emoji)
+
+    def _emit(self, ctx: MessageContext, status: str, detail: str = '', **fields) -> None:
+        """ 把这一轮的状态发给管理后台。失败也不影响聊天（bus 自己吞异常）。
+
+        msg_id 用 getattr：这是可观测性，不该因为拿不到身份键就把回复链路打断。
+        """
+        bus.publish(status, chat_id=ctx.msg.reply_target, chat_name=ctx.contact,
+                    msg_id=getattr(ctx.msg, 'msg_id', ''), detail=detail, **fields)
 
     @property
     def _tools_ready(self) -> bool:

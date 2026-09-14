@@ -7,6 +7,7 @@ from loguru import logger
 from context import ChatWindow, ContextManager, MessageContext, MessageKind, SingleRecord
 from describer import MediaDescriber
 from emojis import Emoji, EmojiLibrary, parse_emoji_xml
+from events import Status, bus
 from media import is_placeholder, render
 from moments import MomentKeeper
 from outbound import Outbound, OutboundQueue
@@ -26,6 +27,11 @@ T = TypeVar('T')
 def _aslist(x: T | list[T]) -> list[T]:
     """ 把「单个对象或列表」统一成列表。 """
     return x if isinstance(x, list) else [x]
+
+
+def _relay_id(result) -> int | None:
+    """ 从 relay 的发送回执里取 server_id。拿不到（演习 / 服务端没回 / 假 relay）返回 None。 """
+    return result.get('msg_id') if isinstance(result, dict) else None
 
 
 class Bot:
@@ -57,6 +63,7 @@ class Bot:
         async def callback(msg: Message) -> None:
             await self.on_message(msg)
 
+        self.dry_run = dry_run
         self._wechat = Wechat(host, port, callback=callback, dry_run=dry_run, unix_path=unix_path)
 
         # 聊天上下文记录。消息滑出窗口时交给 keeper 压成中期记忆
@@ -84,6 +91,11 @@ class Bot:
     @property
     def wxid(self) -> str:
         return self._wechat.wxid
+
+    @property
+    def wechat(self) -> Wechat:
+        """ relay 适配层。管理后台直接拿它读会话列表和历史。 """
+        return self._wechat
 
     async def search_emoji(self, keyword: str) -> list[Emoji]:
         """ 搜表情：先翻本群的梗，不够再联网，线上的顺手存进库里当缓存。
@@ -213,21 +225,37 @@ class Bot:
         """ 真正发送并写入上下文，由 OutboundQueue 串行调用。 """
         # 错别字只在出站这一刻抖，历史里记的也是抖过的版本——跟真人一致
         text = apply_typos(item.text, self.typo_rate, self._rng) if item.text else ''
+        stored = text or (f'[表情：{item.emoji.desc or "表情"}]' if item.emoji else '')
+        # relay 给的 server_id：这条出站消息在 relay 里的身份。拿不到就留空
+        relay_id = None
+        error = ''
         try:
             if text:
-                await self._wechat.send_text(text, item.receiver)
+                result = await self._wechat.send_text(text, item.receiver)
+                relay_id = _relay_id(result)
             if item.emoji:
-                await self._wechat.send_emoji(item.emoji, item.receiver)
+                result = await self._wechat.send_emoji(item.emoji, item.receiver)
+                relay_id = relay_id or _relay_id(result)
         except Exception as e:
             # relay 长链发送回执解析有 bug：消息通常已经投递出去，重发会重复发。
             # 所以只告警不重试，但仍然写历史，否则下一轮模型看不到自己说过的话。
             # ponytail: 真·投递失败时历史会多一条，靠日志排查
+            error = str(e)
             logger.warning(f'发送报错，按已投递处理（不重试）{item.receiver}: {e}')
-        if not text:
-            self._history.push_message(item.receiver, item.sender,
-                                       f'[表情：{item.emoji.desc or "表情"}]', int(time.time()), is_self=True)
+
+        if self.dry_run:
+            # 演习：没发出去、不进历史、也不在 relay 里。正文只能靠事件带出去，
+            # 否则面板上这条回复就彻底消失了
+            bus.publish(Status.DRY_RUN, chat_id=item.receiver, chat_name=item.chat_name,
+                        reply_to=item.reply_to, origin='bot', text=stored,
+                        detail='演习模式，未发送')
             return
-        self._history.push_message(item.receiver, item.sender, text, int(time.time()), is_self=True)
+
+        if stored:
+            self._history.push_message(item.receiver, item.sender, stored, int(time.time()), is_self=True)
+        bus.publish(Status.FAILED if error else Status.SENT, chat_id=item.receiver,
+                    chat_name=item.chat_name, msg_id=relay_id, reply_to=item.reply_to,
+                    origin='bot', detail=error[:200])
 
     async def _run_plugins(self, msg: Message, self_name: str, source: str) -> Reply:
         """ 把当前消息交给该会话的插件链，收集要回复的文本和表情。 """
@@ -246,11 +274,8 @@ class Bot:
     async def on_message(self, msg: Message) -> None:
         """ 消息处理函数 """
 
-        # 自己的消息不用回复，也不用存储。在发送的时候会自动存储。
-        if msg.is_self:
-            return
-
-        # 图片/表情的原始 XML 要在被替换成占位标记前解析出来
+        # 图片/表情的原始 XML 要在被替换成占位标记前解析出来。
+        # 放在 is_self 判断之前：手机上自己发的表情也是群里用过的，值得偷
         kind = MessageKind.of(msg.msg_type)
         if kind is MessageKind.EMOJI:
             self.steal_emoji(msg)
@@ -269,31 +294,59 @@ class Bot:
             msg.content = msg.clean_text = text
         download = msg.get_media_bytes if (media and media.needs_description) else None
 
+        # 手机上自己发的消息：写进上下文让模型看见，但**不触发任何插件**。
+        # 从群里看人设确实在说话（transcript 里渲染成「我」），所以存在感统计也算数
+        if msg.is_self:
+            record = self._history.push_message(msg.reply_target, self_name, msg.content,
+                                                msg.create_time, media=media, download=download,
+                                                is_self=True)
+            if self._describer:
+                self._describer.schedule(record)
+            bus.publish(Status.PHONE, chat_id=msg.reply_target, chat_name=source,
+                        msg_id=msg.msg_id, origin='phone', detail='手机上发的，只记不回')
+            return
+
         record = self._history.push_message(msg.reply_target, msg.sender_name, msg.content, msg.create_time,
                                             media=media, download=download)
         # 媒体描述缺失时后台识图，稍后原地回写这条记录，不阻塞本轮回复
         if self._describer:
             self._describer.schedule(record)
+        bus.publish(Status.RECEIVED, chat_id=msg.reply_target, chat_name=source, msg_id=msg.msg_id)
 
         # 离线的积压不触发决策：relay 长链重连会把几个钟头前的消息当 live 推过来，
         # 照发会对着死了的话题连回几十条。写进历史当上下文就够了。
         if msg.create_time and time.time() - msg.create_time > STALE_MESSAGE_SECONDS:
-            logger.info(f'积压消息只记不回（{int(time.time() - msg.create_time)}s 前）: '
-                        f'{msg.sender_name}: {msg.content[:30]}')
+            ago = int(time.time() - msg.create_time)
+            logger.info(f'积压消息只记不回（{ago}s 前）: {msg.sender_name}: {msg.content[:30]}')
+            bus.publish(Status.STALE, chat_id=msg.reply_target, chat_name=source,
+                        msg_id=msg.msg_id, detail=f'积压 {ago // 60} 分钟，只记不回')
             return
 
         response = await self._run_plugins(msg, self_name, source)
         if not response.texts and not response.emoji:
             logger.debug('no response to send.')
+            # 插件链什么都没说，而且这一轮也没留下别的埋点（语音消息、或该会话静音），
+            # 补一条，否则面板上这条消息会永远停在「已接收」
+            latest = bus.status_of(msg.msg_id)
+            if latest is not None and latest.status == Status.RECEIVED:
+                handled = kind in (MessageKind.TEXT, MessageKind.IMAGE)
+                bus.publish(Status.MUTED if handled else Status.UNSUPPORTED,
+                            chat_id=msg.reply_target, chat_name=source, msg_id=msg.msg_id,
+                            detail='该会话已静音' if handled else f'{kind.name} 不处理')
             return  # 没有回复内容
 
         # 交给全局发送队列统一限流和拟人延迟，避免阻塞消息接收循环
         texts = [text for text in response.texts if not is_placeholder(text)]
         if len(texts) != len(response.texts):
             logger.warning(f'拦下 {len(response.texts) - len(texts)} 条媒体占位符，不往群里发：{response.texts}')
+            bus.publish(Status.PLACEHOLDER_BLOCKED, chat_id=msg.reply_target, chat_name=source,
+                        msg_id=msg.msg_id,
+                        detail=f'拦下 {len(response.texts) - len(texts)} 条媒体占位符')
         for text in texts:
-            self.outbox.put(msg.reply_target, text, sender=self_name)
+            self.outbox.put(msg.reply_target, text, sender=self_name,
+                            reply_to=msg.msg_id, chat_name=source)
         if response.emoji:
             # 表情排在文字后面：先说一句，再补个表情收尾
-            self.outbox.put_emoji(msg.reply_target, response.emoji, sender=self_name)
+            self.outbox.put_emoji(msg.reply_target, response.emoji, sender=self_name,
+                                  reply_to=msg.msg_id, chat_name=source)
         logger.debug(f'{len(texts)} responses queued.')

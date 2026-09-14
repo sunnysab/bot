@@ -197,6 +197,17 @@ class IdleBackoff:
             steps = state.silences - self.start_after
             state.until = now + min(self.base * (2 ** steps), self.maximum)
 
+    def remaining(self, contact: str, now: float) -> float:
+        """ 冷却还剩多少秒（0 = 没有冷却）。
+
+        注意它只说冷却是多久，不说**拦不拦**：冷却中也可能因为话题翻篇
+        （见 allows 的 bypass）而放行。要判断拦不拦用 allows()。
+        """
+        state = self._states.get(contact)
+        if state is None or state.until <= now:
+            return 0.0
+        return state.until - now
+
 
 def _self_check() -> None:
     def score(text, **kwargs) -> NecessityScore:
@@ -253,8 +264,12 @@ def _self_check() -> None:
     # 冷却中，但群里又刷够 6 条就立刻放行
     feed(history, [19.0 + i for i in range(IDLE_BYPASS_MESSAGES - 1)])
     assert not backoff.allows('g', 20.0, history)     # 才 5 条
+    assert backoff.remaining('g', 20.0) == 28.0       # 面板要显示「还剩多少秒」
     feed(history, [30.0])
     assert backoff.allows('g', 30.0, history)         # 第 6 条，话题翻篇了
+    # 翻篇只是放行，不重置冷却：剩下 18s 还在，面板要显示的是「拦不拦」不是「剩多少」
+    assert backoff.remaining('g', 30.0) == 18.0
+    assert backoff.remaining('从没见过的会话', 30.0) == 0.0
 
     # 连败越久退避越久，封顶 IDLE_MAX_SECONDS
     capped = IdleBackoff()

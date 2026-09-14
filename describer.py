@@ -6,6 +6,7 @@
 
 import asyncio
 import sqlite3
+import threading
 import time
 from dataclasses import replace
 
@@ -22,19 +23,24 @@ class MediaCache:
 
     def __init__(self, path: str):
         self._conn = sqlite3.connect(path, check_same_thread=False)
+        # check_same_thread=False 只是关掉了 sqlite 的报错，不提供互斥：
+        # describer 在事件循环里写，管理后台的 HTTP 线程在读，得自己上锁
+        self._lock = threading.Lock()
         self._conn.execute(
             'CREATE TABLE IF NOT EXISTS media ('
             'md5 TEXT PRIMARY KEY, kind TEXT, description TEXT, model TEXT, updated_at INTEGER)')
         self._conn.commit()
 
     def get(self, md5: str) -> str | None:
-        row = self._conn.execute('SELECT description FROM media WHERE md5 = ?', (md5,)).fetchone()
+        with self._lock:
+            row = self._conn.execute('SELECT description FROM media WHERE md5 = ?', (md5,)).fetchone()
         return row[0] if row else None
 
     def put(self, md5: str, kind: str, description: str, model: str) -> None:
-        self._conn.execute('INSERT OR REPLACE INTO media VALUES (?, ?, ?, ?, ?)',
-                           (md5, kind, description, model, int(time.time())))
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute('INSERT OR REPLACE INTO media VALUES (?, ?, ?, ?, ?)',
+                               (md5, kind, description, model, int(time.time())))
+            self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()

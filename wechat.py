@@ -69,7 +69,7 @@ class Wechat:
         """ 默认消息处理函数 """
         logger.info(f'{msg.sender}: {msg.content}')
 
-    async def send_text(self, msg: str, receiver: str, at_list: str = '') -> None:
+    async def send_text(self, msg: str, receiver: str, at_list: str = '') -> dict:
         """ 发送消息
         :param msg: 消息字符串
         :param receiver: 接收人wxid或者群id
@@ -77,7 +77,7 @@ class Wechat:
         """
         if self.dry_run:
             logger.info(f'[DRY RUN] To {receiver}: {msg}')
-            return
+            return {'sent': False, 'dry_run': True}
 
         at_users: list[str] = []
         at_names: list[str] = []
@@ -95,7 +95,9 @@ class Wechat:
 
         text = f'{ats}\n\n{msg}' if ats else msg
         logger.info(f'To {receiver}: {text}')
-        await self._bot.send_text(to=receiver, text=text, at_users=at_users, at_names=at_names)
+        # 返回值里带 relay 给的 msg_id（微信服务端消息 ID）。管理后台靠它把
+        # 「排队中 → 已发送」贴到 relay 库里的那条出站记录上，不能丢
+        return await self._bot.send_text(to=receiver, text=text, at_users=at_users, at_names=at_names)
 
     async def search_emoji(self, keyword: str, limit: int = 10) -> list[Emoji]:
         """ 按关键词搜表情。返回的已经是可直接发送的完整元数据。 """
@@ -103,16 +105,44 @@ class Wechat:
         emojis = [Emoji.from_dict(item.to_dict() if hasattr(item, 'to_dict') else item) for item in found]
         return [item for item in emojis if item.sendable][:limit]
 
-    async def send_emoji(self, emoji: Emoji, receiver: str) -> None:
-        """ 发一张表情 """
+    async def send_emoji(self, emoji: Emoji, receiver: str) -> dict:
+        """ 发一张表情。返回值带 relay 的 msg_id，理由同 send_text。 """
         if not emoji.sendable:
             logger.warning(f'表情缺下载地址，发不出去：{emoji.md5}')
-            return
+            return {'sent': False}
         if self.dry_run:
             logger.info(f'[DRY RUN] To {receiver}: 表情「{emoji.desc or emoji.md5}」')
-            return
+            return {'sent': False, 'dry_run': True}
         logger.info(f'To {receiver}: 表情「{emoji.desc or emoji.md5}」')
-        await self._bot.send_emoji(to=receiver, emoji=emoji.to_relay())
+        return await self._bot.send_emoji(to=receiver, emoji=emoji.to_relay())
+
+    async def conversations(self, limit: int = 20):
+        """ 管理后台用：会话列表（带 display_name / last_message / msg_count）。 """
+        return await self._bot.get_conversations(limit=limit)
+
+    async def messages(self, peer: str, limit: int = 300, exclude_system: bool = True):
+        """ 管理后台用：某个会话的历史。
+
+        直接返回 relay 的原始消息，不走 fetch_history 那层历史记录封装——
+        面板要 msg_id 才能把状态贴上去，也要原始 XML 才能渲染媒体。
+        """
+        return await self._bot.get_messages(limit=limit, user=peer, reverse=True,
+                                            exclude_system=exclude_system)
+
+    async def sender_names(self, chat: str, senders) -> dict[str, str]:
+        """ 把 wxid 批量解析成显示名（群昵称 > 备注）。
+
+        relay 的 `sender_display_name` 查不到时会**拿 wxid 当名字**返回，那不是名字。
+        bot 自己的消息处理链会退到 `get_contact` 再查一次（见 get_display_name），
+        面板走的是 relay 原始消息，没经过那道，所以要自己补。
+        实测某群里 278 条有 130 条的发送者是 wxid，但只有 4 个不同的人——
+        解析一遍就都好了，而且查到的名字会缓存。
+        """
+        names = {}
+        for sender in dict.fromkeys(senders):
+            if sender:
+                names[sender] = await self.get_display_name(sender, chat)
+        return names
 
     async def get_recent_sessions(self, count: int = 10) -> list[str]:
         """ 获取最近的聊天会话 """

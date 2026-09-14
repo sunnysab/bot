@@ -1,4 +1,4 @@
-""" Bot 编排自检：决策入队、stop 语义、静音、自身消息忽略。不连 relay。 """
+""" Bot 编排自检：决策入队、stop 语义、静音、手机上自己发的消息只记不回。不连 relay。 """
 
 import asyncio
 import random
@@ -6,11 +6,15 @@ import time
 import types
 import unittest
 
+import events
 from bot import EMOJI_LOCAL_ENOUGH, Bot
 from context import ChatWindow
 from emojis import Emoji, EmojiLibrary
 from media import Media, render
 from plugin import EndProcessing, Plugin, Reply
+
+# relay 回的 server_id：真实量级是 19 位，故意用超过 JS 安全整数 2^53 的值
+RELAY_MSG_ID = 4212345678901234567
 
 
 class FakeWechat:
@@ -30,6 +34,7 @@ class FakeWechat:
 
     async def send_emoji(self, emoji, receiver):
         self.emojis_sent.append((receiver, emoji.md5))
+        return {'sent': True, 'msg_id': RELAY_MSG_ID}
 
     @property
     def wxid(self) -> str:
@@ -40,6 +45,7 @@ class FakeWechat:
         if self.fail:
             raise RuntimeError('解析长链 newsendmsg 响应失败: invalid data: unsupported wiretype 7')
         self.sent.append((receiver, text))
+        return {'sent': True, 'msg_id': RELAY_MSG_ID}
 
     async def get_display_name(self, wxid, chatroom=''):
         return self.names.get(wxid, wxid)
@@ -57,6 +63,7 @@ class FakePlugin(Plugin):
 
 def make_msg(text='hello', is_self=False, msg_type=1, create_time=None):
     return types.SimpleNamespace(msg_type=msg_type, content=text, clean_text=text, text=text, is_self=is_self,
+                                 msg_id=random.getrandbits(62),          # relay 的 server_id 是 64 位
                                  reply_target='456@chatroom', sender_name='Alice', sender='wxid_alice',
                                  sender_display_name='Alice',
                                  create_time=int(time.time()) if create_time is None else create_time,
@@ -85,6 +92,61 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
 
     def _window(self):
         return self.bot._history.get_context('456@chatroom')
+
+    async def test_status_events_trace_a_reply(self):
+        """ 一条消息从接收到已发送，事件流要串得起来——面板的气泡状态全靠它。 """
+        events.bus.reset()
+        self.bot.set_default_plugin(FakePlugin(texts=['hi']))
+        msg = make_msg()
+        await self.bot.on_message(msg)
+        await asyncio.sleep(0.05)
+
+        got = events.bus.since(0)
+        self.assertEqual([e.status for e in got][:2],
+                         [events.Status.RECEIVED, events.Status.QUEUED])
+        sent = got[-1]
+        self.assertEqual(sent.status, events.Status.SENT)
+        self.assertEqual(sent.reply_to, str(msg.msg_id))     # 挂回被回复的那条
+        self.assertEqual(sent.origin, 'bot')
+        # relay 回的 server_id 是 64 位整数，进事件流必须已经是字符串
+        self.assertEqual(sent.msg_id, str(RELAY_MSG_ID))
+        # 两个不同的问题：这条消息自己走到哪了 / 回复走到哪了
+        self.assertEqual(events.bus.status_of(msg.msg_id).status, events.Status.RECEIVED)
+        self.assertEqual(events.bus.progress_of(msg.msg_id).status, events.Status.SENT)
+
+    async def test_send_failure_marks_the_event_failed(self):
+        """ 发送报错（但按已投递处理）在面板上要看得见。 """
+        events.bus.reset()
+        self.bot._wechat = FakeWechat(fail=True)
+        self.bot.set_default_plugin(FakePlugin(texts=['hi']))
+        await self.bot.on_message(make_msg())
+        await asyncio.sleep(0.05)
+
+        last = events.bus.since(0)[-1]
+        self.assertEqual(last.status, events.Status.FAILED)
+        self.assertIn('newsendmsg', last.detail)
+
+    async def test_dry_run_shows_the_reply_but_touches_nothing(self):
+        """ 演习：群里没动静、历史不记，但面板必须看得见这条回复。 """
+        events.bus.reset()
+        bot = Bot('127.0.0.1', 9999, x_delay=0, send_interval=0, dry_run=True)
+        bot._wechat = FakeWechat()
+        await bot.outbox.start()
+        try:
+            bot.set_default_plugin(FakePlugin(texts=['hi']))
+            msg = make_msg()
+            await bot.on_message(msg)
+            await asyncio.sleep(0.05)
+        finally:
+            await bot.outbox.stop()
+
+        # 自己的回复没进历史（入站的还在）
+        self.assertEqual([r.text for r in bot._history.get_context('456@chatroom')], ['hello'])
+        dry = [e for e in events.bus.since(0) if e.status == events.Status.DRY_RUN]
+        self.assertEqual(len(dry), 1)
+        self.assertEqual(dry[0].text, 'hi')          # 正文只能靠事件带出来
+        self.assertEqual(dry[0].reply_to, str(msg.msg_id))
+        self.assertEqual(dry[0].origin, 'bot')
 
     async def test_reply_is_sent_and_recorded(self):
         self.bot.set_default_plugin(FakePlugin(texts=['hi']))
@@ -129,13 +191,24 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot._wechat.sent, [])
         self.assertEqual([r.text for r in self._window()], ['hello'])
 
-    async def test_self_message_is_ignored(self):
+    async def test_self_message_is_recorded_but_not_replied(self):
+        """ 手机上自己发的：进上下文让模型看得见，但不触发插件、不回复。 """
         self.bot.set_default_plugin(FakePlugin(texts=['hi']))
-        await self.bot.on_message(make_msg(is_self=True))
+        await self.bot.on_message(make_msg(text='我来说一句', is_self=True))
         await asyncio.sleep(0.05)
 
-        self.assertEqual(self.bot._wechat.sent, [])
-        self.assertEqual(len(self._window()), 0)
+        self.assertEqual(self.bot._wechat.sent, [])            # 不回复
+        window = self._window()
+        self.assertEqual([r.text for r in window], ['我来说一句'])
+        self.assertTrue(window[0].is_self)                     # 记成「自己说的」
+        assert '我: 我来说一句' in str(self.bot._history.get_context('456@chatroom'))
+
+    async def test_self_emoji_is_stolen(self):
+        """ 手机上发的表情也是群里用过的，一样要偷（所以偷表情在 is_self 判断之前）。 """
+        self.bot.emojis = EmojiLibrary()
+        xml = '<msg><emoji md5="m1" desc="ChEKB2RlZmF1bHQSBuWVp+WVpw==" cdnurl="u" /></msg>'
+        await self.bot.on_message(make_msg(text=xml, msg_type=47, is_self=True))
+        self.assertEqual([e.md5 for e in self.bot.emojis.search('啧啧')], ['m1'])
 
     async def test_attached_plugin_overrides_defaults(self):
         self.bot.set_default_plugin(FakePlugin(texts=['hi']))
