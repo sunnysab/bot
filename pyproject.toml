@@ -25,9 +25,9 @@ py-modules = [
     "ai",
     "config",
     "context",
-    "injector",
     "main",
     "message",
+    "outbound",
     "plugin",
     "wechat",
 ]
