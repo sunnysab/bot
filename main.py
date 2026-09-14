@@ -11,6 +11,7 @@ from describer import MediaCache, MediaDescriber
 from habits import HabitStore
 from moments import MomentKeeper, MomentStore
 from persona import Persona
+from planner import PLAN_RESPONSE_FORMAT
 from plugin import ChatPlugin, EndProcessing, RepeatPlugin, ReplyPolicy
 from profiles import ProfileStore
 from reply_trace import TraceLogger
@@ -24,16 +25,24 @@ def main():
     if not config.deepseek_key:
         logger.warning('DEEPSEEK_KEY 未设置，ChatPlugin 将无法调用模型')
 
-    ai_provider = Deepseek(key=config.deepseek_key, model=config.deepseek_model, temperature=0.85)
+    ai_provider = Deepseek(key=config.deepseek_key, model=config.deepseek_model, url=config.deepseek_url,
+                           temperature=0.85)
+
+    # 机器人自己的别名，逗号分隔；群里叫别名也算在叫它
+    aliases = tuple(alias.strip() for alias in config.bot_aliases.split(',') if alias.strip())
+    if aliases:
+        logger.info(f'机器人别名: {"、".join(aliases)}')
 
     # 决策者可以走本地免费模型；留空 PLANNER_URL 就两段都用主模型
     planner_ai = None
     if config.planner_url:
         planner_ai = OpenAI(url=config.planner_url, key=config.planner_key, model=config.planner_model,
                             temperature=config.planner_temperature, max_tokens=config.planner_max_tokens,
-                            # 关掉 thinking，reasoning 从 900 字降到 400 字，单次快一倍
-                            extra_body={'chat_template_kwargs': {'enable_thinking': False}})
-        logger.info(f'Planner 使用本地模型: {config.planner_url} / {config.planner_model}')
+                            # thinking 与 json_schema 二选一：开 schema 会压掉思考（见 config 注释）
+                            extra_body={'chat_template_kwargs': {'enable_thinking': config.planner_thinking}},
+                            response_format=PLAN_RESPONSE_FORMAT if config.planner_json_schema else None)
+        logger.info(f'Planner 使用本地模型: {config.planner_url} / {config.planner_model} '
+                    f'(thinking={config.planner_thinking}, json_schema={config.planner_json_schema})')
 
     describer = None
     if config.describe_media:
@@ -52,7 +61,7 @@ def main():
 
     repeater = RepeatPlugin()
     policy = ReplyPolicy(threshold=config.reply_necessity_threshold,
-                         activity_window=config.reply_activity_window)
+                         activity_window=config.reply_activity_window, aliases=aliases)
     profiles = ProfileStore.load(config.profile_path)
     if profiles:
         logger.info(f'已加载 {len(profiles)} 个人的画像: {config.profile_path}')
@@ -63,7 +72,7 @@ def main():
     persona = Persona(
         personality=config.personality, reply_style=config.reply_style, behavior_style=config.behavior_style,
         alternates=tuple(style.strip() for style in config.reply_styles.split('|') if style.strip()),
-        alternate_probability=config.style_probability)
+        alternate_probability=config.style_probability, aliases=aliases)
     chat_plugin = ChatPlugin(ai_provider, context_length=30, policy=policy, persona=persona, profiles=profiles,
                              habits=habits, memories=memory_store, tracer=TraceLogger(config.trace_path),
                              enable_planner=config.enable_planner, planner_ai=planner_ai,

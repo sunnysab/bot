@@ -29,10 +29,13 @@ class Persona:
         '不硬找话题，不复述别人刚说过的话，不连着自说自话。')
     alternates: tuple[str, ...] = ()
     alternate_probability: float = 0.0
+    # 群里对它的其他叫法；判断「是不是在叫我」和告诉模型自己叫什么都要用
+    aliases: tuple[str, ...] = ()
 
     def identity(self, name: str) -> str:
         """ expressor 开头的人设段。 """
-        return f'你的名字是{name}。{self.personality}'
+        also = f'，也有人叫你{"、".join(self.aliases)}' if self.aliases else ''
+        return f'你的名字是{name}{also}。{self.personality}'
 
     def maybe_alternate(self, rng: random.Random | None = None) -> str:
         """ 按概率抽一条本次的临时风格；没抽中返回空串。 """
@@ -47,6 +50,9 @@ class Persona:
 def _self_check() -> None:
     persona = Persona()
     assert persona.identity('示例名') == '你的名字是示例名。是一个积极乐观、温暖阳光的女生，03 年出生。'
+    nicknamed = Persona(aliases=('雨姐', '烟姐'))
+    assert nicknamed.identity('雨墨蝉烟') == (
+        '你的名字是雨墨蝉烟，也有人叫你雨姐、烟姐。是一个积极乐观、温暖阳光的女生，03 年出生。')
     # 没配备用风格时永远是空
     assert persona.maybe_alternate() == ''
 

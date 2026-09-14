@@ -14,6 +14,10 @@ class Config:
     relay_unix: str = ''
     deepseek_key: str = ''
     deepseek_model: str = 'deepseek-flash'
+    # 主模型的服务地址，可指向第三方 OpenAI 兼容服务（更便宜的代理/中转）
+    deepseek_url: str = 'https://api.deepseek.com'
+    # 机器人自己的别名，逗号分隔（如 雨姐,烟姐,雨墨姐）。群里叫别名也算在叫它
+    bot_aliases: str = ''
     # 全局最小发送间隔（秒），规避微信风控
     send_interval: float = 1.0
     # 媒体（图片 / 缺 desc 的表情）识图描述
@@ -48,6 +52,11 @@ class Config:
     planner_key: str = 'local'
     planner_temperature: float = 0.3
     planner_max_tokens: int = 1024   # 生成上限，不是上下文；thinking 模型会先吐 reasoning，给够即可
+    # 开 thinking：判断质量更好，但慢很多（中位 3.2s、最坏 8s）
+    planner_thinking: bool = True
+    # 用 json_schema 强制输出合法 JSON。注意：开 schema 会压掉 thinking
+    # （实测约束解码下无论开关都是 0.6s 且几乎总是输出 speak=true），二选一
+    planner_json_schema: bool = False
     # 单次模型调用超时（秒），避免一次 API 抽风拖死消息处理链
     request_timeout: float = 60.0
     # 回复轨迹 JSONL（攒数据给以后做效果评估）
@@ -63,6 +72,8 @@ class Config:
             relay_unix=os.getenv('RELAY_UNIX', cls.relay_unix),
             deepseek_key=os.getenv('DEEPSEEK_KEY', cls.deepseek_key),
             deepseek_model=os.getenv('DEEPSEEK_MODEL', cls.deepseek_model),
+            deepseek_url=os.getenv('DEEPSEEK_URL', cls.deepseek_url),
+            bot_aliases=os.getenv('BOT_ALIASES', cls.bot_aliases),
             send_interval=float(os.getenv('SEND_INTERVAL', str(cls.send_interval))),
             describe_media=os.getenv('DESCRIBE_MEDIA', '1').lower() not in ('0', 'false', 'no'),
             media_cache_path=os.getenv('MEDIA_CACHE_PATH', cls.media_cache_path),
@@ -87,6 +98,8 @@ class Config:
             planner_key=os.getenv('PLANNER_KEY', cls.planner_key),
             planner_temperature=float(os.getenv('PLANNER_TEMPERATURE', str(cls.planner_temperature))),
             planner_max_tokens=int(os.getenv('PLANNER_MAX_TOKENS', str(cls.planner_max_tokens))),
+            planner_json_schema=os.getenv('PLANNER_JSON_SCHEMA', '0').lower() not in ('0', 'false', 'no'),
+            planner_thinking=os.getenv('PLANNER_THINKING', '1').lower() not in ('0', 'false', 'no'),
             request_timeout=float(os.getenv('REQUEST_TIMEOUT', str(cls.request_timeout))),
             trace_path=os.getenv('TRACE_PATH', cls.trace_path),
             log_path=os.getenv('LOG_PATH', cls.log_path),

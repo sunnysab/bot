@@ -142,12 +142,15 @@ class ReplyPolicy:
     模型仍可用「本轮不发言」做内容层的最终否决。
     """
 
-    def __init__(self, threshold: int = NECESSITY_THRESHOLD, activity_window: float = 180.0):
+    def __init__(self, threshold: int = NECESSITY_THRESHOLD, activity_window: float = 180.0,
+                 aliases: tuple[str, ...] = ()):
         """ :param threshold: 必要性分数阈值，越高越沉默
         :param activity_window: 统计群活跃度的时间窗口（秒）
+        :param aliases: 机器人自己的其他叫法，命中就当被叫到名字
         """
         self.threshold = threshold
         self.activity_window = activity_window
+        self.aliases = aliases
 
     def evaluate(self, ctx: MessageContext, now: float) -> NecessityScore | None:
         """ 返回 None 表示不交给模型；否则返回打分（可注入 prompt 说明触发原因）。
@@ -179,9 +182,9 @@ class ReplyPolicy:
     def _recent_messages(self, ctx: MessageContext, now: float) -> int:
         return len(self._recent(ctx, now))
 
-    @staticmethod
-    def _mentions_me(ctx: MessageContext) -> bool:
-        return bool(ctx.self_name) and ctx.self_name in ctx.msg.content
+    def _mentions_me(self, ctx: MessageContext) -> bool:
+        """ 群昵称或任一别名出现在消息里，就算在叫它。 """
+        return any(name and name in ctx.msg.content for name in (ctx.self_name, *self.aliases))
 
 
 class ChatPlugin(Plugin):
@@ -310,7 +313,8 @@ class ChatPlugin(Plugin):
         """ 请决策者判断要不要主动插话；返回 None 表示这次没拿到决策（调用失败），不代表不开口。 """
         prompt = await self.planner_template.render_async(behavior_style=self.persona.behavior_style,
                                                           self_name=ctx.self_name, contact=ctx.contact,
-                                                          is_group=ctx.msg.is_chatroom)
+                                                          is_group=ctx.msg.is_chatroom,
+                                                          aliases=self.persona.aliases)
         raw = await self._ask(prompt, self._compose(ctx, blocks, transcript), ctx, image=ctx.is_image,
                               ai=self.planner_ai)
         if not raw:

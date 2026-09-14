@@ -4,7 +4,7 @@
 {{ self_name }} 的行动准则：
 {{ behavior_style }}
 
-现在是微信群「{{ contact }}」的聊天，{{ self_name }} **没有被点名**，需要你自己判断要不要主动参与。
+现在是微信群「{{ contact }}」的聊天，{{ self_name }} **没有被点名**{% if aliases %}（有人在叫它时，叫的可能是 {{ self_name }}{% for alias in aliases %}、{{ alias }}{% endfor %}）{% endif %}，需要你自己判断要不要主动参与。
 （被 @、被叫名字、私聊这些必须回应的情况不会走到你这里。）
 
 ## 怎么读聊天记录

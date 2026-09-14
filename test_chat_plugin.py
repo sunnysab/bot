@@ -232,6 +232,23 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('你的ID和小红书', self.ai.planner_calls[0][0])
         self.assertNotIn('口头禅', self.ai.reply_calls[0][0])
 
+    async def test_alias_counts_as_being_called(self):
+        """ 群里叫「雨姐」也算在叫它：直接回应，不走决策者。 """
+        plugin = ChatPlugin(self.ai, context_length=10, policy=ReplyPolicy(aliases=('雨姐',)))
+        reply = await plugin.handle(make_ctx(make_msg(is_chatroom=True, content='雨姐在吗')))
+        self.assertEqual(reply.texts, ['收到'])
+        self.assertEqual(self.ai.planner_calls, [])
+
+    async def test_aliases_are_told_to_both_models(self):
+        persona = Persona(aliases=('雨姐', '烟姐'))
+        plugin = ChatPlugin(self.ai, context_length=10, persona=persona)
+
+        await plugin.handle(make_ctx(make_msg(is_chatroom=False)))
+        self.assertIn('也有人叫你雨姐、烟姐', self.ai.reply_calls[0][0])
+
+        await plugin.handle(self.proactive())
+        self.assertIn('雨姐', self.ai.planner_calls[0][0])
+
     async def test_model_failure_does_not_break_the_round(self):
         """ 一次 API 抽风不能把消息处理链拖死。 """
         class Boom:
