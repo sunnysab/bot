@@ -61,11 +61,13 @@ class NecessityScore:
     score: int
     kind: TriggerKind
     reasons: tuple[str, ...] = ()
+    focused: bool = False      # 专注模式里的一轮：门控和沉默退避都不拦
 
     @property
     def detail(self) -> str:
         suffix = f'（{"，".join(self.reasons)}）' if self.reasons else ''
-        return f'{self.kind} {self.score}分{suffix}'
+        focus = '专注 ' if self.focused else ''
+        return f'{focus}{self.kind} {self.score}分{suffix}'
 
 
 def score_necessity(inp: NecessityInput) -> NecessityScore:

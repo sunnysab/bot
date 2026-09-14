@@ -9,6 +9,7 @@ from bot import Bot, PayloadProcessor
 from config import Config
 from describer import EmojiDescriber, MediaCache, MediaDescriber
 from emojis import EmojiLibrary
+from focus import FocusMode
 from habits import HabitStore
 from moments import MomentKeeper, MomentStore
 from persona import Persona
@@ -63,7 +64,7 @@ def main():
               describe_history_limit=config.describe_history_limit,
               keeper=MomentKeeper(ai_provider, memory_store, batch=config.moment_batch),
               emojis=emojis, emoji_path=config.emoji_path,
-              emoji_describer=emoji_describer)
+              emoji_describer=emoji_describer, typo_rate=config.typo_rate)
     if emoji_describer:
         emoji_describer.on_update = bot.save_emojis
 
@@ -80,7 +81,15 @@ def main():
     logger.info(f'机器人别名: {"、".join(persona.aliases)}')
 
     policy = ReplyPolicy(threshold=config.reply_necessity_threshold,
-                         activity_window=config.reply_activity_window, aliases=persona.aliases)
+                         activity_window=config.reply_activity_window, aliases=persona.aliases,
+                         focus=FocusMode(enabled=config.enable_focus,
+                                         enter_activity=config.focus_enter_activity,
+                                         idle=config.focus_idle_seconds,
+                                         maximum=config.focus_max_seconds))
+    logger.info(f'专注模式 {"开" if config.enable_focus else "关"}：'
+                f'活动 {config.focus_enter_activity} 条进入，'
+                f'空闲 {int(config.focus_idle_seconds)}s / 最长 {int(config.focus_max_seconds)}s 退出；'
+                f'错别字概率 {config.typo_rate:.0%}')
     profiles = ProfileStore.load(config.profile_path)
     if profiles:
         logger.info(f'已加载 {len(profiles)} 个人的画像: {config.profile_path}')

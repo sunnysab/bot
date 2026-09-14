@@ -145,16 +145,23 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.ai.planner_calls), 1)
         self.assertEqual(len(self.ai.reply_calls), 1)
 
-    async def test_direct_address_bypasses_planner(self):
-        """ 被 @ / 叫名字 / 私聊是必须回应的，不多花一次调用。 """
+    async def test_direct_address_also_goes_through_planner(self):
+        """ 被 @ / 叫名字 / 私聊也走决策者——表情工具在那条路上，代价是多一次调用。 """
         for msg in (make_msg(is_chatroom=True, is_at_me=True),
                     make_msg(is_chatroom=True, content='Bot 在吗'),
                     make_msg(is_chatroom=False)):
             self.ai.calls.clear()
             reply = await self.plugin.handle(make_ctx(msg))
             self.assertEqual(reply.texts, ['收到'])
-            self.assertEqual(self.ai.planner_calls, [])
-            self.assertEqual(len(self.ai.reply_calls), 1)
+            self.assertEqual(len(self.ai.planner_calls), 1)
+            self.assertIn('【必须回应】', self.ai.planner_calls[0][1])
+
+    async def test_must_respond_ignores_a_silent_plan(self):
+        """ 被点名时决策者说「不发言」不算数——必须回应的场景得真回。 """
+        self.plugin.ai = FakeAi(plan='{"speak": false, "analysis": "接不上"}')
+        reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
+        self.assertEqual(reply.texts, ['收到'])
+        self.assertNotIn('【决策】', self.plugin.ai.reply_calls[0][1])
 
     async def test_plan_is_passed_to_expressor(self):
         await self.plugin.handle(proactive_ctx())
@@ -286,11 +293,11 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('口头禅', self.ai.reply_calls[0][0])
 
     async def test_alias_counts_as_being_called(self):
-        """ 群里叫「雨姐」也算在叫它：直接回应，不走决策者。 """
+        """ 群里叫「雨姐」也算在叫它：当成必须回应，决策者那边会收到提醒。 """
         plugin = ChatPlugin(self.ai, context_length=10, policy=ReplyPolicy(aliases=('雨姐',)))
         reply = await plugin.handle(make_ctx(make_msg(is_chatroom=True, content='雨姐在吗')))
         self.assertEqual(reply.texts, ['收到'])
-        self.assertEqual(self.ai.planner_calls, [])
+        self.assertIn('【必须回应】', self.ai.planner_calls[0][1])
 
     async def test_aliases_are_told_to_both_models(self):
         persona = Persona(aliases=('雨姐', '烟姐'))
@@ -305,6 +312,8 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
     async def test_model_failure_does_not_break_the_round(self):
         """ 一次 API 抽风不能把消息处理链拖死。 """
         class Boom:
+            supports_tools = False
+
             async def chat(self, prompt, message):
                 raise RuntimeError('api down')
 
@@ -327,7 +336,7 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertIn('想表达：附和一句', record['plan'])
         self.assertGreaterEqual(record['latency_ms'], 0)
 
-    async def test_tracer_records_direct_address_without_plan(self):
+    async def test_tracer_records_direct_address_with_plan(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'trace.jsonl'
             self.plugin.tracer = TraceLogger(path)
@@ -335,7 +344,7 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
             record = json.loads(path.read_text(encoding='utf-8').strip())
 
         self.assertEqual(record['trigger'], 'private')
-        self.assertEqual(record['plan'], '')      # 没走决策者
+        self.assertIn('想表达：附和一句', record['plan'])   # 被点名也走决策者（要表情工具）
 
     async def test_tracer_records_silent_turns(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -440,10 +449,12 @@ class TestIdleBackoffInPlugin(unittest.IsolatedAsyncioTestCase):
             await plugin.handle(proactive_ctx())
         self.assertIsNone(await plugin.handle(proactive_ctx()))     # 退避中，模型都不调
         planned = len(self.ai.planner_calls)
-        # 被点名回了一句 = 群里还需要它，退避清零
+        # 被点名回了一句 = 群里还需要它，退避清零（这一轮自己也要走一次决策者）
         await plugin.handle(make_ctx(make_msg(is_chatroom=True, is_at_me=True)))
+        after_mention = len(self.ai.planner_calls)
+        self.assertEqual(after_mention, planned + 1)
         await plugin.handle(proactive_ctx())
-        self.assertEqual(len(self.ai.planner_calls), planned + 1)
+        self.assertEqual(len(self.ai.planner_calls), after_mention + 1)
 
 
 class TestToolLoop(unittest.IsolatedAsyncioTestCase):

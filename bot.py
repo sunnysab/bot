@@ -12,12 +12,13 @@ from media import parse_media, render
 from moments import MomentKeeper
 from outbound import Outbound, OutboundQueue
 from plugin import Plugin, PluginManager, Reply
+from typos import apply_typos
 from wechat import Message, Wechat
 
 # 本地表情够这么多就不再联网搜——本群用过的比商店里的更像人话
 EMOJI_LOCAL_ENOUGH = 3
 EMOJI_RESULT_LIMIT = 8
-EMOJI_SAVE_INTERVAL = 60.0     # 表情库最长隔这么久落一次盘
+EMOJI_SAVE_INTERVAL = 5.0      # 表情库最长隔这么久落一次盘（热度是运行时累加的）
 
 T = TypeVar('T')
 
@@ -53,7 +54,8 @@ class Bot:
                  x_delay: float = 0, send_interval: float = 1.0, preprocessors: list[Preprocessor] = None,
                  describer: MediaDescriber | None = None, describe_history_limit: int = 3,
                  keeper: MomentKeeper | None = None, emojis: EmojiLibrary | None = None,
-                 emoji_path: str = '', emoji_describer=None):
+                 emoji_path: str = '', emoji_describer=None, typo_rate: float = 0.0,
+                 rng: random.Random | None = None):
         """ 初始化机器人
 
         @param host: weixin-rs relay 服务器地址
@@ -68,6 +70,8 @@ class Bot:
         @param emojis: 本地表情库：收到的表情顺手存下，以后能原样发回去；为 None 则不偷
         @param emoji_path: 表情库落盘位置；留空则不落盘（重启就没了）
         @param emoji_describer: 给偷来的表情补「使用场景」的后台任务；为 None 则不补
+        @param typo_rate: 出站文本抖错别字的概率（0 为关闭）
+        @param rng: 错别字用的随机源，测试时可注入
         """
         async def callback(msg: Message) -> None:
             await self.on_message(msg)
@@ -88,6 +92,8 @@ class Bot:
         self.emojis = emojis
         self.emoji_path = emoji_path
         self.emoji_describer = emoji_describer
+        self.typo_rate = typo_rate
+        self._rng = rng or random.Random()
         self._emoji_saved_at = time.time()
 
         assert x_delay >= 0
@@ -135,7 +141,7 @@ class Bot:
         emoji = parse_emoji_xml(msg.content)
         if emoji is None:
             return
-        if self.emojis.record(emoji):
+        if self.emojis.record(emoji, used=True):      # 群里用了一次：热度加一
             # 落盘不用每条都做，攒一会儿再写；stop() 里还会再存一次
             if time.time() - self._emoji_saved_at >= EMOJI_SAVE_INTERVAL:
                 self.save_emojis()
@@ -225,9 +231,11 @@ class Bot:
 
     async def _deliver(self, item: Outbound) -> None:
         """ 真正发送并写入上下文，由 OutboundQueue 串行调用。 """
+        # 错别字只在出站这一刻抖，历史里记的也是抖过的版本——跟真人一致
+        text = apply_typos(item.text, self.typo_rate, self._rng) if item.text else ''
         try:
-            if item.text:
-                await self._wechat.send_text(item.text, item.receiver)
+            if text:
+                await self._wechat.send_text(text, item.receiver)
             if item.emoji:
                 await self._wechat.send_emoji(item.emoji, item.receiver)
         except Exception as e:
@@ -235,11 +243,11 @@ class Bot:
             # 所以只告警不重试，但仍然写历史，否则下一轮模型看不到自己说过的话。
             # ponytail: 真·投递失败时历史会多一条，靠日志排查
             logger.warning(f'发送报错，按已投递处理（不重试）{item.receiver}: {e}')
-        if not item.text:
+        if not text:
             self._history.push_message(item.receiver, item.sender,
                                        f'[表情：{item.emoji.desc or "表情"}]', int(time.time()), is_self=True)
             return
-        self._history.push_message(item.receiver, item.sender, item.text, int(time.time()), is_self=True)
+        self._history.push_message(item.receiver, item.sender, text, int(time.time()), is_self=True)
 
     async def _preprocess(self, msg: Message, **ctx) -> Message | None:
         """ 依次跑预处理器。任一预处理器返回空则放弃这条消息。 """

@@ -5,7 +5,7 @@ import re
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import override
 
@@ -14,6 +14,7 @@ from loguru import logger
 from ai import AiProvider
 from context import ChatWindow, MessageContext, SingleRecord
 from emojis import Emoji, EmojiPolicy
+from focus import FocusMode
 from habits import HabitStore
 from moments import MomentStore, extract_keywords
 from necessity import (
@@ -233,16 +234,19 @@ class ReplyPolicy:
     """
 
     def __init__(self, threshold: int = NECESSITY_THRESHOLD, activity_window: float = 180.0,
-                 aliases: tuple[str, ...] = (), backoff: IdleBackoff | None = None):
+                 aliases: tuple[str, ...] = (), backoff: IdleBackoff | None = None,
+                 focus: FocusMode | None = None):
         """ :param threshold: 必要性分数阈值，越高越沉默
         :param activity_window: 统计群活跃度的时间窗口（秒）
         :param aliases: 机器人自己的其他叫法，命中就当被叫到名字
         :param backoff: 连续沉默退避；不传则用默认（连续两轮不开口开始歇 15s）
+        :param focus: 专注模式；群聊得热时盯一会儿，期间门控和退避都让路
         """
         self.threshold = threshold
         self.activity_window = activity_window
         self.aliases = aliases
         self.backoff = backoff if backoff is not None else IdleBackoff()
+        self.focus = focus
 
     def evaluate(self, ctx: MessageContext, now: float) -> NecessityScore | None:
         """ 返回 None 表示不交给模型；否则返回打分（可注入 prompt 说明触发原因）。
@@ -250,19 +254,25 @@ class ReplyPolicy:
         now 用 epoch 秒，与 history 里的时间戳同源。
         """
         msg = ctx.msg
+        activity = self._activity(ctx, now)
         result = score_necessity(NecessityInput(
             text=msg.content,
             is_group=msg.is_chatroom,
             has_at=msg.is_at_me,
             has_mention=self._mentions_me(ctx),
-            activity=self._activity(ctx, now),
+            activity=activity,
             self_replies=self._self_replies(ctx, now),
             recent_messages=self._recent_messages(ctx, now),
         ))
-        if result.score < self.threshold:
+        # 专注模式：聊得正热就盯一会儿；期间不看门控，也不连续沉默退避
+        if result.kind == 'proactive' and self.focus:
+            if self.focus.tick(ctx.contact, now, activity):
+                result = replace(result, focused=True, reasons=(*result.reasons, '专注'))
+        if result.score < self.threshold and not result.focused:
             return None
         # 只有主动参与才退避：被 @ / 叫名字 / 私聊是必须回应的
-        if result.kind == 'proactive' and not self.backoff.allows(ctx.contact, now, ctx.history):
+        if (result.kind == 'proactive' and not result.focused
+                and not self.backoff.allows(ctx.contact, now, ctx.history)):
             return None
         return result
 
@@ -295,9 +305,8 @@ class ChatPlugin(Plugin):
     Expressor 拿人设 + 表达风格 + 决策当作参考，只负责组织语言。
     enable_planner=False 时退回单段（Expressor 直接看着聊天记录说），便于对比。
 
-    决策者只负责「要不要主动插话」这一件事：被 @ / 被叫名字 / 私聊都是必须回应的
-    场景，直接交给表达者，不多花一次调用；只有没人点名的情形才请决策者判断。
-    enable_planner=False 时连这种情况也直接回，便于对比。
+    被 @ / 被叫名字 / 私聊也走决策者——它们只需要表情工具，而工具在决策者手里；
+    区别是这几个场景下决策者的「不发言」被忽略（必须给个回应），只是额外花一次调用。
     """
 
     def __init__(self, ai_provider: AiProvider, context_length: int = 10, policy: ReplyPolicy | None = None,
@@ -371,21 +380,28 @@ class ChatPlugin(Plugin):
 
         history: ChatWindow = ctx.history.latest_n(self.context_length)
         blocks = self._context_blocks(ctx, history)
+        # 这两块是「本轮」的事：专注状态和必须回应，都放请求正文，不进 system prompt
+        if necessity.focused and self.policy.focus:
+            blocks['focus'] = self.policy.focus.describe(ctx.contact)
+        must_speak = necessity.kind != 'proactive'      # 被点名 / 私聊：必须回
+        if must_speak:
+            blocks['must'] = f'这条点名了 {ctx.self_name}，必须给个回应，不能装没看见。'
         transcript = '以下聊天记录供你参考：\n\n' + str(history)
 
         started = time.perf_counter()
         plan = ''
         emoji: Emoji | None = None
-        # 只有「没人点名」才需要决策者判断要不要插话；其余情形直接回，省一次调用
-        if self.enable_planner and necessity.kind == 'proactive':
+        if self.enable_planner:
             if self._tools_ready:
                 decided, emoji, tool_log = await self._plan_with_tools(ctx, blocks, transcript)
             else:
                 decided, tool_log = await self._plan(ctx, necessity, blocks, transcript), ''
-            if decided is not None and not decided.speak:
+            # 必须回应的场景忽略「不发言」，但采纳它挑的表情——
+            # 被 @ 时配个表情本来就是最自然的
+            if decided is not None and not decided.speak and not must_speak:
                 self._trace(ctx, necessity, transcript, None, self._elapsed(started), tool_log)
                 return self._silent(ctx, now, emoji=emoji)
-            if decided is not None:
+            if decided is not None and decided.speak:
                 plan = decided.render()
             if tool_log:
                 plan = f'{plan}\n【工具】\n{tool_log}' if plan else f'【工具】\n{tool_log}'
@@ -407,7 +423,7 @@ class ChatPlugin(Plugin):
     @property
     def _tools_ready(self) -> bool:
         """ 决策者能不能用工具。后端不支持就退回单轮 JSON，功能不受影响。 """
-        return self.enable_tools and self.planner_ai.supports_tools
+        return self.enable_tools and bool(getattr(self.planner_ai, 'supports_tools', False))
 
     def _silent(self, ctx: MessageContext, now: float, emoji: Emoji | None = None) -> Reply:
         """ 这一轮没说话（最多只发了个表情），记一笔给连续沉默退避用。 """
@@ -525,6 +541,9 @@ class ChatPlugin(Plugin):
         不放 system prompt——system 恒定才能吃到 KV 前缀缓存。
         """
         lines = [f'【本轮】{ctx.msg.sender_name}: {ctx.msg.content}']
+        for label, key in (('必须回应', 'must'), ('专注模式', 'focus')):
+            if blocks.get(key):
+                lines.append(f'【{label}】\n{blocks[key]}')
         if plan:
             lines.append(f'【决策】\n{plan}')
         if alternate:

@@ -30,6 +30,8 @@ py-modules = [
     "config",
     "context",
     "describer",
+    "emojis",
+    "focus",
     "habits",
     "main",
     "media",
@@ -43,6 +45,7 @@ py-modules = [
     "profiles",
     "replay_memory",
     "reply_trace",
+    "typos",
     "wechat",
 ]
 

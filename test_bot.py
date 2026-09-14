@@ -1,6 +1,7 @@
 """ Bot 编排自检：决策入队、stop 语义、静音、自身消息忽略。不连 relay。 """
 
 import asyncio
+import random
 import types
 import unittest
 
@@ -131,6 +132,25 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.bot._wechat.sent, [])
 
+    async def test_typos_are_applied_on_send_and_in_history(self):
+        """ 错别字在出站那一刻抖，历史里记的也得是抖过的版本。 """
+        self.bot.typo_rate = 1.0
+        self.bot._rng = random.Random(0)
+        self.bot.set_default_plugin(FakePlugin(texts=['这个我觉得不行，得再改改']))
+        await self.bot.on_message(make_msg())
+        await asyncio.sleep(0.05)
+
+        sent = self.bot._wechat.sent[0][1]
+        self.assertNotEqual(sent, '这个我觉得不行，得再改改')
+        self.assertEqual(len(sent), len('这个我觉得不行，得再改改'))   # 只换字，不增删
+        self.assertEqual(self._window()[-1].text, sent)
+
+    async def test_typos_off_by_default(self):
+        self.bot.set_default_plugin(FakePlugin(texts=['这个我觉得不行']))
+        await self.bot.on_message(make_msg())
+        await asyncio.sleep(0.05)
+        self.assertEqual(self.bot._wechat.sent[0][1], '这个我觉得不行')
+
 
 class FakeDescriber:
     def __init__(self):
@@ -224,8 +244,7 @@ class TestEmojiStealing(unittest.IsolatedAsyncioTestCase):
             async def describe(self, image, max_tokens=64, prompt=''):
                 return '累到不行|加班到很晚、只想趴着的时候'
 
-        # 有热度的才补：先把这张标成本群梗
-        self.bot.emojis.record(Emoji(md5='a' * 32, count=801))
+        # 收到就算本群用过一次（热度 1），够格补场景了
         self.bot.emoji_describer = EmojiDescriber(FakeAi(), self.bot.emojis, model='m')
 
         msg = make_msg(msg_type=47)
@@ -245,16 +264,14 @@ class TestEmojiStealing(unittest.IsolatedAsyncioTestCase):
         await self.bot.on_message(msg)          # 不能抛
         self.assertEqual(self.bot.emojis.get('a' * 32).scene, '')
 
-    async def test_history_only_entry_becomes_sendable_once_seen(self):
-        """ 历史挖出来的只有 md5 + 热度，收到一次补上元数据才能发。 """
-        self.bot.emojis.record(Emoji(md5='a' * 32, count=801))
-        self.assertFalse(self.bot.emojis.get('a' * 32).sendable)
-        msg = make_msg(msg_type=47)
-        msg.content = msg.clean_text = make_sticker()
-        await self.bot.on_message(msg)
-        merged = self.bot.emojis.get('a' * 32)
-        self.assertTrue(merged.sendable)
-        self.assertEqual(merged.count, 801)       # 热度没丢
+    async def test_heat_grows_at_runtime(self):
+        """ 热度不再靠离线重跑：群里每收到一次就加一。 """
+        for expected in (1, 2, 3):
+            msg = make_msg(msg_type=47)
+            msg.content = msg.clean_text = make_sticker()
+            await self.bot.on_message(msg)
+            self.assertEqual(self.bot.emojis.get('a' * 32).count, expected)
+        self.assertTrue(self.bot.emojis.get('a' * 32).sendable)   # XML 自带下载信息
 
     def _stock(self, desc='摊倒', count=EMOJI_LOCAL_ENOUGH, prefix='a'):
         """ 往本地库里塞几张能发的表情。 """

@@ -4,9 +4,9 @@ relay 的 send_emoji 要完整元数据（md5 + cdnurl + encrypturl + aeskey + l
 而 search_emoji 返回的正好就是这个形状——**所以搜到的直接就能发**，
 不用像 MaiBot 那样拼 5x5 图再拿视觉模型挑。
 
-群历史导出的表情只有文件名里的 md5（`emojis/20260213/1770997053_a56b....gif`），
-没有下载地址，所以只能当「这个群的梗」的热度权重；等 relay 真收到这条表情、
-把它带完整 XML 缓存下来，它才变成可发送的。`count` 就是那个热度。
+表情库**没有离线快照**：群里收到一条表情就入库，`count` 是运行期数出来的
+「这个群用过它几次」。历史导出的那 38836 条早就不要了——只有 md5 没有下载地址，
+发了也是白条，而它唯一的用处（热度权重）现在由运行时自己数。
 """
 
 from __future__ import annotations
@@ -75,10 +75,9 @@ def parse_emoji_xml(content: str) -> Emoji | None:
 class EmojiLibrary:
     """ 本地表情库：md5 -> 描述 / 场景 / 元数据 / 群里用过多少次。
 
-    两个来源合到一起：
-      - build_emojis.py 从群历史导出里挖的（只有 md5 + 热度，发不出去）
-      - 运行时收到的（带完整 XML，能原样发回去）
-    能不能发只由 sendable 决定，所以历史那批要等真收到一次才变得可用。
+    全部来自运行时：群里收到的表情（带完整 XML，能原样发回去）、以及联网搜到的
+    （当缓存）。热度也是运行时数出来的——每次在群里看到一次就加一，所以
+    「本群的梗」会随群里的用法自己长出来，不靠任何离线重跑。
     """
 
     def __init__(self, entries: dict[str, Emoji] | None = None):
@@ -131,15 +130,19 @@ class EmojiLibrary:
             json.dumps([item.to_dict() for item in keep], ensure_ascii=False, indent=1),
             encoding='utf-8')
 
-    def record(self, emoji: Emoji | None) -> bool:
-        """ 记一笔，返回库内容是否变了（变了才值得落盘）。 """
+    def record(self, emoji: Emoji | None, used: bool = False) -> bool:
+        """ 记一笔，返回库内容是否变了（变了才值得落盘）。
+
+        used=True 表示「群里又有人发了这一张」——热度是数出来的，加一。
+        联网搜到的结果只当缓存，不加热度（那是表情商店在用，不是群里在用）。
+        """
         if emoji is None or not emoji.md5:
             return False
         existing = self._entries.get(emoji.md5)
         if existing is None:
-            self._entries[emoji.md5] = emoji
+            self._entries[emoji.md5] = replace(emoji, count=emoji.count + 1) if used else emoji
             return True
-        merged = existing.merge(emoji)
+        merged = existing.merge(emoji, bump=used)
         if merged == existing:
             return False
         self._entries[emoji.md5] = merged
@@ -211,7 +214,7 @@ class Emoji:
     thumburl: str = ''
     width: int = 400
     height: int = 400
-    count: int = 0            # 群里用过多少次；0 = 不是从群里偷的
+    count: int = 0            # 群里用过多少次；运行时每看到一次加一
 
     @property
     def sendable(self) -> bool:
@@ -258,17 +261,17 @@ class Emoji:
             scene=str(data.get('scene') or ''),
         )
 
-    def merge(self, other: Emoji) -> Emoji:
+    def merge(self, other: Emoji, bump: bool = False) -> Emoji:
         """ 合并同一张表情的两份记录。
 
-        元数据（下载地址这些）以拿到的那份为准；热度取大的——历史统计永远不会比
-        实时观察少。谁有描述用谁的，因为描述可能来自识图也可能是商店给的。
+        元数据（下载地址这些）以拿到的那份为准；热度取大的再加这一笔。
+        谁有描述用谁的，因为描述可能来自识图也可能是商店给的。
         """
         return replace(
             self if self.sendable else other,
             desc=self.desc or other.desc,
             scene=self.scene or other.scene,
-            count=max(self.count, other.count),
+            count=max(self.count, other.count) + (1 if bump else 0),
         )
 
     def render(self, index: int) -> str:
@@ -304,7 +307,7 @@ def _self_check() -> None:
     # 落盘格式要能完整往返
     assert Emoji.from_dict(emoji.to_dict()) == emoji
 
-    # 只有 md5（历史导出的那批）发不出去，只能当热度
+    # 没有下载地址就发不出去，只能当热度
     history = Emoji(md5='b' * 32, count=7)
     assert not history.sendable and history.heat == '群里用过'
 
@@ -314,7 +317,10 @@ def _self_check() -> None:
     assert merged.sendable and merged.count == 7 and merged.cdnurl == 'http://cdn/z'
     assert merged.desc == ''
     assert live.merge(Emoji(md5='b' * 32, desc='无语', count=99)).desc == '无语'
-    assert live.merge(Emoji(md5='b' * 32, count=99)).count == 99
+    assert live.merge(Emoji(md5='b' * 32, desc='无语', count=99)).count == 99
+    # 群里又用了一次：只有 bump=True 才加一
+    assert live.merge(history, bump=True).count == 8
+    assert live.merge(history).count == 7
     # 反向合并也不能把已有的下载地址丢掉
     assert live.merge(history).cdnurl == 'http://cdn/z'
 
@@ -356,16 +362,20 @@ def _self_check() -> None:
     library = EmojiLibrary()
     assert len(library) == 0 and library  # 空库仍然是真值，否则分不清「没配」和「空」
     assert len(library.search('摊倒')) == 0
-    # 历史那批只有 md5 + 热度：进得了库，但发不出去
-    assert library.record(Emoji(md5='h' * 32, count=30)) is True
-    assert library.record(Emoji(md5='h' * 32, count=9)) is False    # 热度取大，没变
-    assert library.record(Emoji(md5='h' * 32, count=99)) is True    # 热度涨了，算变
-    assert library.get('h' * 32).count == 99
+    # 群里看到一次就地入库：热度 1，没有下载地址就发不出去
+    assert library.record(Emoji(md5='h' * 32), used=True) is True
+    assert library.get('h' * 32).count == 1
     assert library.search('摊倒') == []              # 发不出去的不给模型挑
+    # 又看到一次：热度加一；不传 used 的（联网搜到的缓存）不加热度
+    assert library.record(Emoji(md5='h' * 32), used=True) is True
+    assert library.get('h' * 32).count == 2
+    assert library.record(Emoji(md5='h' * 32)) is False
+    assert library.get('h' * 32).count == 2
     # 真收到一次就补上了元数据，随之变得可搜可发
     library.record(stolen)
     assert library.get('h' * 32).sendable is False
     library.record(Emoji(md5=stolen.md5, desc='摊倒', scene='累到瘫在椅子上时发', cdnurl='http://cdn/x'))
+    assert library.get(stolen.md5).count == 0        # 这条只是入库缓存，不算群里用过
     assert len(library.search('摊倒')) == 1
     assert len(library.search('累到瘫')) == 1        # 场景也能搜中
     assert library.search('') == [] and library.search('无关词') == []

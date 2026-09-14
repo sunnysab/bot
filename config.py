@@ -28,6 +28,13 @@ class Config:
     # 群聊参与：必要性打分阈值（越高越沉默）与活跃度统计窗口
     reply_necessity_threshold: int = 60
     reply_activity_window: float = 180.0
+    # 专注模式（HFC）：群里热起来就盯一会儿，期间不看门控
+    enable_focus: bool = True
+    focus_enter_activity: int = 15      # 活动窗口内别人的消息数够多就进
+    focus_idle_seconds: float = 300.0   # 这么久没新消息自动退出
+    focus_max_seconds: float = 1800.0   # 单次专注最长多久
+    # 错别字：出站文本抖一个同音/形近字的概率（0 关掉）
+    typo_rate: float = 0.08
     # 群友画像（离线生成，见 build_profiles.py）
     profile_path: str = 'memory/profiles.json'
     # 群里的特色用语（离线生成，见 build_habits.py）
@@ -83,6 +90,11 @@ class Config:
             describe_history_limit=int(os.getenv('DESCRIBE_HISTORY_LIMIT', str(cls.describe_history_limit))),
             reply_necessity_threshold=int(os.getenv('REPLY_NECESSITY_THRESHOLD', str(cls.reply_necessity_threshold))),
             reply_activity_window=float(os.getenv('REPLY_ACTIVITY_WINDOW', str(cls.reply_activity_window))),
+            enable_focus=os.getenv('ENABLE_FOCUS', '1').lower() not in ('0', 'false', 'no'),
+            focus_enter_activity=int(os.getenv('FOCUS_ENTER_ACTIVITY', str(cls.focus_enter_activity))),
+            focus_idle_seconds=float(os.getenv('FOCUS_IDLE_SECONDS', str(cls.focus_idle_seconds))),
+            focus_max_seconds=float(os.getenv('FOCUS_MAX_SECONDS', str(cls.focus_max_seconds))),
+            typo_rate=float(os.getenv('TYPO_RATE', str(cls.typo_rate))),
             profile_path=os.getenv('PROFILE_PATH', cls.profile_path),
             habit_path=os.getenv('HABIT_PATH', cls.habit_path),
             moment_path=os.getenv('MOMENT_PATH', cls.moment_path),
@@ -119,4 +131,9 @@ if __name__ == '__main__':
     assert overridden.relay_port == 9098, overridden
     assert overridden.send_interval == 2.5, overridden
     assert overridden.deepseek_key == 'k', overridden
+    # 专注模式与错别字可以从环境变量调
+    assert base.enable_focus and base.typo_rate == 0.08, base
+    os.environ.update(ENABLE_FOCUS='0', TYPO_RATE='0')
+    off = Config.from_env()
+    assert not off.enable_focus and off.typo_rate == 0.0, off
     print('ok')
