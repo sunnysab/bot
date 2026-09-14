@@ -5,10 +5,10 @@ from pathlib import Path
 from typing import override
 
 from loguru import logger
+from weixin_bot import Message
 
 from ai import AiProvider
 from context import ChatWindow, MessageContext, SingleRecord
-from wechat import Message
 
 
 @dataclass(slots=True)

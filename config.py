@@ -1,19 +1,45 @@
 import os
+from dataclasses import dataclass
 
-__DEFAULT_DEEPSEEK_KEY = 'your-deepseek-key'
-__DEFAULT_DEEPSEEK_MODEL = 'deepseek-flash'
-__DEFAULT_OLLAMA_HOST = 'http://localhost:11434'
-__RELAY_HOST = '127.0.0.1'
-__RELAY_PORT = 9099
 
-CONFIG = {
-    'deepseek-key': os.getenv('DEEPSEEK_KEY', __DEFAULT_DEEPSEEK_KEY),
-    'deepseek-model': os.getenv('DEEPSEEK_MODEL', __DEFAULT_DEEPSEEK_MODEL),
-    'ollama-host': os.getenv('OLLAMA_HOST', __DEFAULT_OLLAMA_HOST),
-    'relay-host': os.getenv('RELAY_HOST', __RELAY_HOST),
-    'relay-port': int(os.getenv('RELAY_PORT', __RELAY_PORT)),
+@dataclass(frozen=True)
+class Config:
+    """ 运行配置。全部来自环境变量，启动时一次性读取。 """
+
+    relay_host: str = '127.0.0.1'
+    relay_port: int = 9099
     # 走 Unix domain socket 时填写（如 /tmp/weixin-relay.sock），否则留空走 TCP
-    'relay-unix': os.getenv('RELAY_UNIX', ''),
+    relay_unix: str = ''
+    deepseek_key: str = ''
+    deepseek_model: str = 'deepseek-flash'
+    ollama_host: str = 'http://localhost:11434'
     # 全局最小发送间隔（秒），规避微信风控
-    'send-interval': float(os.getenv('SEND_INTERVAL', '1.0')),
-}
+    send_interval: float = 1.0
+    log_path: str = 'bot.log'
+    log_level: str = 'DEBUG'
+
+    @classmethod
+    def from_env(cls) -> 'Config':
+        return cls(
+            relay_host=os.getenv('RELAY_HOST', cls.relay_host),
+            relay_port=int(os.getenv('RELAY_PORT', str(cls.relay_port))),
+            relay_unix=os.getenv('RELAY_UNIX', cls.relay_unix),
+            deepseek_key=os.getenv('DEEPSEEK_KEY', cls.deepseek_key),
+            deepseek_model=os.getenv('DEEPSEEK_MODEL', cls.deepseek_model),
+            ollama_host=os.getenv('OLLAMA_HOST', cls.ollama_host),
+            send_interval=float(os.getenv('SEND_INTERVAL', str(cls.send_interval))),
+            log_path=os.getenv('LOG_PATH', cls.log_path),
+            log_level=os.getenv('LOG_LEVEL', cls.log_level),
+        )
+
+
+if __name__ == '__main__':
+    # 自检：无环境变量时用默认值，有环境变量时覆盖
+    base = Config.from_env()
+    assert base.relay_port == 9099 and base.send_interval == 1.0 and base.deepseek_key == '', base
+    os.environ.update(RELAY_PORT='9098', SEND_INTERVAL='2.5', DEEPSEEK_KEY='k')
+    overridden = Config.from_env()
+    assert overridden.relay_port == 9098, overridden
+    assert overridden.send_interval == 2.5, overridden
+    assert overridden.deepseek_key == 'k', overridden
+    print('ok')

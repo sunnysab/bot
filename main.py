@@ -2,16 +2,23 @@ import asyncio
 import random
 import time
 from abc import abstractmethod
+from typing import TypeVar
 
 from loguru import logger
 
 from ai import Deepseek
+from config import Config
 from context import ContextManager, MessageContext
 from outbound import Outbound, OutboundQueue
 from plugin import ChatPlugin, EndProcessing, Plugin, PluginManager, RepeatPlugin, Reply
 from wechat import Message, Wechat
 
-logger.add(sink='bot.log', level='DEBUG')
+T = TypeVar('T')
+
+
+def _aslist(x: T | list[T]) -> list[T]:
+    """ 把「单个对象或列表」统一成列表。 """
+    return x if isinstance(x, list) else [x]
 
 
 class Preprocessor:
@@ -83,20 +90,14 @@ class Bot:
         self._wechat.on_ready(func)
 
     def add_preprocessor(self, preprocessor: Preprocessor | list[Preprocessor]):
-        if isinstance(preprocessor, list):
-            self._preprocessors.extend(preprocessor)
-        else:
-            self._preprocessors.append(preprocessor)
+        self._preprocessors.extend(_aslist(preprocessor))
 
     def set_default_plugin(self, plugin: Plugin | list[Plugin]):
-        plugins = [plugin] if isinstance(plugin, Plugin) else plugin
-
-        for p in plugins:
+        for p in _aslist(plugin):
             self._plugins.register(p)
 
     def attach(self, contact: str, plugin: Plugin | list[Plugin]):
-        plugins = [plugin] if isinstance(plugin, Plugin) else plugin
-        for p in plugins:
+        for p in _aslist(plugin):
             self._plugins.map_plugin_to_contact(contact, p)
 
     async def load_context(self, session_count: int = 10, window_size: int = 30) -> None:
@@ -177,18 +178,19 @@ class Bot:
 
 
 def main():
-    from config import CONFIG
+    config = Config.from_env()
+    logger.add(sink=config.log_path, level=config.log_level)
 
-    bot = Bot(CONFIG['relay-host'], CONFIG['relay-port'], unix_path=CONFIG['relay-unix'], x_delay=0.5,
-              send_interval=CONFIG['send-interval'])
+    bot = Bot(config.relay_host, config.relay_port, unix_path=config.relay_unix, x_delay=0.5,
+              send_interval=config.send_interval)
 
-    if CONFIG['deepseek-key'] in ('', 'your-deepseek-key'):
+    if not config.deepseek_key:
         logger.warning('DEEPSEEK_KEY 未设置，ChatPlugin 将无法调用模型')
 
     # 初始化预处理器和插件
     bot.add_preprocessor(MediaProcessor())
 
-    ai_provider = Deepseek(key=CONFIG['deepseek-key'], model=CONFIG['deepseek-model'], temperature=0.85)
+    ai_provider = Deepseek(key=config.deepseek_key, model=config.deepseek_model, temperature=0.85)
     repeater = RepeatPlugin()
     chat_plugin = ChatPlugin(ai_provider, context_length=30)
 
