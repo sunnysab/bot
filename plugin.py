@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import random
 import time
@@ -201,7 +202,7 @@ class ChatPlugin(Plugin):
                  persona: Persona | None = None, profiles: ProfileStore | None = None,
                  habits: HabitStore | None = None, memories: MomentStore | None = None,
                  tracer: TraceLogger | None = None, enable_planner: bool = True,
-                 rng: random.Random | None = None):
+                 timeout: float = 60.0, rng: random.Random | None = None):
         """ 聊天插件
 
         :param ai_provider: AI 服务提供者
@@ -213,6 +214,7 @@ class ChatPlugin(Plugin):
         :param memories: 中期记忆；按当前消息关键词召回，命中才注入
         :param tracer: 回复轨迹记录；传了就把每轮触发/上下文/回复写成 JSONL
         :param enable_planner: 是否跑两段式；False 则只调 Expressor
+        :param timeout: 单次模型调用超时（秒）
         :param rng: 抽临时风格用的随机源，测试时可注入
         """
         self.ai = ai_provider
@@ -224,6 +226,7 @@ class ChatPlugin(Plugin):
         self.memories = memories
         self.tracer = tracer
         self.enable_planner = enable_planner
+        self.timeout = timeout
         self.rng = rng
 
         from jinja2 import Template
@@ -298,7 +301,13 @@ class ChatPlugin(Plugin):
         return await self._ask(prompt, message, ctx, image=ctx.is_image)
 
     async def _ask(self, prompt: str, message: str, ctx: MessageContext, image: bool = False) -> list[str] | None:
-        return await self.ai.chat(prompt.strip(), await self._build_message(ctx, message, image))
+        """ 调模型。超时或报错只当这次没结果——不能让一次 API 抽风拖死消息处理链。 """
+        try:
+            return await asyncio.wait_for(
+                self.ai.chat(prompt.strip(), await self._build_message(ctx, message, image)), self.timeout)
+        except Exception as e:
+            logger.warning(f'调用模型失败（{ctx.contact}）: {e}')
+            return None
 
     @staticmethod
     def _elapsed(started: float) -> int:

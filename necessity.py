@@ -21,8 +21,10 @@ PRESENCE_FREE_RATIO = 0.25
 PRESENCE_FULL_RATIO = 0.60
 PRESENCE_PENALTY_MAX = 25
 
-# 活跃度压力：群里聊得越热，主动参与的压力越大
-PRESSURE_MAX = 45
+# 活跃度压力：群里聊得越热，主动参与的压力越大。
+# 封顶 60 = 阈值，所以「群足够热」本身就能触发参与，不必等有人提问；
+# 普通陈述句（内容分 0）需要活动窗口内 10 条别人的消息才够格。
+PRESSURE_MAX = 60
 PRESSURE_FULL_ACTIVITY = 10  # 活动窗口内 10 条别人的消息即拿满
 
 QUESTION_TERMS = ('怎么', '如何', '为什么', '有没有', '是不是', '哪里有')
@@ -157,6 +159,8 @@ def _self_check() -> None:
     assert score_necessity(NecessityInput('在吗', True, False, True)).score == 80
     assert score_necessity(NecessityInput('在吗', False, False, False)).kind == 'private'
 
+    # 热聊群里说句闲话就能插嘴
+    assert score('今天真冷', activity=10).score >= NECESSITY_THRESHOLD
     # 冷清群里说句闲话，不够格
     assert score('大家好啊', activity=1).score < NECESSITY_THRESHOLD
     # 热聊群里抛问题，够格
@@ -167,8 +171,9 @@ def _self_check() -> None:
     assert score('谁能帮我看看', activity=8).score >= NECESSITY_THRESHOLD
     # 自己刷屏后，同样的问题被压回阈值下
     assert score('这个怎么弄啊', activity=10, self_replies=6, recent_messages=10).score < NECESSITY_THRESHOLD
-    # 媒体占位不加分
-    assert score('[图片：一只橘猫]', activity=10).score < NECESSITY_THRESHOLD
+    # 媒体占位不算内容分（但热聊群靠活跃度照样能触发）
+    assert score('[图片：一只橘猫]', activity=10).score == score('一句平平无奇的话', activity=10).score
+    assert score('[图片：一只橘猫]', activity=5).score < NECESSITY_THRESHOLD
 
     print('necessity self-check ok')
 

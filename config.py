@@ -42,6 +42,8 @@ class Config:
     style_probability: float = 0.0
     # 两段式：Planner 判断说与不说，Expressor 负责说成人话
     enable_planner: bool = True
+    # 单次模型调用超时（秒），避免一次 API 抽风拖死消息处理链
+    request_timeout: float = 60.0
     # 回复轨迹 JSONL（攒数据给以后做效果评估）
     trace_path: str = 'reply_trace.jsonl'
     log_path: str = 'bot.log'
@@ -74,6 +76,7 @@ class Config:
             reply_styles=os.getenv('REPLY_STYLES', cls.reply_styles),
             style_probability=float(os.getenv('STYLE_PROBABILITY', str(cls.style_probability))),
             enable_planner=os.getenv('ENABLE_PLANNER', '1').lower() not in ('0', 'false', 'no'),
+            request_timeout=float(os.getenv('REQUEST_TIMEOUT', str(cls.request_timeout))),
             trace_path=os.getenv('TRACE_PATH', cls.trace_path),
             log_path=os.getenv('LOG_PATH', cls.log_path),
             log_level=os.getenv('LOG_LEVEL', cls.log_level),

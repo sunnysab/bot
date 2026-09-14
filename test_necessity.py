@@ -32,7 +32,14 @@ class TestNecessity(unittest.TestCase):
         self.assertLess(noisy.score, NECESSITY_THRESHOLD)
 
     def test_media_placeholder_gains_nothing(self):
-        self.assertLess(score('[图片：一只橘猫]', activity=20).score, NECESSITY_THRESHOLD)
+        # 媒体占位不算内容分，但热聊群的活跃度压力照旧（图片本身也值得评一句）
+        self.assertEqual(score('[图片：一只橘猫]', activity=20).score,
+                         score('一句平平无奇的话', activity=20).score)
+        self.assertLess(score('[图片：一只橘猫]', activity=5).score, NECESSITY_THRESHOLD)
+
+    def test_active_group_plain_chatter_triggers(self):
+        # 封顶 60 = 阈值：群热到 10 条/窗口，普通闲聊也能参与
+        self.assertGreaterEqual(score('今天真冷', activity=10).score, NECESSITY_THRESHOLD)
 
     def test_score_never_negative(self):
         self.assertGreaterEqual(score('哈哈哈哈', activity=0, self_replies=9, recent_messages=10).score, 0)

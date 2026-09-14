@@ -57,7 +57,7 @@ def main():
         alternate_probability=config.style_probability)
     chat_plugin = ChatPlugin(ai_provider, context_length=30, policy=policy, persona=persona, profiles=profiles,
                              habits=habits, memories=memory_store, tracer=TraceLogger(config.trace_path),
-                             enable_planner=config.enable_planner)
+                             enable_planner=config.enable_planner, timeout=config.request_timeout)
 
     bot.set_default_plugin([repeater, chat_plugin])
     bot.attach('研究生摆烂群', EndProcessing())

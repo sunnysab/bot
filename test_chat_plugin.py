@@ -211,6 +211,17 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('你想起的旧事', self.ai.planner_calls[1][0])
             store.close()
 
+    async def test_model_failure_does_not_break_the_round(self):
+        """ 一次 API 抽风不能把消息处理链拖死。 """
+        class Boom:
+            async def chat(self, prompt, message):
+                raise RuntimeError('api down')
+
+        plugin = ChatPlugin(Boom(), context_length=10)
+        reply = await plugin.handle(make_ctx(make_msg(is_chatroom=False)))
+        self.assertEqual(reply.texts, [])
+        self.assertTrue(reply.stop)
+
     async def test_tracer_records_the_round(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'trace.jsonl'
