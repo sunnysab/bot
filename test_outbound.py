@@ -50,6 +50,20 @@ class TestOutboundQueue(unittest.IsolatedAsyncioTestCase):
         await queue.stop()
         self.assertEqual([text for _, text in self.sent], ['hi'])
 
+    async def test_backlog_shrinks_typing_delay(self):
+        """ 积压时不再逐条装打字：一整块必须明显快于「条数 × 单条延迟」，否则跟不上群。 """
+        queue = OutboundQueue(self._send, min_interval=0, typing_delay=lambda text: 0.3)
+        await queue.start()
+        started = asyncio.get_running_loop().time()
+        for i in range(5):
+            queue.put('u', f'm{i}')
+        while len(self.sent) < 5:
+            await asyncio.sleep(0.01)
+        elapsed = asyncio.get_running_loop().time() - started
+        await queue.stop()
+        self.assertEqual([text for _, text in self.sent], [f'm{i}' for i in range(5)])
+        self.assertLess(elapsed, 1.0, elapsed)   # 不压缩至少要 1.5s
+
 
 if __name__ == '__main__':
     unittest.main()

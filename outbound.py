@@ -81,7 +81,10 @@ class OutboundQueue:
         while True:
             item = await self._queue.get()
             if item.text and self._typing_delay:
-                delay = self._typing_delay(item.text)
+                # 队列里还有积压 = 已经落后群里的节奏了。这时还逐条按真人打字速度磨，
+                # 回复会迟到几分钟，群里话题早翻篇了（实测 2~3 分钟，见 notes）。
+                # 按积压深度等比砍，清空后恢复满速拟人。
+                delay = self._typing_delay(item.text) / (1 + self._queue.qsize())
                 bus.publish(Status.TYPING, chat_id=item.receiver, chat_name=item.chat_name,
                             reply_to=item.reply_to, origin='bot',
                             detail=f'拟人延迟 {delay:.1f}s')
