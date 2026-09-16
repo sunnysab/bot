@@ -11,7 +11,7 @@ from bot import EMOJI_LOCAL_ENOUGH, Bot
 from context import ChatWindow
 from emojis import Emoji, EmojiLibrary
 from media import Media, render
-from plugin import EndProcessing, Plugin, Reply
+from plugin import EndProcessing, Plugin, RepeatPlugin, Reply
 
 # relay 回的 server_id：真实量级是 19 位，故意用超过 JS 安全整数 2^53 的值
 RELAY_MSG_ID = 4212345678901234567
@@ -267,6 +267,141 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.history.sizes(), {'456@chatroom': 2})   # 入站 + 自己的回复
         self.assertEqual(self.bot.reply_count, 1)
         self.assertEqual(self.bot.outbox.depth(), 0)
+
+    async def test_reply_is_in_history_before_it_is_sent(self):
+        """回复一决策就写历史，不等打字延迟过完。
+
+        否则对方在这几秒里又发一条，下一轮决策看不到自己即将发出的那句，会再答一遍
+        （日志里的「在？/有事」被回了两次）。
+        """
+        self.bot.outbox._typing_delay = lambda text: 0.2
+        self.bot.set_default_plugin(FakePlugin(texts=['在的 咋啦']))
+        await self.bot.on_message(make_msg(text='在？'))
+        await asyncio.sleep(0.05)          # 回复在后台任务里跑，等它入队
+
+        self.assertEqual(self.bot._wechat.sent, [])        # 还没真发出去
+        self.assertEqual([r.text for r in self._window()], ['在？', '在的 咋啦'])
+        await asyncio.sleep(0.3)
+        self.assertEqual([text for _, text in self.bot._wechat.sent], ['在的 咋啦'])
+
+    async def test_next_turn_sees_the_pending_reply(self):
+        """对方连发时，后一条的上下文里要看得到前一条还没发出的回复。 """
+        seen: list[str] = []
+
+        class Inspector(Plugin):
+            async def handle(self, ctx):
+                seen.extend(r.text for r in ctx.history)
+                return Reply(texts=['在 咋了'], stop=True)
+
+        self.bot.outbox._typing_delay = lambda text: 0.2
+        self.bot.set_default_plugin(FakePlugin(texts=['在的 咋啦']))
+        await self.bot.on_message(make_msg(text='在？'))
+        await asyncio.sleep(0.05)          # 让第一轮跑完、把回复写进历史
+        self.bot.set_default_plugin(Inspector())
+        await self.bot.on_message(make_msg(text='有事'))
+        await asyncio.sleep(0.6)
+
+        self.assertIn('在的 咋啦', seen)                    # 第二条决策看得到第一条回复
+        self.assertEqual(self.bot._wechat.sent,
+                         [('456@chatroom', '在的 咋啦'), ('456@chatroom', '在 咋了')])
+
+    async def test_messages_during_a_turn_form_one_next_block(self):
+        """一轮还没跑完时又来的消息合并成**下一轮**，不是一条一轮地追。 """
+        calls: list[str] = []
+        release = asyncio.Event()
+
+        class Slow(Plugin):
+            async def handle(self, ctx):
+                calls.append(ctx.msg.content)
+                if len(calls) == 1:
+                    await release.wait()        # 卡住第一轮，让后面的消息攒起来
+                return Reply(texts=[f'回 {ctx.msg.content}'], stop=True)
+
+        def quiet(text):
+            msg = make_msg(text=text)
+            msg.is_at_me = False
+            return msg
+
+        self.bot.set_default_plugin(Slow())
+        await self.bot.on_message(quiet('第一条'))
+        await asyncio.sleep(0)                 # 让第一轮起跑并卡住
+        await self.bot.on_message(quiet('第二条'))
+        await self.bot.on_message(quiet('第三条'))
+        release.set()
+        await asyncio.sleep(0.1)
+
+        # 第一轮只看到第一条；二、三条合并成一轮，以最新那条为「本轮」（历史里三条都在）
+        self.assertEqual(calls, ['第一条', '第三条'])
+        self.assertEqual(self.bot._wechat.sent, [('456@chatroom', '回 第一条'),
+                                                 ('456@chatroom', '回 第三条')])
+        self.assertEqual(self.bot._turns, {})   # 跑完的会话任务自己清掉
+
+    async def test_at_in_a_later_block_still_wins(self):
+        """忙的时候被 @、紧跟着一句闲话：下一轮要拿 @ 的那条当本轮，不能被闲话顶掉。 """
+        calls: list[str] = []
+        release = asyncio.Event()
+
+        class Slow(Plugin):
+            async def handle(self, ctx):
+                calls.append(ctx.msg.content)
+                if len(calls) == 1:
+                    await release.wait()
+                return Reply(texts=['ok'], stop=True)
+
+        def msg(text, at):
+            item = make_msg(text=text)
+            item.is_at_me = at
+            return item
+
+        self.bot.set_default_plugin(Slow())
+        await self.bot.on_message(msg('开场', at=False))
+        await asyncio.sleep(0)
+        await self.bot.on_message(msg('哈哈', at=False))
+        await self.bot.on_message(msg('@机器人 在吗', at=True))
+        release.set()
+        await asyncio.sleep(0.1)
+
+        self.assertEqual(calls, ['开场', '@机器人 在吗'])
+
+    async def test_repeat_happens_once_even_before_the_first_reply_is_sent(self):
+        """复读一次后，即便那条回复还没真发出去，也不能再复读一次。
+
+        线上 bug：第二条队形触发复读、回复卡在出站队列里（relay RPC 还没回），第三条队形
+        紧跟着进来；当时历史是发完才写的，复读机看不到自己刚复读过，就再跟一遍。
+        """
+        self.bot.outbox._typing_delay = lambda text: 0.3
+        self.bot.set_default_plugin(RepeatPlugin())
+
+        def line(text, who):
+            msg = make_msg(text=text)
+            msg.sender_name = who
+            return msg
+
+        await self.bot.on_message(line('牛啊', 'Alice'))
+        await self.bot.on_message(line('牛啊', 'Bob'))
+        await asyncio.sleep(0.05)          # 复读已入队，但还没发出去
+        self.assertEqual(self.bot._wechat.sent, [])
+        await self.bot.on_message(line('牛啊', 'Carol'))
+        await asyncio.sleep(0.8)
+
+        self.assertEqual([text for _, text in self.bot._wechat.sent], ['牛啊'])
+
+    async def test_repeat_is_verbatim(self):
+        """复读必须一字不改——抖了错别字就不叫复读了。 """
+        self.bot.typo_rate = 1.0
+        self.bot._rng = random.Random(0)
+        self.bot.set_default_plugin(RepeatPlugin())
+
+        def line(text, who):
+            msg = make_msg(text=text)
+            msg.sender_name = who
+            return msg
+
+        await self.bot.on_message(line('牛啊牛啊', 'Alice'))
+        await self.bot.on_message(line('牛啊牛啊', 'Bob'))
+        await asyncio.sleep(0.05)
+
+        self.assertEqual([text for _, text in self.bot._wechat.sent], ['牛啊牛啊'])
 
     async def test_typos_are_applied_on_send_and_in_history(self):
         """ 错别字在出站那一刻抖，历史里记的也得是抖过的版本。 """

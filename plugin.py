@@ -84,6 +84,7 @@ class Reply:
     texts: list[str] = field(default_factory=list)
     stop: bool = False
     emoji: Emoji | None = None      # 本轮要发的表情；发送由 Bot 统一走队列，插件不发
+    verbatim: bool = False          # 一字不改发出去（复读机：抖错别字就不叫复读了）
 
 
 # 模型爱顺手包上的东西：只剥真正在「包裹」的引号，括号不动
@@ -192,14 +193,14 @@ class RepeatPlugin(Plugin):
         self.repeat_count = repeat_count
         self.context_length = context_length
         self.max_length = max_length
-        # 为了避免重复回复，记录上一次重复的消息。
-        # key 是聊天窗口编号，value 是最后一次重复的消息（去重）
-        self.last_repeat = {}
 
     @override
     async def handle(self, ctx: MessageContext) -> Reply | None:
-        """ 跟队形回复。 如果去掉中文英文标点及表情后的消息连续重复特定数量，则凑个热闹跟着回复一句。 """
-        msg = ctx.msg
+        """ 跟队形回复。 如果去掉中文英文标点及表情后的消息连续重复特定数量，则凑个热闹跟着回复一句。
+
+        去重靠**历史里自己说过的话**（`blocked`），所以 Bot 必须在决策那一刻就把回复写进
+        历史：历史晚写一步，紧接着又来了第三条队形，这里就看不到自己刚复读过，会再复读一遍。
+        """
         if not ctx.is_text:  # 只处理文本消息
             return None
 
@@ -234,8 +235,7 @@ class RepeatPlugin(Plugin):
         if len(text) > self.max_length:
             return None
 
-        self.last_repeat[msg.reply_target] = text
-        return Reply(texts=[text], stop=True)
+        return Reply(texts=[text], stop=True, verbatim=True)
 
 
 @dataclass(frozen=True)

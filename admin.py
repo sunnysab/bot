@@ -486,7 +486,8 @@ class Admin:
 
     async def _send_manual(self, chat: str, text: str) -> None:
         sender = await self._wechat.get_display_name(self._wechat.wxid, chat)
-        self.runtime.bot.outbox.put(chat, text, sender=sender, chat_name=chat)
+        # 走 Bot.enqueue：和机器人自己回复一样先写历史，模型才知道「我」说过这句
+        self.runtime.bot.enqueue(chat, text, sender=sender, chat_name=chat)
 
     def set_focus(self, chat: str, on: bool) -> dict:
         """ 手动进/出专注。手动进出不进冷却（FocusMode.enter/exit 本来就支持）。 """

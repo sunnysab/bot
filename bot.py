@@ -1,3 +1,4 @@
+import asyncio
 import random
 import time
 from typing import TypeVar
@@ -90,6 +91,9 @@ class Bot:
         self.reply_count = 0
         self._rng = rng or random.Random()
         self._emoji_saved_at = time.time()
+        # 每个会话一轮跑一个：跑 LLM 的那几秒里新来的消息攒成下一块，等这轮结束合成一轮处理
+        self._turns: dict[str, asyncio.Task] = {}
+        self._blocks: dict[str, list[tuple[Message, str, str]]] = {}
 
         assert x_delay >= 0
         self.delay_coefficient = x_delay
@@ -179,6 +183,8 @@ class Bot:
 
     async def stop(self):
         await self._wechat.stop()
+        # 收到一半的块不再跑：先停会话任务，再停发送队列
+        await self._stop_turns()
         if self.emoji_describer:
             await self.emoji_describer.join()
         self.save_emojis()
@@ -187,6 +193,15 @@ class Bot:
             await self._describer.stop()
         if self._keeper:
             await self._keeper.join()  # 收尾：等在跑的压缩任务写完
+
+    async def _stop_turns(self) -> None:
+        tasks = list(self._turns.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._turns.clear()
+        self._blocks.clear()
 
     def _on_evicted(self, chat: str, record: SingleRecord) -> None:
         """ 消息滑出上下文窗口，交给中期记忆。 """
@@ -251,44 +266,61 @@ class Bot:
         typing = len(text) * self.delay_coefficient * random.uniform(0.7, 1.3)
         return min(think + typing, 50)
 
-    async def _deliver(self, item: Outbound) -> None:
-        """ 真正发送并写入上下文，由 OutboundQueue 串行调用。 """
+    def enqueue(self, chat: str, text: str = '', sender: str = '', reply_to=None,
+                chat_name: str = '', emoji: Emoji | None = None, verbatim: bool = False) -> None:
+        """ 决策已定：**先把这条写进历史**，再交给出站队列。
+
+        历史在决策时就落，不等真发出去。回复会卡在打字延迟和最小发送间隔里好几秒，
+        这期间对方可能又发来消息、又跑一轮决策；只有历史已经记下这句，下一轮才
+        不会把自己还没发出去的话再答一遍（日志里「在？/有事」被回两次就是这个原因）。
+
+        verbatim：一字不改。复读机要的就是原句，抖错别字就不叫复读了。
+        """
         # 错别字只在出站这一刻抖，历史里记的也是抖过的版本——跟真人一致
-        text = apply_typos(item.text, self.typo_rate, self._rng) if item.text else ''
-        if item.text and text != item.text:
+        final = (text if verbatim else apply_typos(text, self.typo_rate, self._rng)) if text else ''
+        if text and not verbatim and final != text:
             self.typo_count += 1
-        if text or item.emoji:
+        if final or emoji:
             self.reply_count += 1
-        if item.emoji:
+        if emoji:
             self.emoji_count += 1
-        stored = text or (f'[表情：{item.emoji.desc or "表情"}]' if item.emoji else '')
+        stored = final or (f'[表情：{emoji.desc or "表情"}]' if emoji else '')
+        # 演习：没发出去、不进历史、也不在 relay 里。正文只能靠事件带出去
+        if stored and not self.dry_run:
+            self._history.push_message(chat, sender, stored, int(time.time()), is_self=True)
+        if final:
+            self.outbox.put(chat, final, sender=sender, reply_to=reply_to, chat_name=chat_name)
+        if emoji:
+            # 表情排在文字后面：先说一句，再补个表情收尾
+            self.outbox.put_emoji(chat, emoji, sender=sender, reply_to=reply_to, chat_name=chat_name)
+
+    async def _deliver(self, item: Outbound) -> None:
+        """ 真正发送，由 OutboundQueue 串行调用。历史和计数在 enqueue 时就已经落好。 """
         # relay 给的 server_id：这条出站消息在 relay 里的身份。拿不到就留空
         relay_id = None
         error = ''
         try:
-            if text:
-                result = await self._wechat.send_text(text, item.receiver)
+            if item.text:
+                result = await self._wechat.send_text(item.text, item.receiver)
                 relay_id = _relay_id(result)
             if item.emoji:
                 result = await self._wechat.send_emoji(item.emoji, item.receiver)
                 relay_id = relay_id or _relay_id(result)
         except Exception as e:
             # relay 长链发送回执解析有 bug：消息通常已经投递出去，重发会重复发。
-            # 所以只告警不重试，但仍然写历史，否则下一轮模型看不到自己说过的话。
-            # ponytail: 真·投递失败时历史会多一条，靠日志排查
+            # 所以只告警不重试；历史在 enqueue 时已经写过，下一轮模型仍看得到。
             error = str(e)
             logger.warning(f'发送报错，按已投递处理（不重试）{item.receiver}: {e}')
 
         if self.dry_run:
             # 演习：没发出去、不进历史、也不在 relay 里。正文只能靠事件带出去，
             # 否则面板上这条回复就彻底消失了
+            stored = item.text or (f'[表情：{item.emoji.desc or "表情"}]' if item.emoji else '')
             bus.publish(Status.DRY_RUN, chat_id=item.receiver, chat_name=item.chat_name,
                         reply_to=item.reply_to, origin='bot', text=stored,
                         detail='演习模式，未发送')
             return
 
-        if stored:
-            self._history.push_message(item.receiver, item.sender, stored, int(time.time()), is_self=True)
         bus.publish(Status.FAILED if error else Status.SENT, chat_id=item.receiver,
                     chat_name=item.chat_name, msg_id=relay_id, reply_to=item.reply_to,
                     origin='bot', detail=error[:200])
@@ -300,13 +332,88 @@ class Bot:
                              download=lambda: self._wechat.media_bytes(msg))
         texts: list[str] = []
         emoji = None
+        verbatim = False
         for plugin in self._plugins.get_plugins_for_contact(source):
             reply = await plugin.handle(ctx) or Reply()
             texts.extend(reply.texts)
             emoji = emoji or reply.emoji
+            verbatim = verbatim or reply.verbatim
             if reply.stop:
                 break
-        return Reply(texts=texts, emoji=emoji)
+        return Reply(texts=texts, emoji=emoji, verbatim=verbatim)
+
+    def _schedule_turn(self, msg: Message, self_name: str, source: str) -> None:
+        """ 把这条消息排进它所在会话的「当前这一块」，交由后台任务回复。
+
+        一轮 LLM 要跑好几秒，期间同一会话可能又来了几条（on_message 不再堵住 SDK 事件队列）。
+        它们都进同一块，等这一轮跑完合成**一轮**（历史里全在，模型一次看全），
+        而不是一条一轮地追——群里一热闹就永远落后。不同会话各跑各的，互不阻塞。
+        """
+        contact = msg.reply_target
+        self._blocks.setdefault(contact, []).append((msg, self_name, source))
+        task = self._turns.get(contact)
+        if task is None or task.done():
+            self._turns[contact] = asyncio.create_task(self._turn_loop(contact),
+                                                       name=f'turn:{contact}')
+
+    @staticmethod
+    def _pick_trigger(block: list[tuple[Message, str, str]]) -> tuple[Message, str, str]:
+        """ 从一块里挑「本轮」那条：优先被 @ 的（最该回），否则取最新。
+
+        不能一律取最新：忙的时候别人 @ 了机器人、紧跟着又一句「哈哈」，拿「哈哈」当本轮
+        会被门控判成不值得回，那个 @ 就没人理了。
+        """
+        for item in block:
+            if item[0].is_at_me:
+                return item
+        return block[-1]
+
+    async def _turn_loop(self, contact: str) -> None:
+        """ 一个会话的回复循环：把攒到的块一轮一轮跑完。 """
+        try:
+            while (block := self._blocks.pop(contact, None)) is not None:
+                msg, self_name, source = self._pick_trigger(block)
+                try:
+                    await self._reply_once(msg, self_name, source)
+                except Exception as e:  # 一轮报错不能把整个会话的回复循环带死
+                    logger.error(f'回复处理失败（{contact}）: {e}', exc_info=True)
+        finally:
+            # 这里跟 _schedule_turn 无 await 交错：pop 拿到 None 到 pop 掉 task 之间
+            # 不让出事件循环，所以不会丢掉刚要进来的消息
+            if self._turns.get(contact) is asyncio.current_task():
+                self._turns.pop(contact, None)
+
+    async def _reply_once(self, msg: Message, self_name: str, source: str) -> None:
+        """ 跑一轮插件链并把回复写历史 + 入队。 """
+        response = await self._run_plugins(msg, self_name, source)
+        if not response.texts and not response.emoji:
+            logger.debug('no response to send.')
+            # 插件链什么都没说，而且这一轮也没留下别的埋点（语音消息、或该会话静音），
+            # 补一条，否则面板上这条消息会永远停在「已接收」
+            latest = bus.status_of(msg.msg_id)
+            if latest is not None and latest.status == Status.RECEIVED:
+                kind = MessageKind.of(msg.msg_type)
+                handled = kind in (MessageKind.TEXT, MessageKind.IMAGE)
+                label = FILTERED_KINDS.get(kind, kind.name)
+                bus.publish(Status.MUTED if handled else Status.UNSUPPORTED,
+                            chat_id=msg.reply_target, chat_name=source, msg_id=msg.msg_id,
+                            detail='该会话已静音' if handled else f'{label}消息不回复')
+            return  # 没有回复内容
+
+        # 交给全局发送队列统一限流和拟人延迟，避免阻塞消息接收循环
+        texts = [text for text in response.texts if not is_placeholder(text)]
+        if len(texts) != len(response.texts):
+            logger.warning(f'拦下 {len(response.texts) - len(texts)} 条媒体占位符，不往群里发：{response.texts}')
+            bus.publish(Status.PLACEHOLDER_BLOCKED, chat_id=msg.reply_target, chat_name=source,
+                        msg_id=msg.msg_id,
+                        detail=f'拦下 {len(response.texts) - len(texts)} 条媒体占位符')
+        for text in texts:
+            self.enqueue(msg.reply_target, text, sender=self_name,
+                         reply_to=msg.msg_id, chat_name=source, verbatim=response.verbatim)
+        if response.emoji:
+            self.enqueue(msg.reply_target, sender=self_name, reply_to=msg.msg_id,
+                         chat_name=source, emoji=response.emoji)
+        logger.debug(f'{len(texts)} responses queued.')
 
     async def on_message(self, msg: Message) -> None:
         """ 消息处理函数 """
@@ -362,32 +469,7 @@ class Bot:
                         msg_id=msg.msg_id, detail=f'积压 {ago // 60} 分钟，只记不回')
             return
 
-        response = await self._run_plugins(msg, self_name, source)
-        if not response.texts and not response.emoji:
-            logger.debug('no response to send.')
-            # 插件链什么都没说，而且这一轮也没留下别的埋点（语音消息、或该会话静音），
-            # 补一条，否则面板上这条消息会永远停在「已接收」
-            latest = bus.status_of(msg.msg_id)
-            if latest is not None and latest.status == Status.RECEIVED:
-                handled = kind in (MessageKind.TEXT, MessageKind.IMAGE)
-                label = FILTERED_KINDS.get(kind, kind.name)
-                bus.publish(Status.MUTED if handled else Status.UNSUPPORTED,
-                            chat_id=msg.reply_target, chat_name=source, msg_id=msg.msg_id,
-                            detail='该会话已静音' if handled else f'{label}消息不回复')
-            return  # 没有回复内容
-
-        # 交给全局发送队列统一限流和拟人延迟，避免阻塞消息接收循环
-        texts = [text for text in response.texts if not is_placeholder(text)]
-        if len(texts) != len(response.texts):
-            logger.warning(f'拦下 {len(response.texts) - len(texts)} 条媒体占位符，不往群里发：{response.texts}')
-            bus.publish(Status.PLACEHOLDER_BLOCKED, chat_id=msg.reply_target, chat_name=source,
-                        msg_id=msg.msg_id,
-                        detail=f'拦下 {len(response.texts) - len(texts)} 条媒体占位符')
-        for text in texts:
-            self.outbox.put(msg.reply_target, text, sender=self_name,
-                            reply_to=msg.msg_id, chat_name=source)
-        if response.emoji:
-            # 表情排在文字后面：先说一句，再补个表情收尾
-            self.outbox.put_emoji(msg.reply_target, response.emoji, sender=self_name,
-                                  reply_to=msg.msg_id, chat_name=source)
-        logger.debug(f'{len(texts)} responses queued.')
+        # 这个人上一条回复可能还卡在打字延迟/限速里。不用管它：它已经在 enqueue 时
+        # 写进历史了，本轮决策看得到，不会重复回答。也不作废——群里一直有人说话时，
+        # 作废会让机器人的回复永远发不出去。
+        self._schedule_turn(msg, self_name, source)

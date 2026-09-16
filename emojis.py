@@ -231,7 +231,11 @@ class Emoji:
 
     @property
     def sendable(self) -> bool:
-        """ 能不能发出去。没有下载地址的收件人取不到图，发了也是白条。 """
+        """ 能不能发出去。
+
+        只要 md5 + 下载地址。relay 发表情走 `/sendemoji`（CGI 68），服务端拿 md5 自己
+        补齐元数据，不需要本地有 len/aeskey——商店搜回来的那些（len 恒为 0）也能发。
+        """
         return bool(self.md5 and self.cdnurl)
 
     @property
