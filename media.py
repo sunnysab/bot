@@ -14,7 +14,7 @@ from dataclasses import dataclass
 class Media:
     """ 一条媒体消息的可缓存表示。 """
 
-    kind: str  # 'image' | 'emoji'
+    kind: str  # 'image' | 'emoji' | 'voice' | 'video'
     md5: str
     description: str | None = None
     # 源 XML 里有没有**明文可下载的 URL**。
@@ -24,12 +24,20 @@ class Media:
     # 那种**加密 fileid**（`305f0201...`）——实测 30 张图片 30 张没有 cdnurl。
     # 拿不到就别去试：每次尝试都是一次注定失败的 RPC + relay 一条 WARN 日志。
     downloadable: bool = False
+    size: int = 0            # 字节数（图片/语音/视频都能从 XML 里读到）
+    duration: int = 0        # 秒（语音/视频）
+
+    @property
+    def label(self) -> str:
+        return KIND_LABEL.get(self.kind, self.kind)
 
     @property
     def placeholder(self) -> str:
-        """ 写进历史记录的占位文本。 """
-        label = '图片' if self.kind == 'image' else '表情'
-        return f'[{label}：{self.description}]' if self.description else f'[{label}]'
+        """ 写进历史 / 给模型看的占位文本。 """
+        suffix = f' {self.duration}″' if self.duration else ''
+        if self.description:
+            return f'[{self.label}{suffix}：{self.description}]'
+        return f'[{self.label}{suffix}]'
 
     @property
     def needs_description(self) -> bool:
@@ -41,7 +49,11 @@ class Media:
         return self.needs_description and self.downloadable
 
 
-PLACEHOLDER = re.compile(r'^\[(图片|表情|语音|视频|位置|链接|文件|合并转发|小程序)([：:][^\]]*)?\]$')
+PLACEHOLDER = re.compile(r'^\[(图片|表情|语音|视频|位置|链接|文件|合并转发|小程序)([：: ][^\]]*)?\]$')
+
+# 占位符里的标签。语音会带上时长（`[语音 3″]`）——模型知道时长比只知道「有语音」有用，
+# 而上面的 PLACEHOLDER 正则允许标签后面跟一个空格，就是为了这个
+KIND_LABEL = {'image': '图片', 'emoji': '表情', 'voice': '语音', 'video': '视频'}
 
 
 def is_placeholder(text: str) -> bool:
@@ -60,7 +72,9 @@ def strip_prefix(content: str) -> str:
 
 
 def attr(xml: str, name: str) -> str:
-    m = re.search(rf'{name}\s*=\s*"(.*?)"', xml)
+    # 左边卡一个边界：不卡的话 `length` 会先匹配上 `voicelength`，
+    # `md5` 会匹配上 `androidmd5`
+    m = re.search(rf'(?:^|[\s<]){name}\s*=\s*"(.*?)"', xml)
     return m.group(1) if m else ''
 
 
@@ -128,12 +142,53 @@ PLAIN_URL = re.compile(r'cdnurl="https?://')
 def parse_media(content: str) -> Media | None:
     """ 解析图片 / 表情消息的 XML 载荷。非媒体消息返回 None。 """
     if '<emoji' in content:
-        return Media('emoji', attr(strip_prefix(content), 'md5'), parse_emoji_description(content),
-                     downloadable=bool(PLAIN_URL.search(content)))
+        xml = strip_prefix(content)
+        return Media('emoji', attr(xml, 'md5'), parse_emoji_description(content),
+                     downloadable=bool(PLAIN_URL.search(content)),
+                     size=_int(attr(xml, 'length')))
     if '<img' in content:
-        return Media('image', attr(strip_prefix(content), 'md5'),
-                     downloadable=bool(PLAIN_URL.search(content)))
+        xml = strip_prefix(content)
+        return Media('image', attr(xml, 'md5'),
+                     downloadable=bool(PLAIN_URL.search(content)),
+                     size=_int(attr(xml, 'length')))
     return None
+
+
+def parse_voice(content: str) -> Media | None:
+    """ 语音（msg_type=34）。字节拿不到（relay 不存），但**时长在 XML 里**，
+    微信自己也只显示时长。 """
+    if '<voicemsg' not in content:
+        return None
+    xml = strip_prefix(content)
+    return Media('voice', '', duration=_seconds(attr(xml, 'voicelength')),
+                 size=_int(attr(xml, 'length')))
+
+
+def parse_video(content: str) -> Media | None:
+    """ 视频（msg_type=43）。属性名在不同客户端上有差异，多试几个。
+
+    playlength 实测就是**秒**（94 → 15MB，4 → 1.1MB），和语音的毫秒不一样。
+    """
+    if '<videomsg' not in content:
+        return None
+    xml = strip_prefix(content)
+    for name in ('playlength', 'videolength'):
+        seconds = _int(attr(xml, name))
+        if seconds:
+            return Media('video', '', duration=seconds, size=_int(attr(xml, 'length')))
+    return Media('video', '')
+
+
+def _int(value: str) -> int:
+    try:
+        return int(value or 0)
+    except ValueError:
+        return 0
+
+
+def _seconds(value: str) -> int:
+    """ voicelength 存的是**毫秒**（3000 = 3 秒）。视频的 playlength 是秒，别用这个。 """
+    return max(1, round(_int(value) / 1000)) if _int(value) > 0 else 0
 
 
 def parse_location(content: str) -> str:
@@ -187,9 +242,11 @@ def render(msg_type: int, content: str, text: str) -> tuple[str, Media | None]:
     if kind is MessageKind.LOCATION:
         return parse_location(content), None
     if kind is MessageKind.VIDEO:
-        return '[视频]', None
+        media = parse_video(content)
+        return (media.placeholder, media) if media else ('[视频]', None)
     if kind is MessageKind.VOICE:
-        return '[语音]', None
+        media = parse_voice(content)
+        return (media.placeholder, media) if media else ('[语音]', None)
     return '', None
 
 
@@ -230,6 +287,19 @@ if __name__ == '__main__':
     assert sticker.downloadable is True and sticker.describable is True
     tagged = parse_media('<msg><emoji md5="m" desc="ChEKB2RlZmF1bHQSBuWVp+WVpw==" cdnurl="http://x" /></msg>')
     assert tagged.describable is False, '带标签的表情不需要识图'
+
+    # 语音 / 视频：字节拿不到，但时长和大小在 XML 里；占位符要带上时长
+    voice = parse_voice('<msg><voicemsg begin="0" end="1" voicelength="3000" length="1234" /></msg>')
+    assert voice.kind == 'voice' and voice.duration == 3 and voice.size == 1234, voice
+    assert voice.placeholder == '[语音 3″]', voice.placeholder
+    assert voice.needs_description is False and voice.describable is False
+    assert parse_voice('<msg><voicemsg voicelength="0" /></msg>').placeholder == '[语音]'
+    assert parse_video('<msg><videomsg playlength="15" /></msg>').placeholder == '[视频 15″]'
+    assert parse_video('<msg><videomsg /></msg>').placeholder == '[视频]'
+    # 带时长的占位符也得被拦下来（这是发到群里的最后一道防线）
+    assert is_placeholder('[语音 3″]') and is_placeholder('[视频 15″]')
+    assert is_placeholder('[图片：一只橘猫]') and not is_placeholder('[语音 3″] 顺便说一句')
+    assert render(34, '<msg><voicemsg voicelength="3000" /></msg>', 'x')[0] == '[语音 3″]'
 
     # 位置 / 视频 / 语音 / 链接 / 文件 / 引用
     assert parse_location('<msg><location label="海淀区京新高速" poiname="海淀·上郡" /></msg>') == '[位置：海淀区京新高速]'

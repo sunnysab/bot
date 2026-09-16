@@ -17,9 +17,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
+from collections.abc import Iterable
 from dataclasses import fields
+from pathlib import Path
 
 from loguru import logger
 
@@ -38,8 +41,67 @@ from plugin import ChatPlugin, EndProcessing, RepeatPlugin, ReplyPolicy
 from profiles import ProfileStore
 from reply_trace import TraceLogger
 
-# 默认静音的会话。键是**显示名**——插件链是按显示名分发的（见 plugin.PluginManager）
+# 默认静音的会话。键是**显示名**——插件链是按显示名分发的（见 plugin.PluginManager）。
+# 只在名单文件还不存在时当种子用，以后以面板上改的为准
 DEFAULT_MUTED = ('研究生摆烂群',)
+
+
+class ReplyScope:
+    """ 「允许回复谁」：一份落盘名单 + 一个模式。
+
+    - `mode='all'`（默认）：没表过态的都回——新群不会突然被静音
+    - `mode='allow'`：没表过态的不回——新群默认不说话，想回得手动勾
+
+    `allowed` / `blocked` 是两个互斥的显式集合（表过态的会话），模式只管**没表过态**的。
+    两边都留着，换模式不丢之前的勾选。键是**显示名**，和插件链分发用的是同一个。
+    """
+
+    MODES = ('all', 'allow')
+
+    def __init__(self, path: str | Path, seed: Iterable[str] = ()):
+        self.path = Path(path)
+        data: dict = {}
+        if self.path.exists():
+            try:
+                data = json.loads(self.path.read_text(encoding='utf-8'))
+            except (OSError, ValueError) as e:  # noqa: BLE001 —— 名单坏了不能拖垮启动
+                logger.warning(f'回复名单读不出来（{self.path}），按默认来: {e}')
+        mode = data.get('mode')
+        self.mode = mode if mode in self.MODES else 'all'
+        self.allowed = set(data.get('allowed') or ())
+        # 文件还不存在时用代码里的默认名单兜底；存在之后以文件为准，
+        # 否则面板上解了静音、重启又给塞回来
+        self.blocked = set(data.get('blocked') or (() if self.path.exists() else seed))
+
+    def allows(self, contact: str) -> bool:
+        if contact in self.allowed:
+            return True
+        if contact in self.blocked:
+            return False
+        return self.mode == 'all'    # 两边都没表态的新会话：跟模式走
+
+    def set_allowed(self, contact: str, on: bool) -> bool:
+        """ on=True = 允许回复。两个集合互斥，换模式不改写已表过态的那个。 """
+        (self.allowed if on else self.blocked).add(contact)
+        (self.blocked if on else self.allowed).discard(contact)
+        self.save()
+        return on
+
+    def set_mode(self, mode: str) -> str:
+        if mode not in self.MODES:
+            raise ValueError(f'模式只能是 {self.MODES}：{mode!r}')
+        self.mode = mode
+        self.save()
+        return mode
+
+    def to_dict(self) -> dict:
+        return {'mode': self.mode, 'allowed': sorted(self.allowed), 'blocked': sorted(self.blocked)}
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_name(self.path.name + '.tmp')
+        tmp.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=1), encoding='utf-8')
+        os.replace(tmp, self.path)
 
 # 热重载能生效的配置字段。其余字段改了得整进程重启
 HOT_FIELDS = frozenset({
@@ -58,7 +120,7 @@ RESTART_FIELDS = frozenset({
     'relay_host', 'relay_port', 'relay_unix', 'admin_port', 'log_path', 'log_level',
     'describe_media', 'media_cache_path', 'describe_concurrency', 'describe_timeout',
     'describe_max_tokens', 'describe_history_limit',
-    'profile_path', 'habit_path', 'moment_path', 'emoji_path', 'moment_batch',
+    'profile_path', 'habit_path', 'moment_path', 'emoji_path', 'scope_path', 'moment_batch',
 })
 
 
@@ -74,6 +136,8 @@ class Runtime:
                                maximum=config.focus_max_seconds)
         self.backoff = IdleBackoff()
         self.emoji_policy = EmojiPolicy()
+        # 允许回复名单：面板上改、落盘、热重载不重建
+        self.reply_scope = ReplyScope(config.scope_path, seed=DEFAULT_MUTED)
 
         # 构造期定死的东西
         self.media_cache = MediaCache(config.media_cache_path)
@@ -155,9 +219,28 @@ class Runtime:
                           timeout=config.request_timeout)
 
     def _install_plugins(self) -> None:
-        self.bot.set_default_plugin([RepeatPlugin(), self.chat_plugin])
-        for contact in DEFAULT_MUTED:
-            self.bot.attach(contact, EndProcessing())
+        """ 按「允许回复」名单装插件链。
+
+        mode='all'：默认链 + 静音名单走 EndProcessing；
+        mode='allow'：默认就是 EndProcessing，只给允许名单装真链。
+        两种模式复用同一套「按显示名覆盖插件链」的机制，`is_muted()` 在两种模式下
+        都如实反映「这个会话会不会回」。
+        """
+        scope = self.reply_scope
+        chain = [RepeatPlugin(), self.chat_plugin]
+        self.bot.clear_contacts()      # 名单每一版全量重装，不清会留下上一版的映射
+        if scope.mode == 'allow':
+            self.bot.set_default_plugin([EndProcessing()])
+            for contact in scope.allowed:
+                self.bot.attach(contact, chain)
+        else:
+            self.bot.set_default_plugin(chain)
+            for contact in scope.blocked:
+                self.bot.attach(contact, EndProcessing())
+
+    def install_scope(self) -> None:
+        """ 面板改完允许名单后立刻生效：只重装插件链，不重建模型客户端、不清运行状态。 """
+        self._install_plugins()
 
     # ---------- 热重载 ----------
 

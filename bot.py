@@ -230,6 +230,10 @@ class Bot:
     def is_muted(self, contact: str) -> bool:
         return any(isinstance(p, EndProcessing) for p in self._plugins.get_plugins_for_contact(contact))
 
+    def clear_contacts(self) -> None:
+        """ 清掉所有 per-contact 插件映射（重装「允许回复」名单前调）。 """
+        self._plugins.clear_contacts()
+
     async def load_context(self, session_count: int = 10, window_size: int = 30) -> None:
         """ 可以在启动时加载最近的若干聊天记录, 如果想提高启动速度, 可以不调用它.
 

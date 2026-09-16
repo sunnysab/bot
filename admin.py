@@ -38,10 +38,11 @@ from ai import usage
 from config import DOTENV_PATH, Config, update_dotenv
 from context import SYSTEM_KINDS, MessageKind
 from events import Status, bus
-from media import render
+from media import render, tag
+from message import parse_reference_message
 from reply_trace import find as find_trace
 from reply_trace import latencies as trace_latencies
-from runtime import HOT_FIELDS, RESTART_FIELDS
+from runtime import HOT_FIELDS, RESTART_FIELDS, ReplyScope
 
 PAGE = Path(__file__).parent / 'admin.html'
 SIDECAR = Path(__file__).parent / 'admin.db'
@@ -52,7 +53,16 @@ DEFAULT_PORT = 8099          # 8080 在本机被 iptv 占了，别用
 CHATS_LIMIT = 50
 MESSAGES_LIMIT = 300         # v1 一次拉满，relay 的 get_messages 还不能翻页
 RPC_TIMEOUT = 15.0
+MEDIA_TIMEOUT = 60.0         # 第一次要现下（CDN 握手 + 拉字节），比普通 RPC 慢得多
 LOG_TAIL_BYTES = 256 * 1024  # 只看日志尾巴，不把整份读进内存
+
+# 附件落盘目录。relay 按 msg_id 命名且自己也有缓存，所以同一张图只会下这一次
+MEDIA_DIR = Path(__file__).parent / 'media_cache'
+# 浏览器要的 content-type。relay 只回扩展名，这里转一下；认不出的一律当二进制
+MEDIA_TYPES = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+               '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
+               '.mp4': 'video/mp4', '.wav': 'audio/wav', '.mp3': 'audio/mpeg',
+               '.amr': 'audio/amr', '.silk': 'audio/silk'}
 
 # 不回显的字段：表单里留空 = 保持原值
 SECRET_FIELDS = frozenset({'deepseek_key', 'planner_key'})
@@ -74,7 +84,7 @@ CONFIG_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ('改了要重启进程', ('relay_host', 'relay_port', 'relay_unix', 'admin_port', 'log_path', 'log_level',
                     'describe_media', 'media_cache_path', 'describe_concurrency', 'describe_timeout',
                     'describe_max_tokens', 'describe_history_limit', 'profile_path', 'habit_path',
-                    'moment_path', 'emoji_path', 'moment_batch')),
+                    'moment_path', 'emoji_path', 'scope_path', 'moment_batch')),
 )
 
 
@@ -160,6 +170,34 @@ def _rates(counts: dict[str, int]) -> dict:
     }
 
 
+def _quote(content: str, kind) -> dict | None:
+    """ 引用消息（appmsg type=57）拆成结构化的块，面板才能画成引用样式。
+
+    取不到就返回 None——调用方保留 render() 给的平铺文本。
+    """
+    if kind is not MessageKind.APPMSG or tag(content, 'type') != '57':
+        return None
+    try:
+        parsed = parse_reference_message(content)
+    except Exception:  # noqa: BLE001 —— XML 不规整时退回平铺文本就好
+        return None
+    name = tag(content, 'displayname') or parsed['referred_message_sender']
+    return {'content': parsed['content'], 'name': name, 'text': parsed['referred_message']}
+
+
+def _silk_to_wav(silk: Path) -> Path:
+    """ 微信语音是 SILK，浏览器放不了，转成 24k 单声道 WAV。
+
+    pilk 是可选依赖，缺了就让面板回退到文字（外面会包成 500，前端 onerror 接住）。
+    """
+    wav = silk.with_suffix('.wav')
+    if wav.exists():
+        return wav
+    import pilk  # 只有真要看语音时才需要
+    pilk.silk_to_wav(str(silk), str(wav), rate=24000)
+    return wav
+
+
 class DecisionLog:
     """ 状态元数据的窄表（`admin.db`）。**只存元数据，不存正文**——正文的事实源是 relay。
 
@@ -215,6 +253,7 @@ class Admin:
         self.host = host
         self.port = port
         self.dotenv = DOTENV_PATH      # 自检里会换成临时文件
+        self.media_dir = MEDIA_DIR     # 同上
         self.decisions = DecisionLog(sidecar)
         self.server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -272,6 +311,7 @@ class Admin:
             'dry_run': bool(getattr(bot, 'dry_run', False)),
             'seq': bus.latest_seq(),
             'groups': groups,
+            'scope': self.runtime.reply_scope.to_dict(),
         }
 
     def health(self) -> dict:
@@ -309,7 +349,9 @@ class Admin:
 
     def chats(self) -> list[dict]:
         out = []
-        for chat in self.call(self._wechat.conversations(limit=CHATS_LIMIT)):
+        # 启动竞态专用短超时：relay 还没 load_context 时这个 RPC 会一直挂到 15s，
+        # 让首次打开的面板白屏 15 秒。正常一次也就几百毫秒
+        for chat in self.call(self._wechat.conversations(limit=CHATS_LIMIT), timeout=5.0):
             peer = getattr(chat, 'peer', '')
             # 公众号 / filehelper / weixin 这些不进列表，和 get_recent_sessions 一个规矩
             if not (peer.startswith('wxid_') or peer.endswith('@chatroom')):
@@ -324,7 +366,7 @@ class Admin:
                 'updated_at': getattr(chat, 'updated_at', 0),
                 'last': (last.get('clean_text') or last.get('content') or '')[:60],
                 # 静音和专注都按**显示名**记（插件链就是按显示名分发的）
-                'muted': self.runtime.bot.is_muted(name),
+                'allowed': self.runtime.reply_scope.allows(name),
                 'focus': name in self.runtime.focus.sessions,
             })
         return out
@@ -355,6 +397,11 @@ class Admin:
                 media = replace(media, description=cached)
                 text = media.placeholder
 
+        # 引用拆成结构化的块，面板才能画成引用样式而不是一整句平铺文本
+        quote = _quote(msg.content, kind)
+        if quote:
+            text = quote['content']
+
         own = bus.status_of(msg.msg_id)
         reply = bus.progress_of(msg.msg_id)
         return {
@@ -371,7 +418,28 @@ class Admin:
             'reply_status': reply.status if reply else '',
             'reply_detail': reply.detail if reply else '',
             'dry_text': reply.text if reply and reply.status == Status.DRY_RUN else '',
+            # 附件：有就带上，面板按 kind 决定画 <img> / <audio> / 还是只留文字
+            'media': None if media is None else {
+                'kind': media.kind, 'md5': media.md5, 'description': media.description or '',
+                'duration': media.duration, 'size': media.size},
+            'quote': quote,
         }
+
+    def media(self, msg_id: str) -> tuple[bytes, str]:
+        """ 取一条消息的附件字节，返回 (data, content-type)。
+
+        交给 relay 下载（它认得 CDN blob，bot 认不得），落盘到 self.media_dir。
+        relay 按 msg_id 命中缓存，所以面板刷新不会重复下载。
+        """
+        if not msg_id.isdigit():
+            raise ValueError(f'msg_id 必须是 relay 的整数 id：{msg_id!r}')
+        info = self.call(self._wechat.media_info(int(msg_id), self.media_dir),
+                         timeout=MEDIA_TIMEOUT)
+        path = Path(info['path'])
+        ext = str(info.get('ext') or path.suffix.lstrip('.')).lower()
+        if ext == 'silk':  # 微信语音是 SILK，浏览器放不了，转成 WAV 再吐
+            path, ext = _silk_to_wav(path), 'wav'
+        return path.read_bytes(), MEDIA_TYPES.get(f'.{ext}', 'application/octet-stream')
 
     def log_tail(self, tail: int = 200, only: str = '') -> list[str]:
         """ 日志尾巴。loguru 一直在写，面板里看得到就不必 SSH。 """
@@ -499,15 +567,19 @@ class Admin:
             self.runtime.focus.exit(chat, time.time(), '管理后台手动', cooldown=False)
         return {'focus': sorted(self.runtime.focus.sessions)}
 
-    def set_mute(self, chat: str, on: bool) -> dict:
-        """ 会话静音开关。键是**显示名**（插件链按显示名分发）。 """
+    def set_allowed(self, chat: str, on: bool) -> dict:
+        """ 面板上的「允许回复」开关：改名单 + 落盘 + 立刻重装插件链。 """
         if not chat:
             raise ValueError('chat 不能为空')
-        if on:
-            self.runtime.bot.mute(chat)
-        else:
-            self.runtime.bot.unmute(chat)
-        return {'muted': self.runtime.bot.is_muted(chat)}
+        allowed = self.runtime.reply_scope.set_allowed(chat, bool(on))
+        self.runtime.install_scope()
+        return {'allowed': allowed}
+
+    def set_scope_mode(self, mode: str) -> dict:
+        """ 'all' = 除静音的之外都回；'allow' = 只回勾选的。 """
+        selected = self.runtime.reply_scope.set_mode(mode)
+        self.runtime.install_scope()
+        return {'mode': selected, **self.runtime.reply_scope.to_dict()}
 
     # ---------- 配置 ----------
 
@@ -619,6 +691,9 @@ class Admin:
                 return self._json(handler, {'moments': self.moments(chat)})
             if route.startswith('/api/trace/'):
                 return self._json(handler, self.trace(unquote(route[len('/api/trace/'):])))
+            if route == '/api/media':
+                data, content_type = self.media((query.get('msg_id') or [''])[0])
+                return self._send_bytes(handler, data, content_type)
             if route == '/api/config':
                 return self._json(handler, self.read_config())
             self._json(handler, {'error': 'not found'}, 404)
@@ -643,9 +718,11 @@ class Admin:
             if route == '/api/focus':
                 return self._json(handler, self.set_focus(payload.get('chat', ''),
                                                           bool(payload.get('on'))))
-            if route == '/api/mute':
-                return self._json(handler, self.set_mute(payload.get('chat', ''),
-                                                         bool(payload.get('on'))))
+            if route == '/api/allow':
+                return self._json(handler, self.set_allowed(payload.get('chat', ''),
+                                                            bool(payload.get('on'))))
+            if route == '/api/scope':
+                return self._json(handler, self.set_scope_mode(payload.get('mode', '')))
             if route == '/api/config':
                 return self._json(handler, self.write_config(payload.get('updates') or {}))
             if route == '/api/reload':
@@ -671,11 +748,15 @@ class Admin:
 
     @staticmethod
     def _send(handler, body: str, content_type: str, code: int = 200) -> None:
-        data = body.encode('utf-8')
+        Admin._send_bytes(handler, body.encode('utf-8'), content_type, code)
+
+    @staticmethod
+    def _send_bytes(handler, data: bytes, content_type: str, code: int = 200) -> None:
         handler.send_response(code)
         handler.send_header('Content-Type', content_type)
         handler.send_header('Content-Length', str(len(data)))
-        handler.send_header('Cache-Control', 'no-store')
+        # 附件按 msg_id 内容寻址，不会变——和实时数据不同，可以放心让浏览器缓存
+        handler.send_header('Cache-Control', 'private, max-age=3600')
         handler.end_headers()
         handler.wfile.write(data)
 
@@ -741,9 +822,13 @@ def _self_check() -> None:
     class FakeHistory:
         def sizes(self): return {'456@chatroom': 30}
 
+    # 名单文件是上一轮自检留下的就清掉，不然结果取决于跑过几次
+    (Path(tempfile.gettempdir()) / 'bot-admin-selfcheck-scope.json').unlink(missing_ok=True)
     runtime = types.SimpleNamespace(
         loop=None, media_cache=None,
         config=Config(log_path='/no/such/bot.log', trace_path='/no/such/trace.jsonl'),
+        reply_scope=ReplyScope(Path(tempfile.gettempdir()) / 'bot-admin-selfcheck-scope.json',
+                               seed=('研究生摆烂群',)),
         focus=FakeFocus(), backoff=FakeBackoff(), emojis=FakeEmojis(), memories=FakeMemories(),
         bot=types.SimpleNamespace(
             dry_run=False, typo_rate=0.08, reply_count=3, emoji_count=1, typo_count=0,
@@ -786,6 +871,10 @@ def _self_check() -> None:
     emoji = admin._row(msg(47, '<msg><emoji md5="m" desc="ChEKB2RlZmF1bHQSBuWVp+WVpw==" /></msg>'))
     assert emoji['text'] == '[表情：啧啧]', emoji
 
+    assert emoji['media'] == {'kind': 'emoji', 'md5': 'm', 'description': '啧啧',
+                              'duration': 0, 'size': 0}, emoji
+    assert admin._row(msg(1, 'hi'))['media'] is None
+
     class FakeCache:
         def get(self, md5):
             return '一只橘猫' if md5 == 'f9bf' else None
@@ -793,6 +882,39 @@ def _self_check() -> None:
     runtime.media_cache = FakeCache()
     image = admin._row(msg(3, '<msg><img md5="f9bf" /></msg>'))
     assert image['text'] == '[图片：一只橘猫]', image
+    assert image['media'] == {'kind': 'image', 'md5': 'f9bf', 'description': '一只橘猫',
+                              'duration': 0, 'size': 0}, image
+
+    # 引用：拆成「回复内容 + 引用块」，而不是一整句平铺文本
+    quoted = admin._row(msg(49,
+        '<msg><appmsg><title>直接用这个点进去对比</title><type>57</type>'
+        '<fromusername>wxid_sender</fromusername><refermsg><type>49</type>'
+        '<chatusr>wxid_kf7zbyjjxs8r22</chatusr><displayname>zzq</displayname>'
+        '<content>&lt;msg&gt;&lt;appmsg&gt;&lt;title&gt;和我一起测测&lt;/title&gt;'
+        '&lt;/appmsg&gt;&lt;/msg&gt;</content></refermsg></appmsg></msg>'))
+    assert quoted['text'] == '直接用这个点进去对比', quoted
+    assert quoted['quote'] == {'content': '直接用这个点进去对比', 'name': 'zzq',
+                               'text': '和我一起测测'}, quoted
+    # 普通链接（type != 57）不走引用块
+    link = admin._row(msg(49, '<msg><appmsg><title>一篇文章</title><type>5</type></appmsg></msg>'))
+    assert link['quote'] is None, link
+
+    # 附件接口：relay 落盘 → bot 读字节 → 带 content-type 吐给浏览器
+    async def fake_media_info(msg_id, outdir):
+        path = Path(outdir) / f'download_{msg_id}.jpg'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'\xff\xd8\xff\x00')
+        return {'path': str(path), 'ext': 'jpg', 'size': 4}
+
+    runtime.bot.wechat.media_info = fake_media_info
+    admin.media_dir = Path(tempfile.mkdtemp())
+    admin.call = lambda coro, timeout=0: asyncio.run(coro)  # 没有事件循环，就地跑
+    assert admin.media('12345') == (b'\xff\xd8\xff\x00', 'image/jpeg')
+    try:
+        admin.media('12abc')
+        raise AssertionError('非数字 msg_id 应该被拒')
+    except ValueError:
+        pass
 
     # 「为什么没回」抽屉：没有 trace 也不能炸
     drawer = admin.trace(9202842881785760589)
@@ -807,15 +929,30 @@ def _self_check() -> None:
     assert health['focus'][0]['chat'] == '测试群' and health['backoff'] == {'测试群': 12.0}
     assert health['emojis']['sendable'] == 4 and health['moments'] == 7
 
-    # 静音 / 专注开关：键都是显示名。真的 mute/unmute 在 test_bot.py 里测
-    muted: set[str] = set()
-    runtime.bot.mute = muted.add
-    runtime.bot.unmute = muted.discard
-    runtime.bot.is_muted = lambda name: name in muted
+    # 允许回复 / 专注开关：键都是显示名。底层的 mute/unmute 在 test_bot.py / test_runtime.py 里测
+    installs: list[int] = []
+    runtime.install_scope = lambda: installs.append(1)
     assert admin.set_focus('另一个群', True) == {'focus': ['另一个群', '测试群']}
     assert admin.set_focus('另一个群', False) == {'focus': ['测试群']}
-    assert admin.set_mute('测试群', True) == {'muted': True}
-    assert admin.set_mute('测试群', False) == {'muted': False}
+    # 默认 mode='all'：关掉一个 = 进 blocked；没表过态的会话跟模式走
+    assert admin.set_allowed('测试群', False) == {'allowed': False}
+    assert not runtime.reply_scope.allows('测试群')
+    assert runtime.reply_scope.allows('没表过态的群')
+    scope = runtime.reply_scope.to_dict()
+    assert scope['mode'] == 'all' and scope['allowed'] == [], scope
+    assert '测试群' in scope['blocked'] and '研究生摆烂群' in scope['blocked'], scope
+    # 换成白名单：没表过态的一律不回，表过态的按表态来
+    assert admin.set_scope_mode('allow')['mode'] == 'allow'
+    assert not runtime.reply_scope.allows('没表过态的群')
+    assert not runtime.reply_scope.allows('测试群')
+    assert admin.set_allowed('测试群', True)['allowed'] is True
+    assert runtime.reply_scope.allows('测试群')          # 显式允许在白名单模式下也回
+    assert installs and len(installs) == 3, installs      # 每次改都重装插件链
+    try:
+        admin.set_scope_mode('everyone')
+        raise AssertionError('未知模式应该被拒')
+    except ValueError:
+        pass
     try:
         admin.set_focus('', True)
         raise AssertionError('空 chat 应该被拒绝')

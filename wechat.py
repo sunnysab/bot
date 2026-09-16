@@ -121,6 +121,14 @@ class Wechat:
         """ 管理后台用：会话列表（带 display_name / last_message / msg_count）。 """
         return await self._bot.get_conversations(limit=limit)
 
+    async def media_info(self, msg_id: int, outdir) -> dict:
+        """ 管理后台用：让 relay 把附件下到 outdir，返回 {path, ext, size}。
+
+        下载的活只能 relay 干（它才认得 CDN blob），bot 负责要字节。
+        relay 按 msg_id 命中自己的缓存，所以只有第一次会真去 CDN。
+        """
+        return await self._bot.download_media(msg_id=msg_id, outdir=str(outdir))
+
     async def status(self) -> dict:
         """ relay 的连接 / 登录状态。管理后台的健康卡用。 """
         return await self._bot.get_status()

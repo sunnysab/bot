@@ -165,6 +165,13 @@ class PluginManager:
         self._contact_mappings.pop(contact, None)
         logger.info(f'Contact {contact} back to default plugins')
 
+    def clear_contacts(self) -> None:
+        """ 清掉所有会话映射，回到「大家都走默认链」。
+
+        名单是每一版全量重装的，不先清就会留下上一版的映射。
+        """
+        self._contact_mappings.clear()
+
     def get_plugins_for_contact(self, contact: str) -> list[Plugin]:
         """ 注意语义：只要为某个 contact 映射过插件，就完全覆盖默认插件链（例如用它静音某个群）。 """
         return self._contact_mappings.get(contact, self._defaults)

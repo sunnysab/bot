@@ -97,6 +97,8 @@ class Config:
     # 中期记忆：滑出上下文窗口的消息压成回想，存这个 sqlite
     moment_path: str = 'memory/moments.db'
     emoji_path: str = 'memory/emojis.json'
+    # 「允许回复」名单：per-contact 开关 + 模式，面板上改，落盘
+    scope_path: str = 'memory/reply_scope.json'
     moment_batch: int = 20
     # 人格：身份 / 表达风格 / 行动准则（分别喂给 expressor 和 planner）
     personality: str = Persona.personality

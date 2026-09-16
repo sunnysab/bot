@@ -32,6 +32,10 @@
   .chat .n em{font-style:normal;font-weight:400;font-size:11px;color:var(--dim)}
   .chat .l{color:var(--dim);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .chat .tag{font-size:11px;color:var(--dim);margin-right:4px}
+  .chat .allow{flex:none;width:20px;height:20px;line-height:20px;text-align:center;border-radius:5px;
+               font-size:12px;border:1px solid var(--line);color:var(--dim);cursor:pointer;
+               background:#fff;user-select:none}
+  .chat .allow.on{background:var(--replied);border-color:var(--replied);color:#fff}
   .center{flex:1;display:flex;flex-direction:column;min-width:0}
   .toolbar{padding:6px 14px;background:var(--panel);border-bottom:1px solid var(--line);
            display:flex;gap:8px;align-items:center;font-size:13px;flex-wrap:wrap}
@@ -56,6 +60,12 @@
   @keyframes sp{to{transform:rotate(360deg)}}
   .empty{color:var(--dim);text-align:center;margin-top:60px}
   .dry-text{color:var(--dry);font-style:italic}
+  .media{display:block;max-width:100%;max-height:260px;border-radius:8px;cursor:zoom-in}
+  .media.emoji{max-height:110px;max-width:150px}
+  audio{max-width:100%;height:34px;vertical-align:middle}
+  .quote{border-left:3px solid var(--line);background:#f7f8fa;border-radius:6px;padding:3px 8px;
+         margin-bottom:5px;font-size:12px;color:var(--dim);white-space:pre-wrap;word-break:break-word}
+  .quote b{color:var(--fg);font-weight:600}
   .drawer{width:420px;background:var(--panel);border-left:1px solid var(--line);
           overflow:auto;flex:none;padding:12px 14px;font-size:13px}
   .drawer.hide{display:none}
@@ -93,6 +103,11 @@
   <span id="counts" style="color:var(--dim)"></span>
   <span class="badge" id="drybadge" style="display:none">演习模式</span>
   <button id="drybtn">演习模式</button>
+  <span style="color:var(--dim)">回复范围</span>
+  <select id="scopemode" title="允许回复哪些会话">
+    <option value="all">除静音的之外都回</option>
+    <option value="allow">只回勾选的</option>
+  </select>
   <span style="margin-left:auto;color:var(--dim)" id="seq"></span>
 </header>
 <main>
@@ -100,7 +115,7 @@
   <div class="center">
     <div class="toolbar">
       <b id="cur">未选会话</b>
-      <button id="mutebtn" disabled>静音</button>
+      <button id="allowbtn" disabled>允许回复</button>
       <button id="focusbtn" disabled>专注</button>
       <span class="grow"></span>
       <input id="say" placeholder="手动发一条…" style="width:240px;padding:3px 8px;border:1px solid var(--line);border-radius:6px" disabled>
@@ -146,7 +161,9 @@ const GROUP = {
 const SPIN = new Set(['deciding','expressing','queued','typing']);
 const $ = s => document.querySelector(s);
 const esc = s => (s ?? '').toString().replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const get = async u => (await fetch(u)).json();
+// 后台 500 时返回的是 {error}，直接 json() 会让调用方拿到 undefined 再炸掉
+// 整个初始化（启动竞态时 /api/chats 就是这样把页面留白的）。失败一律给 {}
+const get = async u => { const r = await fetch(u); return r.ok ? r.json() : {}; };
 const post = async (u, body) => (await fetch(u, {method:'POST', headers:{'Content-Type':'application/json'},
                                                 body: JSON.stringify(body)})).json();
 
@@ -160,35 +177,77 @@ function chip(status, detail){
        + (detail ? `<span class="detail">${esc(detail)}</span>` : '');
 }
 
+// 附件主体：有字节就直接画，取不到就把占位文本还回来（图片/语音各自失败点不同）。
+// data-fallback 里存的就是 render() 给的 [图片] / [表情：…] / [语音 3″]。
+function mediaBody(r){
+  const m = r.media, url = `/api/media?msg_id=${encodeURIComponent(r.msg_id)}`;
+  const fb = `data-fallback="${esc(r.text)}" onerror="mediaFail(this)"`;
+  if(m.kind === 'image' || m.kind === 'emoji'){
+    const cap = m.description ? `<div class="detail">${esc(m.description)}</div>` : '';
+    return `<img class="media ${m.kind}" loading="lazy" src="${url}" ${fb}
+                 onclick="window.open(this.src)">${cap}`;
+  }
+  if(m.kind === 'voice'){
+    // preload=none：不点开就不去 relay 要字节（语音要现下+转码，慢）
+    return `<audio controls preload="none" src="${url}" ${fb}></audio>
+            <div class="detail">${esc(r.text)}</div>`;
+  }
+  // 视频 / 其它：relay 下不了（videomsg 要 getvideo），老实留文字
+  return `<div class="body">${esc(r.text)}</div>`;
+}
+
+window.mediaFail = el => {
+  const d = document.createElement('div');
+  d.className = 'body';
+  d.textContent = el.dataset.fallback || '[附件取不到]';
+  el.replaceWith(d);
+};
+
 function row(r){
   const m = r.reply_status ? `<div class="meta" data-reply="${r.msg_id}">${chip(r.reply_status, r.reply_detail)}</div>` : '';
   const dry = r.dry_text ? `<div class="body dry-text">${esc(r.dry_text)}</div>` : '';
+  const quote = r.quote ? `<div class="quote"><b>${esc(r.quote.name)}</b>：${esc(r.quote.text)}</div>` : '';
+  const body = r.media ? mediaBody(r) : `<div class="body">${esc(r.text)}</div>`;
   const t = new Date(r.ts*1000).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});
   return `<div class="row ${r.outgoing?'out':''}" data-id="${r.msg_id}">
     <div class="bubble" onclick="pick('${r.msg_id}')">
       <div class="who">${esc(r.sender)} · ${t}</div>
-      <div class="body">${esc(r.text)}</div>${dry}
+      ${quote}${body}${dry}
       <div class="meta" data-own="${r.msg_id}">${chip(r.status, r.status_detail)}</div>
       ${m}
     </div></div>`;
 }
 
 async function loadChats(){
-  ({chats} = await get('/api/chats'));
+  ({chats = []} = await get('/api/chats'));
   $('#chats').innerHTML = chats.map(c =>
     `<div class="chat ${c.chat_id===current?'on':''}" data-chat="${esc(c.chat_id)}">
-       <div class="n">${esc(c.name)}<em>${c.count||''}</em></div>
-       <div class="l">${c.muted?'<span class="tag">🔇静音</span>':''}${c.focus?'<span class="tag">🎯专注</span>':''}${esc(c.last)}</div>
-     </div>`).join('') || '<div class="empty">没有会话</div>';
-  document.querySelectorAll('.chat').forEach(el => el.onclick = () => {
+       <div class="n">${esc(c.name)}<span style="display:flex;gap:6px;align-items:center;flex:none">
+         <em>${c.count||''}</em>
+         <span class="allow ${c.allowed?'on':''}" title="允许回复" data-on="${c.allowed?1:0}">${c.allowed?'✓':'✕'}</span>
+       </span></div>
+       <div class="l">${c.allowed?'':'<span class="tag">🔇不回</span>'}${c.focus?'<span class="tag">🎯专注</span>':''}${esc(c.last)}</div>
+     </div>`).join('') || '<div class="empty">没有会话（relay 可能还没起）</div>';
+  // ponytail: relay 比面板起得慢（要 load_context），空了就 3s 重试，自愈
+  if(!chats.length) setTimeout(loadChats, 3000);
+  document.querySelectorAll('.chat').forEach(el => {
+    const box = el.querySelector('.allow');
+    box.onclick = async e => {
+      e.stopPropagation();                       // 别顺带把会话选中了
+      const on = el.querySelector('.allow').dataset.on !== '1';
+      await post('/api/allow', {chat: el.dataset.chat, on});
+      loadChats();
+    };
+    el.onclick = () => {
     current = el.dataset.chat; selected = null;
     const found = chats.find(c => c.chat_id === current);
     currentName = found ? found.name : current;
     $('#cur').textContent = currentName;
-    for (const id of ['mutebtn','focusbtn','say','sendbtn']) $('#'+id).disabled = false;
-    $('#mutebtn').classList.toggle('on', !!(found && found.muted));
+    for (const id of ['allowbtn','focusbtn','say','sendbtn']) $('#'+id).disabled = false;
+    $('#allowbtn').classList.toggle('on', !!(found && found.allowed));
     $('#focusbtn').classList.toggle('on', !!(found && found.focus));
     loadChats(); loadMessages(); showPanel();
+    };
   });
 }
 
@@ -231,12 +290,13 @@ async function state(){
   $('#drybtn').classList.toggle('on', s.dry_run);
   const g = s.groups||{};
   $('#counts').textContent = Object.entries(g).map(([k,v]) => `${k} ${v}`).join(' · ');
+  if(s.scope) $('#scopemode').value = s.scope.mode;   // 多开标签页也能同步
 }
 
 async function health(){
   let h;
   try{ h = await get('/api/health'); }catch(e){ h = null; }
-  if(!h){ $('#panel-health').innerHTML = '<div class="empty">健康检查失败</div>'; return; }
+  if(!h || !h.relay){ $('#panel-health').innerHTML = '<div class="empty">健康检查失败</div>'; return; }
   const dot = $('#relaydot'), lbl = $('#relay');
   dot.className = 'dot ' + (h.relay.ok ? 'ok' : 'bad');
   lbl.textContent = h.relay.ok ? `${h.relay.nickname}（relay 正常）` : 'relay 取不到状态';
@@ -454,9 +514,13 @@ $('#drybtn').onclick = async () => {
   await post('/api/dry_run', {on});
   state();
 };
-$('#mutebtn').onclick = async () => {
-  const r = await post('/api/mute', {chat: currentName, on: !$('#mutebtn').classList.contains('on')});
-  $('#mutebtn').classList.toggle('on', r.muted); loadChats();
+$('#allowbtn').onclick = async () => {
+  const r = await post('/api/allow', {chat: currentName, on: !$('#allowbtn').classList.contains('on')});
+  $('#allowbtn').classList.toggle('on', r.allowed); loadChats();
+};
+$('#scopemode').onchange = async e => {
+  const r = await post('/api/scope', {mode: e.target.value});
+  e.target.value = r.mode; loadChats();
 };
 $('#focusbtn').onclick = async () => {
   const r = await post('/api/focus', {chat: currentName, on: !$('#focusbtn').classList.contains('on')});
@@ -476,10 +540,11 @@ window.pick = id => { selected = id; showPanel();
   const el = document.querySelector(`[data-id="${CSS.escape(id)}"] .bubble`); if(el) el.classList.add('sel'); };
 
 (async function(){
-  await state(); await loadChats(); await health();
+  // 计时器先立起来：下面任一请求抛异常都不该让轮询一起死掉
   setInterval(poll, 1000);
   setInterval(state, 5000);
   setInterval(() => { if(!$('#drawer').classList.contains('hide') && tab==='health') health(); }, 5000);
+  await state(); await loadChats(); await health();
 })();
 </script>
 </body>

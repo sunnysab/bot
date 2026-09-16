@@ -11,7 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from config import Config
-from runtime import Runtime
+from runtime import ReplyScope, Runtime
 
 
 def make_config(tmp: str, **overrides) -> Config:
@@ -23,6 +23,7 @@ def make_config(tmp: str, **overrides) -> Config:
                   emoji_path=str(base / 'emojis.json'),
                   profile_path=str(base / 'profiles.json'),
                   habit_path=str(base / 'habits.json'),
+                  scope_path=str(base / 'reply_scope.json'),
                   trace_path=str(base / 'trace.jsonl'),
                   **overrides)
 
@@ -91,6 +92,32 @@ class TestRuntimeReload(unittest.TestCase):
         self.assertEqual(len(plugins), 1, plugins)
         self.assertTrue(self.runtime.bot.is_muted('研究生摆烂群'))
         self.assertFalse(self.runtime.bot.is_muted('测试群'))
+    def test_reply_scope_controls_who_gets_replies(self):
+        """ 面板上的「允许回复」：模式 + 名单要真落到插件链上，而且要活过重启。 """
+        rt = self.runtime
+        # 默认 mode='all'：种子名单里的静音，其余回
+        self.assertTrue(rt.bot.is_muted('研究生摆烂群'))
+        self.assertFalse(rt.bot.is_muted('测试群'))
+
+        # 显式关掉一个 → 立刻静音；热重载重装插件链后不能把它忘掉
+        rt.reply_scope.set_allowed('测试群', False)
+        rt.install_scope()
+        self.assertTrue(rt.bot.is_muted('测试群'))
+        rt.apply(rt.config)
+        self.assertTrue(rt.bot.is_muted('测试群'))
+
+        # 切白名单：没表过态的一律不回，勾上的才回
+        rt.reply_scope.set_mode('allow')
+        rt.reply_scope.set_allowed('测试群', True)
+        rt.install_scope()
+        self.assertFalse(rt.bot.is_muted('测试群'))
+        self.assertTrue(rt.bot.is_muted('没勾过的群'))
+
+        # 落盘：光是新建一个对象就能读回来，进程重启也不丢
+        again = ReplyScope(rt.reply_scope.path)
+        self.assertEqual(again.mode, 'allow')
+        self.assertTrue(again.allows('测试群'))
+        self.assertFalse(again.allows('没勾过的群'))
 
 
 if __name__ == '__main__':
