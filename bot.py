@@ -24,6 +24,10 @@ EMOJI_SAVE_INTERVAL = 5.0      # 表情库最长隔这么久落一次盘（热�
 STALE_MESSAGE_SECONDS = 300.0  # 比这更旧的消息只当上下文：relay 长链重连会补推离线积压
 REVOKE_WINDOW_SECONDS = 120.0  # relay 只认 2 分钟内的撤回，超了不必白跑一次 RPC
 SENT_KEEP = 10                 # 每个会话最多记这么多条自己的出站，只用来撤回
+# 引用回复只在「群里消息多、乱」时用：人少或私聊里每条都带引用很怪，
+# 人一多引用才帮人看清在回哪条。口径跟门控的活跃度一致（180s 窗口）。
+QUOTE_WINDOW_SECONDS = 180.0
+QUOTE_MIN_ACTIVITY = 8
 
 FILTERED_KINDS = {
     MessageKind.VOICE: '语音', MessageKind.EMOJI: '表情', MessageKind.LOCATION: '位置',
@@ -431,11 +435,17 @@ class Bot:
         return f'已撤回：「{preview}」'
 
     def _quote_target(self, msg: Message) -> int:
-        """ 引用回复的目标：被回复那条的 64 位 svrId；关掉时返回 0。
+        """ 引用回复的目标：被回复那条的 64 位 svrId；不该引用时返回 0。
 
         `msg.msg_id` 就是 svrId（relay 的 server_id），正是 `<refermsg><svrid>` 要的东西。
+        只在**群聊且最近消息比较多**时引用：私聊、冷清群里每条都带引用反而怪。
         """
-        if not self.quote_replies:
+        if not self.quote_replies or not msg.is_chatroom:
+            return 0
+        now = time.time()
+        activity = sum(1 for r in self._history.get_context(msg.reply_target)
+                       if not r.is_self and now - r.t <= QUOTE_WINDOW_SECONDS)
+        if activity < QUOTE_MIN_ACTIVITY:
             return 0
         try:
             return int(msg.msg_id)

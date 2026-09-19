@@ -45,12 +45,12 @@ def make_ctx(others: int, content='大家好啊', now=None):
 
 
 class TestFocusGate(unittest.TestCase):
-    def test_hot_group_enters_focus_and_bypasses_threshold(self):
+    def test_hot_group_enters_focus(self):
         policy = ReplyPolicy(focus=FocusMode(enter_activity=3))
         # 冷清群里这句闲话本来不够分
         self.assertIsNone(policy.evaluate(make_ctx(0, content='大家好啊'), now=time.time()))
-        # 聊热了就进去，同一句闲话照样交给决策者
-        result = policy.evaluate(make_ctx(3), now=time.time())
+        # 聊热了进专注；但只是加分，不再整个豁免门控（存在感惩罚仍然生效）
+        result = policy.evaluate(make_ctx(10, content='这个怎么弄啊'), now=time.time())
         self.assertIsNotNone(result)
         self.assertTrue(result.focused)
 
@@ -77,7 +77,7 @@ class TestFocusPrompt(unittest.IsolatedAsyncioTestCase):
     async def test_focus_note_reaches_both_models(self):
         ai = FakeAi()
         plugin = ChatPlugin(ai, context_length=10, policy=ReplyPolicy(focus=FocusMode(enter_activity=3)))
-        reply = await plugin.handle(make_ctx(3))
+        reply = await plugin.handle(make_ctx(5, content='这个怎么弄啊'))
 
         self.assertEqual(reply.texts, ['收到'])
         self.assertIn('【专注模式】', ai.planner_calls[0][1])

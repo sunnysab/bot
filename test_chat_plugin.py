@@ -10,6 +10,7 @@ from pathlib import Path
 
 from context import ChatWindow, MessageContext
 from emojis import Emoji
+from focus import FocusMode
 from habits import Habit, HabitStore
 from moments import Moment, MomentStore
 from necessity import NECESSITY_THRESHOLD
@@ -435,6 +436,27 @@ class TestReplyPolicy(unittest.TestCase):
         # 活跃度只数别人的消息；存在感 6/10 扣满，把分数压回阈值下
         self.assertIsNone(self.policy.evaluate(self.ctx(content='这个怎么弄啊', history=history), now=1000.0))
 
+    def _focus_policy(self) -> ReplyPolicy:
+        return ReplyPolicy(threshold=NECESSITY_THRESHOLD, activity_window=180.0,
+                           focus=FocusMode(enter_activity=1, idle=10_000.0,
+                                           maximum=10_000.0, cooldown=0.0))
+
+    def test_focus_no_longer_bypasses_presence_penalty(self):
+        """ 专注期只是加分，不再豁免门控：自己已经刷屏时照样闭嘴。 """
+        history = ChatWindow()
+        for i in range(6):
+            history.append('Bot', f'我说的{i}', int(1000 - i), is_self=True)
+        for i in range(2):
+            history.append(f'用户{i}', '别人说的', int(1000 - i))
+        self.assertIsNone(self._focus_policy().evaluate(
+            self.ctx(content='这个怎么弄啊', history=history), now=1000.0))
+
+    def test_focus_still_allows_when_group_is_hot(self):
+        """ 专注期里没人点名、群里正热、自己没刷屏时，照旧参与。 """
+        history = history_with(15, now=1000.0)
+        self.assertIsNotNone(self._focus_policy().evaluate(
+            self.ctx(content='这天气真怪', history=history), now=1000.0))
+
 
 class TestRepeatPlugin(unittest.IsolatedAsyncioTestCase):
     async def test_media_markers_are_not_repeated(self):
@@ -737,11 +759,12 @@ class TestAgentMode(unittest.IsolatedAsyncioTestCase):
         # reply 终止本轮：不再多跑一轮去确认，一次调用就够
         self.assertEqual(len(self.ai.rounds), 1)
 
-    async def test_multiple_replies_become_multiple_messages(self):
+    async def test_second_reply_in_one_turn_is_refused(self):
+        """ 一轮只说一条：同一轮里的第二个 reply 被拒，顺手治刷屏。 """
         plugin = self.plugin([AssistantTurn(tool_calls=(
             _call('reply', text='第一条'), _call('reply', text='第二条')))])
         reply = await plugin.handle(proactive_ctx())
-        self.assertEqual(reply.texts, ['第一条', '第二条'])
+        self.assertEqual(reply.texts, ['第一条'])
 
     async def test_sticker_and_text_in_one_turn(self):
         plugin = self.plugin(

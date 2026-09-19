@@ -295,13 +295,38 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([text for _, text in self.bot._wechat.sent], ['一', '二', '三'])
 
     async def test_quote_replies_carry_the_trigger_svr_id(self):
-        """ 开引用后，每条文字回复都引「这一轮在回的那条」：ref_svrid = 它的 svrId。 """
+        """ 群聊且消息多（乱）时，文字回复引「这一轮在回的那条」：ref_svrid = 它的 svrId。 """
         self.bot.quote_replies = True
+        self._seed_busy_group()
         self.bot.set_default_plugin(FakePlugin(texts=['收到']))
         msg = make_msg()
         await self.bot.on_message(msg)
         await asyncio.sleep(0.1)
         self.assertEqual(self.bot._wechat.refs, [msg.msg_id])
+
+    async def test_quote_replies_skipped_in_quiet_group(self):
+        """ 群里没几个人说话时不引用——每条都带引用反而怪。 """
+        self.bot.quote_replies = True
+        self.bot.set_default_plugin(FakePlugin(texts=['收到']))
+        await self.bot.on_message(make_msg())        # 只有这一条入站消息
+        await asyncio.sleep(0.1)
+        self.assertEqual(self.bot._wechat.refs, [None])
+
+    async def test_quote_replies_skipped_in_private(self):
+        """ 私聊从不引用。 """
+        self.bot.quote_replies = True
+        self.bot.set_default_plugin(FakePlugin(texts=['收到']))
+        msg = make_msg()
+        msg.is_chatroom = False
+        await self.bot.on_message(msg)
+        await asyncio.sleep(0.1)
+        self.assertEqual(self.bot._wechat.refs, [None])
+
+    def _seed_busy_group(self, count: int = 8) -> None:
+        """ 往历史里灌几条别人的消息，把群填「乱」。 """
+        window = self.bot._history.get_context('456@chatroom')
+        for i in range(count):
+            window.append(f'用户{i}', '别人说的', int(time.time()))
 
     async def test_quote_replies_off_by_default(self):
         self.bot.set_default_plugin(FakePlugin(texts=['收到']))

@@ -79,8 +79,7 @@ SPEAK = ToolSpec(
 REPLY = ToolSpec(
     name='reply',
     description='用机器人的身份在群里说一句。text 就是要发出去的原话本身（不是意图、不是转述），'
-                '写法像微信打字。想说几条就在同一轮里调几次（每次 = 群里一条消息，最多 3 条），'
-                '调完本轮就结束。什么都不调就是这一轮不发言。',
+                '写法像微信打字，一轮只说一条。调完本轮就结束，什么都不调就是这一轮不发言。',
     parameters={'type': 'object',
                 'properties': {'text': {'type': 'string', 'description': '要发出去的原话'}},
                 'required': ['text']})
@@ -94,7 +93,10 @@ REVOKE = ToolSpec(
                                'text': {'type': 'string', 'description': '原话里的一小段'}}})
 
 REVOKE_PER_TURN = 3      # 一轮最多撤几条：撤回不可逆，别让模型连点
-AGENT_MAX_REPLIES = 3    # agent 模式一轮最多发几条
+AGENT_MAX_REPLIES = 1    # agent 模式一轮最多发几条：一条说完就够，别刷屏
+# 专注模式只加分，不整个豁免门控：豁免会把「存在感」惩罚也绕过，
+# 群里就变成机器人一个人的独角戏（实测占比到过 37/58 还在回）
+FOCUS_SCORE_BONUS = 15
 
 
 @dataclass(slots=True)
@@ -332,11 +334,13 @@ class ReplyPolicy:
             self_replies=self._self_replies(ctx, now),
             recent_messages=self._recent_messages(ctx, now),
         ))
-        # 专注模式：聊得正热就盯一会儿；期间不看门控，也不连续沉默退避
+        # 专注模式：聊得正热就盯一会儿，只是**加分**——阈值和存在感惩罚照常生效，
+        # 免得群里只剩它一个人在说话
         if result.kind == 'proactive' and self.focus:
             if self.focus.tick(ctx.contact, now, activity):
-                result = replace(result, focused=True, reasons=(*result.reasons, '专注'))
-        if result.score < self.threshold and not result.focused:
+                result = replace(result, focused=True, reasons=(*result.reasons, '专注'),
+                                 score=min(100, result.score + FOCUS_SCORE_BONUS))
+        if result.score < self.threshold:
             return GateDecision(allowed=False, score=result.score, kind=result.kind,
                                 reasons=result.reasons, blocked_by='score',
                                 threshold=self.threshold)
