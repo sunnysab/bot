@@ -447,15 +447,53 @@ function cfgInput(item){
   return `<label class="cfg-row" ${long ? 'style="align-items:flex-start"' : ''}><span>${label}</span>${field}</label>`;
 }
 
+function personaInput(p, name, label){
+  const o = p.overrides || {}, g = p.global || {};
+  const val = o[name] !== undefined ? o[name] : '';
+  const globalVal = Array.isArray(g[name]) ? g[name].join('|') : (g[name] ?? '');
+  const long = ['personality','reply_style','behavior_style'].includes(name);
+  const field = long
+    ? `<textarea id="persona-${name}" placeholder="${esc(globalVal)}">${esc(val)}</textarea>`
+    : `<input id="persona-${name}" value="${esc(val)}" placeholder="${esc(globalVal)}">`;
+  return `<label class="cfg-row" ${long ? 'style="align-items:flex-start"' : ''}><span>${label}</span>${field}</label>`;
+}
+
+function personaSection(p){
+  return `<h3>该会话的人设 · ${esc(p.chat)}</h3>
+    <div class="detail">留空 = 继承全局（灰字就是全局值）；只盖这一个会话。改完下一轮生效，不用重启。</div>
+    <div class="cfg">
+      ${personaInput(p,'personality','人格')}
+      ${personaInput(p,'reply_style','表达风格')}
+      ${personaInput(p,'behavior_style','行动准则')}
+      ${personaInput(p,'reply_styles','备用风格（| 分隔）')}
+      ${personaInput(p,'style_probability','抽备用风格概率')}
+      ${personaInput(p,'aliases','别名（| 分隔）')}
+    </div>
+    <div class="cfg-actions"><button onclick="savePersona()">保存本会话人设</button></div>`;
+}
+
+window.savePersona = async () => {
+  const overrides = {};
+  document.querySelectorAll('#panel-config [id^="persona-"]').forEach(el => {
+    overrides[el.id.slice('persona-'.length)] = el.value.trim();
+  });
+  const r = await post('/api/persona', {chat: currentName, overrides});
+  alert(r.error ? ('保存失败：' + r.error) : '已保存（下一轮生效）');
+  config();
+};
+
 async function config(){
   const d = await get('/api/config');
-  $('#panel-config').innerHTML = d.groups.map(g =>
-      `<h3>${esc(g.group)}</h3><div class="cfg">${g.items.map(cfgInput).join('')}</div>`).join('')
+  let html = d.groups.map(g =>
+      `<h3>${esc(g.group)}</h3><div class="cfg">${g.items.map(cfgInput).join('')}</div>`).join('');
+  // 选了会话就多给一段「只改这个群」的人设；没选只说全局
+  if(current) html += personaSection(await get('/api/persona?chat=' + encodeURIComponent(currentName)));
+  $('#panel-config').innerHTML = html
     + `<div class="cfg-actions">
          <button onclick="saveConfig(false)">保存</button>
          <button onclick="saveConfig(true)">保存并重启进程</button>
        </div>
-       <div class="detail" id="cfgmsg" style="margin-top:8px">带 �️ 的字段要重启进程才生效；清空一个框 = 回默认值。</div>`;
+       <div class="detail" id="cfgmsg" style="margin-top:8px">热字段保存后立即生效；带 ⚠ 的要重启进程；清空一个框 = 回默认值。</div>`;
 }
 
 async function saveConfig(restart){

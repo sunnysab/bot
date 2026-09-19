@@ -40,15 +40,17 @@ from context import SYSTEM_KINDS, MessageKind
 from events import Status, bus
 from media import render, tag
 from message import parse_reference_message
+from persona import OVERRIDE_FIELDS
 from reply_trace import find as find_trace
 from reply_trace import latencies as trace_latencies
 from runtime import HOT_FIELDS, RESTART_FIELDS, ReplyScope
 
 PAGE = Path(__file__).parent / 'admin.html'
 SIDECAR = Path(__file__).parent / 'admin.db'
-# 可以在面板上改的提示词。两块模板都不长，整体替换比行编辑简单也可控
+# 可以在面板上改的提示词。模板都不长，整体替换比行编辑简单也可控
 PROMPTS = {'planner': Path(__file__).parent / 'planner.txt',
-           'replyer': Path(__file__).parent / 'replyer.txt'}
+           'replyer': Path(__file__).parent / 'replyer.txt',
+           'agent': Path(__file__).parent / 'agent.txt'}
 DEFAULT_PORT = 8099          # 8080 在本机被 iptv 占了，别用
 CHATS_LIMIT = 50
 MESSAGES_LIMIT = 300         # v1 一次拉满，relay 的 get_messages 还不能翻页
@@ -87,7 +89,7 @@ CONFIG_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ('改了要重启进程', ('relay_host', 'relay_port', 'relay_unix', 'admin_port', 'log_path', 'log_level',
                     'describe_media', 'media_cache_path', 'describe_concurrency', 'describe_timeout',
                     'describe_max_tokens', 'describe_history_limit', 'profile_path', 'habit_path',
-                    'moment_path', 'emoji_path', 'scope_path', 'moment_batch')),
+                    'moment_path', 'emoji_path', 'scope_path', 'moment_batch', 'persona_path')),
 )
 
 # 面板能改的数值项之范围。越界当场拒——比如上下文填 0 会在模型调用时才炸
@@ -525,6 +527,28 @@ class Admin:
         logger.warning(f'管理后台改了提示词 {path.name}（{len(text)} 字节），已热重载')
         return {'saved': name, 'bytes': len(text), 'lines': text.count('\n') + 1}
 
+    # ---------- 分会话人设 ----------
+
+    def read_persona(self, chat: str = '') -> dict:
+        """ 该会话的人设：全局那份当参照，overrides 是本会话盖上去的（空 = 全部继承）。 """
+        persona = self.runtime.persona
+        return {
+            'chat': chat,
+            'fields': list(OVERRIDE_FIELDS),
+            'global': {'personality': persona.personality, 'reply_style': persona.reply_style,
+                       'behavior_style': persona.behavior_style,
+                       'reply_styles': '|'.join(persona.alternates),
+                       'style_probability': persona.alternate_probability,
+                       'aliases': list(persona.aliases)},
+            'overrides': self.runtime.personas.get(chat) if chat else {},
+        }
+
+    def write_persona(self, chat: str, overrides: dict) -> dict:
+        """ 整份替换这个会话的覆盖；空值字段 = 继承全局。下一轮直接生效（不重建插件）。 """
+        saved = self.runtime.personas.set(chat, overrides or {})
+        logger.warning(f'管理后台改了分会话人设 {chat!r}：{sorted(saved) or "（清空，回全局）"}')
+        return {'chat': chat, 'overrides': saved}
+
     def replay(self, msg_id: str, stage: str = 'all') -> dict:
         """ 用当前提示词重跑一轮。会真的花 token（面板上要确认）。 """
         record = find_trace(self.runtime.config.trace_path, msg_id)
@@ -714,6 +738,8 @@ class Admin:
                 return self._json(handler, self.stats(hours))
             if route == '/api/prompts':
                 return self._json(handler, self.read_prompts())
+            if route == '/api/persona':
+                return self._json(handler, self.read_persona((query.get('chat') or [''])[0]))
             if route == '/api/emojis':
                 return self._json(handler, {'emojis': self.emojis()})
             if route == '/api/moments':
@@ -762,6 +788,9 @@ class Admin:
             if route == '/api/prompts':
                 return self._json(handler, self.save_prompt(payload.get('name', ''),
                                                             payload.get('text', '')))
+            if route == '/api/persona':
+                return self._json(handler, self.write_persona(payload.get('chat', ''),
+                                                              payload.get('overrides') or {}))
             if route == '/api/emoji_delete':
                 return self._json(handler, self.delete_emoji(payload.get('md5', '')))
             if route == '/api/moment_delete':
@@ -817,6 +846,9 @@ def _self_check() -> None:
     import tempfile
     import types
 
+    from persona import Persona
+    from personas import PersonaStore
+
     bus.reset()
     now = time.time()
 
@@ -854,9 +886,12 @@ def _self_check() -> None:
 
     # 名单文件是上一轮自检留下的就清掉，不然结果取决于跑过几次
     (Path(tempfile.gettempdir()) / 'bot-admin-selfcheck-scope.json').unlink(missing_ok=True)
+    (Path(tempfile.gettempdir()) / 'bot-admin-selfcheck-personas.json').unlink(missing_ok=True)
     runtime = types.SimpleNamespace(
         loop=None, media_cache=None,
         config=Config(log_path='/no/such/bot.log', trace_path='/no/such/trace.jsonl'),
+        persona=Persona(),
+        personas=PersonaStore(Path(tempfile.gettempdir()) / 'bot-admin-selfcheck-personas.json'),
         reply_scope=ReplyScope(Path(tempfile.gettempdir()) / 'bot-admin-selfcheck-scope.json',
                                seed=('研究生摆烂群',)),
         focus=FakeFocus(), backoff=FakeBackoff(), emojis=FakeEmojis(), memories=FakeMemories(),
@@ -1108,6 +1143,27 @@ def _self_check() -> None:
             raise AssertionError(f'应该被拒: {bad}')
         except ValueError:
             pass
+
+    # 分会话人设：全局当参照，写入的覆盖只作用在该会话
+    view = admin.read_persona('某群')
+    assert view['overrides'] == {} and view['global']['reply_style'], view
+    assert list(view['fields']) == list(OVERRIDE_FIELDS)
+    admin.write_persona('某群', {'personality': '是只猫', 'aliases': '阿猫'})
+    assert admin.read_persona('某群')['overrides']['personality'] == '是只猫'
+    assert admin.read_persona('另一个群')['overrides'] == {}
+    # 清空 = 回全局
+    admin.write_persona('某群', {})
+    assert admin.read_persona('某群')['overrides'] == {}
+    # 未知字段 / 越界概率当场拒
+    for bad in ({'nope': 1}, {'style_probability': 5}):
+        try:
+            admin.write_persona('某群', bad)
+            raise AssertionError(f'应该被拒: {bad}')
+        except ValueError:
+            pass
+
+    # 提示词面板要能改 agent 模式那份（默认走的就是它）
+    assert set(PROMPTS) == {'planner', 'replyer', 'agent'}, PROMPTS
 
     print('admin self-check ok')
 
