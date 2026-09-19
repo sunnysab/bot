@@ -39,7 +39,9 @@ class FakeBot:
         return [types.SimpleNamespace(peer='456@chatroom'), types.SimpleNamespace(peer='gh_news'),
                 types.SimpleNamespace(peer='wxid_bob'), types.SimpleNamespace(peer='wxid_me')]
 
-    async def get_messages(self, limit, contact, reverse, exclude_system):
+    async def get_messages(self, limit, contact, reverse, exclude_system,
+                           before_id=None, after_id=None):
+        self.page = {'limit': limit, 'before_id': before_id, 'after_id': after_id}
         return [
             make_message(msg_type=1, content='第一条', clean_text='第一条', create_time=200),
             make_message(msg_type=3, content='<img cdnurl="x"/>', clean_text='', create_time=201),
@@ -161,6 +163,24 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
         self.reply = {'filename': 'x', 'size': 0}
         with self.assertRaises(ValueError):
             await self.wechat.media_bytes(make_message(msg_id=778))
+
+    async def test_media_bytes_by_id_returns_ext(self):
+        """ 面板要的是 (字节, 扩展名)，附件仍由 relay 保管。 """
+        import base64
+
+        self.wechat._bot.call = self._call
+        self.calls: list[tuple[str, dict]] = []
+        self.reply = {'ext': 'gif', 'data_base64': base64.b64encode(b'GIF89a').decode()}
+        data, ext = await self.wechat.media_bytes_by_id(999)
+        self.assertEqual((data, ext), (b'GIF89a', 'gif'))
+
+    async def test_message_pagination_cursors_are_passed_through(self):
+        """ 面板翻页要用 relay 的 messages.id 游标，不能拿 64 位 msg_id 比大小。 """
+        await self.wechat.messages('456@chatroom', limit=50, before_id=99)
+        self.assertEqual(self.wechat._bot.page,
+                         {'limit': 50, 'before_id': 99, 'after_id': None})
+        await self.wechat.messages('456@chatroom', after_id=7)
+        self.assertEqual(self.wechat._bot.page['after_id'], 7)
 
     async def test_unknown_name_stays_wxid(self):
         self.wechat._bot.group_card = ''

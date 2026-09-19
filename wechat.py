@@ -178,14 +178,18 @@ class Wechat:
         raw, _ = await self.media_bytes_by_id(msg.msg_id)
         return raw
 
-    async def messages(self, peer: str, limit: int = 300, exclude_system: bool = True):
+    async def messages(self, peer: str, limit: int = 300, exclude_system: bool = True,
+                       before_id: int = 0, after_id: int = 0):
         """ 管理后台用：某个会话的历史。
 
         直接返回 relay 的原始消息，不走 fetch_history 那层历史记录封装——
         面板要 msg_id 才能把状态贴上去，也要原始 XML 才能渲染媒体。
+        翻页游标是 relay 的 `messages.id`（不是 64 位的 msg_id）：`before_id` 往早翻，
+        `after_id` 往新翻。
         """
         return await self._bot.get_messages(limit=limit, contact=peer, reverse=True,
-                                           exclude_system=exclude_system)
+                                           exclude_system=exclude_system,
+                                           before_id=before_id or None, after_id=after_id or None)
 
     async def sender_names(self, chat: str, senders) -> dict[str, str]:
         """ 把 wxid 批量解析成显示名（群昵称 > 备注）。

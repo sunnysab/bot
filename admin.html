@@ -120,6 +120,7 @@
       <span class="grow"></span>
       <input id="say" placeholder="手动发一条…" style="width:240px;padding:3px 8px;border:1px solid var(--line);border-radius:6px" disabled>
       <button id="sendbtn" disabled>发送</button>
+      <button id="earlierbtn" disabled title="往上加载更早的消息">更早</button>
       <button id="drawerbtn">详情</button>
     </div>
     <section id="stream"><div class="empty">左边选一个会话</div></section>
@@ -169,6 +170,8 @@ const post = async (u, body) => (await fetch(u, {method:'POST', headers:{'Conten
 
 let since = 0, current = null, currentName = '', reloading = false, selected = null;
 let chats = [], tab = 'trace';
+// 当前已加载消息的 relay 游标（messages.id，不是 64 位 msg_id）：翻页和增量都靠它
+let oldest = 0, newest = 0;
 
 function chip(status, detail){
   if(!status) return '';
@@ -247,7 +250,7 @@ async function loadChats(){
     const found = chats.find(c => c.chat_id === current);
     currentName = found ? found.name : current;
     $('#cur').textContent = currentName;
-    for (const id of ['allowbtn','focusbtn','say','sendbtn']) $('#'+id).disabled = false;
+    for (const id of ['allowbtn','focusbtn','earlierbtn','say','sendbtn']) $('#'+id).disabled = false;
     $('#allowbtn').classList.toggle('on', !!(found && found.allowed));
     $('#focusbtn').classList.toggle('on', !!(found && found.focus));
     loadChats(); loadMessages(); showPanel();
@@ -268,9 +271,54 @@ async function loadMessages(){
     setTimeout(() => { if(chat === current) loadMessages(); }, 2000);
     return;
   }
-  $('#stream').innerHTML = data.messages.length ? data.messages.map(row).join('')
-    : '<div class="empty">这个会话没有消息</div>';
+  ({oldest, newest} = cursorsOf(data.messages));
+  renderStream(data.messages, {reset:true});
   $('#stream').scrollTop = $('#stream').scrollHeight;
+}
+
+// 一页消息里的游标范围。心跳事件只给 msg_id（64 位），不能拿来比大小，所以只用 cursor
+function cursorsOf(rows){
+  const cs = rows.map(m => m.cursor).filter(c => typeof c === 'number' && c);
+  return {oldest: cs.length ? Math.min(...cs) : 0, newest: cs.length ? Math.max(...cs) : 0};
+}
+
+function renderStream(rows, {reset=false, prepend=false} = {}){
+  const el = $('#stream');
+  if(reset){
+    el.innerHTML = rows.length ? rows.map(row).join('') : '<div class="empty">这个会话没有消息</div>';
+    return;
+  }
+  el.querySelector('.empty')?.remove();
+  if(prepend){
+    const keep = el.scrollHeight - el.scrollTop;      // 保持视口不动，不然会跳到底部
+    el.insertAdjacentHTML('afterbegin', rows.map(row).join(''));
+    el.scrollTop = el.scrollHeight - keep;
+  } else {
+    el.insertAdjacentHTML('beforeend', rows.map(row).join(''));
+  }
+}
+
+// 只拉最新的那几条追加，不再每次收到消息就重拉 300 条（长会话下这是主要开销）
+async function loadNew(){
+  if(!current || reloading) return;
+  const chat = current;
+  const data = await get(`/api/messages?chat=${encodeURIComponent(chat)}&after=${newest}`);
+  if(chat !== current || !data.messages || !data.messages.length) return;
+  renderStream(data.messages, {});
+  const c = cursorsOf(data.messages);
+  newest = Math.max(newest, c.newest);
+  if(!oldest) oldest = c.oldest;
+}
+
+async function loadEarlier(){
+  if(!current || !oldest) return;
+  const chat = current;
+  $('#earlierbtn').disabled = true;
+  const data = await get(`/api/messages?chat=${encodeURIComponent(chat)}&limit=100&before=${oldest}`);
+  $('#earlierbtn').disabled = false;
+  if(chat !== current || !data.messages || !data.messages.length) return;
+  renderStream(data.messages, {prepend:true});
+  oldest = cursorsOf(data.messages).oldest;
 }
 
 function patch(msgId, status, detail, target){
@@ -289,7 +337,7 @@ async function poll(){
       if(e.msg_id) patch(e.msg_id, e.status, e.detail, 'own');
       if(e.chat_id === current && (e.status==='received' || e.status==='phone')) stale = true;
     }
-    if(stale && !reloading) loadMessages();
+    if(stale && !reloading) loadNew();
     $('#seq').textContent = '事件 #' + seq;
     if(selected) showPanel();          // 抽屉开着就跟着最新状态走
   }catch(err){ $('#relay').textContent = '管理后台断开'; }
@@ -577,6 +625,7 @@ $('#sendbtn').onclick = async () => {
   $('#say').placeholder = r.error ? ('失败：' + r.error) : '已排队（走限速）';
 };
 $('#drawerbtn').onclick = () => $('#drawer').classList.toggle('hide');
+$('#earlierbtn').onclick = loadEarlier;
 $('#drawerclose').onclick = () => $('#drawer').classList.add('hide');
 document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => { tab = b.dataset.tab; showPanel(); });
 window.pick = id => { selected = id; showPanel();
