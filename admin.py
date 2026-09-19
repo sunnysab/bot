@@ -358,13 +358,17 @@ class Admin:
                 continue
             last = getattr(chat, 'last_message', None) or {}
             name = getattr(chat, 'display_name', '') or peer
+            # 预览也得走 render()：last_message 的 clean_text 对媒体/系统消息就是原始 XML，
+            # 以前直接显示 `<?xml version="1.0"?><msg><img …>`，列表里没法看
+            preview, _ = render(last.get('msg_type', 0), last.get('content', ''),
+                                last.get('clean_text') or '')
             out.append({
                 'chat_id': peer,
                 'name': name,
                 'is_group': bool(getattr(chat, 'is_chatroom', False)),
                 'count': getattr(chat, 'msg_count', 0),
                 'updated_at': getattr(chat, 'updated_at', 0),
-                'last': (last.get('clean_text') or last.get('content') or '')[:60],
+                'last': preview[:60],
                 # 静音和专注都按**显示名**记（插件链就是按显示名分发的）
                 'allowed': self.runtime.reply_scope.allows(name),
                 'focus': name in self.runtime.focus.sessions,

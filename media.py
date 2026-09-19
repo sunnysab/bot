@@ -227,9 +227,12 @@ def render(msg_type: int, content: str, text: str) -> tuple[str, Media | None]:
 
     统一 live 与 history 两条路径的载荷处理，避免一边丢弃一边漏 XML。
     """
-    from context import MessageKind
+    from context import SYSTEM_KINDS, MessageKind
 
     kind = MessageKind.of(msg_type)
+    if kind in SYSTEM_KINDS:
+        # 51 / 10000 / 10002 的正文是控制 XML（`<op id=…>`），不该漏给任何调用方
+        return '[系统消息]', None
     if kind is MessageKind.TEXT:
         return text, None
     if kind is MessageKind.APPMSG:
@@ -317,6 +320,9 @@ if __name__ == '__main__':
     assert render(43, '', '') == ('[视频]', None)
     assert render(1, 'ignored', '你好') == ('你好', None)
     assert render(2, 'x', 'x') == ('', None)
+    # 会话列表的预览也走这里：51 的 <op> 控制 XML 不能漏出去（面板以前直接显示原文）
+    assert render(51, "<msg><op id='11'><name>HandOffMaster</name></op></msg>",
+                  "<msg><op id='11'><name>HandOffMaster</name></op></msg>") == ('[系统消息]', None)
 
     # 媒体占位符不能被当成要说的话发出去
     assert is_placeholder('[表情：欢迎]') and is_placeholder('[图片]') and is_placeholder('[位置：海淀区]')
