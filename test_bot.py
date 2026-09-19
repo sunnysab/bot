@@ -278,6 +278,22 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.reply_count, 1)
         self.assertEqual(self.bot.outbox.depth(), 0)
 
+    async def test_multi_line_reply_is_enqueued_all_at_once(self):
+        """ 一轮的多行是**同步全部入队**的：先都进历史，再按序发出。
+
+        发送由队列按限速逐条做，是另一条 task，不能阻塞插件链（否则后一条要等
+        前一条的打字延迟跑完，群里就像卡住了）。
+        """
+        self.bot.outbox._typing_delay = lambda text: 0.2
+        self.bot.set_default_plugin(FakePlugin(texts=['一', '二', '三']))
+        await self.bot.on_message(make_msg())
+        await asyncio.sleep(0.05)          # 插件跑完、入队完成，但还没轮到发
+
+        self.assertEqual(self.bot._wechat.sent, [])          # 一条都还没真发
+        self.assertEqual([r.text for r in self._window()], ['hello', '一', '二', '三'])
+        await asyncio.sleep(1.2)
+        self.assertEqual([text for _, text in self.bot._wechat.sent], ['一', '二', '三'])
+
     async def test_quote_replies_carry_the_trigger_svr_id(self):
         """ 开引用后，每条文字回复都引「这一轮在回的那条」：ref_svrid = 它的 svrId。 """
         self.bot.quote_replies = True
