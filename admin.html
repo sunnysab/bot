@@ -192,7 +192,11 @@ function mediaBody(r){
     return `<audio controls preload="none" src="${url}" ${fb}></audio>
             <div class="detail">${esc(r.text)}</div>`;
   }
-  // 视频 / 其它：relay 下不了（videomsg 要 getvideo），老实留文字
+  if(m.kind === 'video'){
+    // relay 已支持 CDN 帧下视频（filetype=4）；preload=none 理由同语音
+    return `<video class="media" controls preload="none" src="${url}" ${fb}></video>`;
+  }
+  // 其它：老实留文字
   return `<div class="body">${esc(r.text)}</div>`;
 }
 
