@@ -36,6 +36,7 @@ from habits import HabitStore
 from moments import MomentKeeper, MomentStore
 from necessity import IdleBackoff
 from persona import Persona
+from personas import PersonaStore
 from planner import PLAN_RESPONSE_FORMAT
 from plugin import ChatPlugin, EndProcessing, RepeatPlugin, ReplyPolicy
 from profiles import ProfileStore
@@ -123,6 +124,7 @@ RESTART_FIELDS = frozenset({
     'describe_media', 'media_cache_path', 'describe_concurrency', 'describe_timeout',
     'describe_max_tokens', 'describe_history_limit',
     'profile_path', 'habit_path', 'moment_path', 'emoji_path', 'scope_path', 'moment_batch',
+    'persona_path',
 })
 
 
@@ -140,6 +142,8 @@ class Runtime:
         self.emoji_policy = EmojiPolicy()
         # 允许回复名单：面板上改、落盘、热重载不重建
         self.reply_scope = ReplyScope(config.scope_path, seed=DEFAULT_MUTED)
+        # 分会话人设覆盖：同样是面板上改、落盘、热重载不重建
+        self.personas = PersonaStore(config.persona_path)
 
         # 构造期定死的东西
         self.media_cache = MediaCache(config.media_cache_path)
@@ -201,15 +205,22 @@ class Runtime:
                            activity_window=config.reply_activity_window,
                            aliases=self._make_persona().aliases,
                            focus_score_bonus=config.focus_score_bonus,
-                           backoff=self.backoff, focus=self.focus)
+                           backoff=self.backoff, focus=self.focus,
+                           aliases_for=lambda contact: self._make_persona(contact).aliases)
 
-    def _make_persona(self) -> Persona:
+    def _make_persona(self, contact: str = '') -> Persona:
         config = self.config
-        return Persona(
+        base = Persona(
             personality=config.personality, reply_style=config.reply_style,
             behavior_style=config.behavior_style,
             alternates=tuple(style.strip() for style in config.reply_styles.split('|') if style.strip()),
             alternate_probability=config.style_probability)
+        return self.personas.persona_for(contact, base) if contact else base
+
+    @property
+    def persona(self) -> Persona:
+        """ 当前**全局**人设（不含分会话覆盖）。面板要拿它当「继承」的参照。 """
+        return self._make_persona()
 
     def _make_chat_plugin(self) -> ChatPlugin:
         config = self.config
@@ -222,6 +233,7 @@ class Runtime:
                           planner_rounds=config.planner_rounds, emoji_policy=self.emoji_policy,
                           reply_mode=config.reply_mode, revoke=self.bot.revoke,
                           agent_max_replies=config.agent_max_replies,
+                          personas=self.personas,
                           timeout=config.request_timeout)
 
     def _install_plugins(self) -> None:

@@ -15,6 +15,7 @@ from habits import Habit, HabitStore
 from moments import Moment, MomentStore
 from necessity import NECESSITY_THRESHOLD
 from persona import Persona
+from personas import PersonaStore
 from plugin import REVOKE_PER_TURN, ChatPlugin, RepeatPlugin, ReplyPolicy, clean_reply
 from profiles import Profile, ProfileStore
 from reply_trace import TraceLogger
@@ -66,10 +67,12 @@ class ToolAi:
         self.turns = list(turns)
         self.reply = list(reply) if reply else None
         self.rounds = []            # 每次 chat_tools 收到的 messages
+        self.prompts = []           # 每次 chat_tools 收到的 system prompt
         self.tools_seen = []        # 每次暴露的工具名
         self.reply_calls = []
 
     async def chat_tools(self, prompt, messages, tools):
+        self.prompts.append(prompt)
         self.rounds.append([dict(item) for item in messages])
         self.tools_seen.append([item['function']['name'] for item in tools])
         if not self.turns:
@@ -457,6 +460,12 @@ class TestReplyPolicy(unittest.TestCase):
         self.assertIsNotNone(self._focus_policy().evaluate(
             self.ctx(content='这天气真怪', history=history), now=1000.0))
 
+    def test_aliases_can_be_per_contact(self):
+        """ 别名也能按会话取（分会话人设改了别名，在群里叫得应）。 """
+        policy = ReplyPolicy(aliases=('全局名',), aliases_for=lambda contact: ('本群名',))
+        self.assertEqual(policy.evaluate(self.ctx(content='本群名 在吗'), now=1000.0).kind, 'mention')
+        self.assertIsNone(policy.evaluate(self.ctx(content='全局名 在吗'), now=1000.0))
+
 
 class TestRepeatPlugin(unittest.IsolatedAsyncioTestCase):
     async def test_media_markers_are_not_repeated(self):
@@ -765,6 +774,18 @@ class TestAgentMode(unittest.IsolatedAsyncioTestCase):
             _call('reply', text='第一条'), _call('reply', text='第二条')))])
         reply = await plugin.handle(proactive_ctx())
         self.assertEqual(reply.texts, ['第一条'])
+
+    async def test_per_conversation_persona_reaches_the_prompt(self):
+        """ 分会话人设只盖这个会话，且真的进了 system prompt。 """
+        store = PersonaStore(Path(tempfile.mkdtemp()) / 'personas.json')
+        store.set('测试群', {'personality': '是只猫', 'aliases': '阿猫'})
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('reply', text='喵'),))], personas=store)
+        reply = await plugin.handle(proactive_ctx())
+        self.assertEqual(reply.texts, ['喵'])
+        self.assertIn('是只猫', self.ai.prompts[0])
+        self.assertIn('阿猫', self.ai.prompts[0])
+        # 没覆盖的会话回落全局
+        self.assertEqual(plugin.persona_for('另一个群').personality, Persona().personality)
 
     async def test_sticker_and_text_in_one_turn(self):
         plugin = self.plugin(

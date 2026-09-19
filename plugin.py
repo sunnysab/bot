@@ -27,6 +27,7 @@ from necessity import (
     score_necessity,
 )
 from persona import Persona
+from personas import PersonaStore
 from planner import Plan
 from profiles import ProfileStore
 from reply_trace import TraceLogger, TraceRecord
@@ -304,7 +305,8 @@ class ReplyPolicy:
 
     def __init__(self, threshold: int = NECESSITY_THRESHOLD, activity_window: float = 180.0,
                  aliases: tuple[str, ...] = (), backoff: IdleBackoff | None = None,
-                 focus: FocusMode | None = None, focus_score_bonus: int = 15):
+                 focus: FocusMode | None = None, focus_score_bonus: int = 15,
+                 aliases_for: Callable[[str], tuple[str, ...]] | None = None):
         """ :param threshold: 必要性分数阈值，越高越沉默
         :param activity_window: 统计群活跃度的时间窗口（秒）
         :param aliases: 机器人自己的其他叫法，命中就当被叫到名字
@@ -312,10 +314,12 @@ class ReplyPolicy:
         :param focus: 专注模式；群聊得热时盯一会儿，期间给必要性打分加分
         :param focus_score_bonus: 专注期的加分。**只加分，不豁免门控**——豁免会把
             存在感惩罚一起绕过，群里就成了机器人一个人的独角戏
+        :param aliases_for: 按会话取别名（分会话人设改了别名也要能叫应）；不传用上面的 aliases
         """
         self.threshold = threshold
         self.activity_window = activity_window
         self.aliases = aliases
+        self.aliases_for = aliases_for or (lambda contact: self.aliases)
         self.backoff = backoff if backoff is not None else IdleBackoff()
         self.focus = focus
         self.focus_score_bonus = focus_score_bonus
@@ -380,8 +384,9 @@ class ReplyPolicy:
         return len(self._recent(ctx, now))
 
     def _mentions_me(self, ctx: MessageContext) -> bool:
-        """ 群昵称或任一别名出现在消息里，就算在叫它。 """
-        return any(name and name in ctx.msg.content for name in (ctx.self_name, *self.aliases))
+        """ 群昵称或任一别名出现在消息里，就算在叫它。别名按会话取（可能有覆盖）。 """
+        names = (ctx.self_name, *self.aliases_for(ctx.contact))
+        return any(name and name in ctx.msg.content for name in names)
 
 
 class ChatPlugin(Plugin):
@@ -404,7 +409,7 @@ class ChatPlugin(Plugin):
                  planner_rounds: int = 3, emoji_policy: EmojiPolicy | None = None,
                  reply_mode: str = 'two_stage', revoke: Revoke | None = None,
                  timeout: float = 60.0, rng: random.Random | None = None,
-                 agent_max_replies: int = 1):
+                 agent_max_replies: int = 1, personas: PersonaStore | None = None):
         """ 聊天插件
 
         :param ai_provider: AI 服务提供者
@@ -426,12 +431,14 @@ class ChatPlugin(Plugin):
         :param timeout: 单次模型调用超时（秒）
         :param rng: 抽临时风格用的随机源，测试时可注入
         :param agent_max_replies: agent 模式一轮最多发几条消息
+        :param personas: 分会话人设覆盖；传了就按会话取人设，没覆盖的回落到 persona
         """
         self.ai = ai_provider
         self._planner_ai = planner_ai
         self.context_length = context_length
         self.policy = policy or ReplyPolicy()
         self.persona = persona or Persona()
+        self.personas = personas
         self.profiles = profiles
         self.habits = habits
         self.memories = memories
@@ -463,6 +470,12 @@ class ChatPlugin(Plugin):
     def planner_ai(self) -> AiProvider:
         """ 决策者用的模型；没单独配就和表达者共用一个。动态回退，换 ai 也能跟上。 """
         return self._planner_ai or self.ai
+
+    def persona_for(self, contact: str) -> Persona:
+        """ 这个会话用的人设：有分会话覆盖就盖上，没有就用全局。 """
+        if self.personas is None:
+            return self.persona
+        return self.personas.persona_for(contact, self.persona)
 
     @override
     async def handle(self, ctx: MessageContext) -> Reply | None:
@@ -768,22 +781,24 @@ class ChatPlugin(Plugin):
 
     async def _planner_prompt(self, ctx: MessageContext, tools: tuple[str, ...] = ()) -> str:
         """ tools 传空就用单轮 JSON 那套输出格式，传工具名就换成工具行动那套。 """
-        return await self.planner_template.render_async(behavior_style=self.persona.behavior_style,
+        persona = self.persona_for(ctx.contact)
+        return await self.planner_template.render_async(behavior_style=persona.behavior_style,
                                                         self_name=ctx.self_name, contact=ctx.contact,
                                                         is_group=ctx.msg.is_chatroom,
-                                                        aliases=self.persona.aliases, tools=tools)
+                                                        aliases=persona.aliases, tools=tools)
 
     async def _agent_prompt(self, ctx: MessageContext, tools: tuple[str, ...] = ()) -> str:
         """ agent 模式的 system prompt：人设 + 行动准则 + 工具说明，一次调用把判断和台词都做了。 """
+        persona = self.persona_for(ctx.contact)
         return await self.agent_template.render_async(
-            identity=self.persona.identity(ctx.self_name), reply_style=self.persona.reply_style,
-            behavior_style=self.persona.behavior_style, self_name=ctx.self_name,
-            contact=ctx.contact, is_group=ctx.msg.is_chatroom, aliases=self.persona.aliases,
+            identity=persona.identity(ctx.self_name), reply_style=persona.reply_style,
+            behavior_style=persona.behavior_style, self_name=ctx.self_name,
+            contact=ctx.contact, is_group=ctx.msg.is_chatroom, aliases=persona.aliases,
             tools=tools)
 
     def _clean(self, texts: Iterable[str] | None, ctx: MessageContext) -> list[str]:
         """ 模型常顺手带上「昵称：」前缀或引号包裹，不能直接漏到群里。 """
-        names = (ctx.self_name, *self.persona.aliases)
+        names = (ctx.self_name, *self.persona_for(ctx.contact).aliases)
         return [text for text in (clean_reply(x, names) for x in texts or ()) if text]
 
     async def _plan(self, ctx: MessageContext, necessity: NecessityScore, blocks: dict[str, str],
@@ -799,11 +814,12 @@ class ChatPlugin(Plugin):
     async def _express(self, ctx: MessageContext, blocks: dict[str, str], transcript: str,
                        plan: str) -> list[str] | None:
         """ 跑表达者。先把「本轮要回哪条」摆明，再给决策；没决策也不会跑偏到旧话题。 """
+        persona = self.persona_for(ctx.contact)
         prompt = await self.replyer_template.render_async(
-            identity=self.persona.identity(ctx.self_name), reply_style=self.persona.reply_style,
+            identity=persona.identity(ctx.self_name), reply_style=persona.reply_style,
             self_name=ctx.self_name, contact=ctx.contact, is_group=ctx.msg.is_chatroom)
         message = self._compose(ctx, blocks, transcript, plan=plan,
-                                alternate=self.persona.maybe_alternate(self.rng))
+                                alternate=persona.maybe_alternate(self.rng))
         return await self._ask(prompt, message, ctx, image=ctx.is_image)
 
     async def _ask(self, prompt: str, message: str, ctx: MessageContext, image: bool = False,
@@ -842,17 +858,18 @@ class ChatPlugin(Plugin):
         3. 比表达风格（replyer）是可靠的，那也是调得最多的那个。
         """
         started = time.perf_counter()
+        persona = self.persona_for(contact)
         new_plan = plan
         if stage == 'all' and self.enable_planner:
             prompt = await self.planner_template.render_async(
-                behavior_style=self.persona.behavior_style, self_name=self_name, contact=contact,
-                is_group=True, aliases=self.persona.aliases, tools=())
+                behavior_style=persona.behavior_style, self_name=self_name, contact=contact,
+                is_group=True, aliases=persona.aliases, tools=())
             raw = await self._complete(prompt, transcript, ai=self.planner_ai)
             decided = Plan.parse('\n'.join(raw)) if raw else None
             new_plan = decided.render() if decided and decided.speak else ''
 
         replyer = await self.replyer_template.render_async(
-            identity=self.persona.identity(self_name), reply_style=self.persona.reply_style,
+            identity=persona.identity(self_name), reply_style=persona.reply_style,
             self_name=self_name, contact=contact, is_group=True)
         body = f'{new_plan}\n\n{transcript}' if new_plan else transcript
         reply = await self._complete(replyer, body)

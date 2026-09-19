@@ -17,7 +17,11 @@ reply_style 里的数字是量出来的，不是拍脑袋的。在 248015 条真
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+
+# 分会话可覆盖的人设字段。名字和 Config 里那几个保持一致，面板直接照搬
+OVERRIDE_FIELDS = ('personality', 'reply_style', 'behavior_style',
+                   'reply_styles', 'style_probability', 'aliases')
 
 
 @dataclass(frozen=True)
@@ -54,6 +58,32 @@ class Persona:
         return rng.choice(self.alternates)
 
 
+def _as_tuple(value) -> tuple[str, ...]:
+    """ 面板/JSON 里可能是列表，也可能是 `|` 分隔的字符串。 """
+    if isinstance(value, (list, tuple)):
+        items = value
+    else:
+        items = str(value or '').split('|')
+    return tuple(str(item).strip() for item in items if str(item).strip())
+
+
+def apply_overrides(base: Persona, overrides: dict | None) -> Persona:
+    """ 把一份**局部覆盖**盖到基础人设上。字段名用 Config 那套（reply_styles 等）。 """
+    if not overrides:
+        return base
+    kw: dict = {}
+    for field in ('personality', 'reply_style', 'behavior_style'):
+        if overrides.get(field) is not None:
+            kw[field] = str(overrides[field])
+    if overrides.get('style_probability') is not None:
+        kw['alternate_probability'] = float(overrides['style_probability'])
+    if overrides.get('reply_styles') is not None:
+        kw['alternates'] = _as_tuple(overrides['reply_styles'])
+    if overrides.get('aliases') is not None:
+        kw['aliases'] = _as_tuple(overrides['aliases'])
+    return replace(base, **kw) if kw else base
+
+
 def _self_check() -> None:
     persona = Persona()
     assert persona.identity('示例名') == (
@@ -75,6 +105,15 @@ def _self_check() -> None:
     seeded = random_module.Random(0)
     always = Persona(alternates=('only',), alternate_probability=1.0)
     assert always.maybe_alternate(seeded) == 'only'
+
+    # 分会话覆盖：只盖给的字段，其余继承基础人设
+    assert apply_overrides(persona, None) is persona
+    assert apply_overrides(persona, {}) is persona
+    only_group = apply_overrides(persona, {'personality': '是只猫', 'aliases': '阿猫|阿狗'})
+    assert only_group.personality == '是只猫' and only_group.aliases == ('阿猫', '阿狗')
+    assert only_group.reply_style == persona.reply_style          # 没给的字段不动
+    assert apply_overrides(persona, {'reply_styles': ['短', '长'],
+                                    'style_probability': 0.5}).alternates == ('短', '长')
     print('persona self-check ok')
 
 
