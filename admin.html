@@ -452,14 +452,13 @@ async function config(){
   $('#panel-config').innerHTML = d.groups.map(g =>
       `<h3>${esc(g.group)}</h3><div class="cfg">${g.items.map(cfgInput).join('')}</div>`).join('')
     + `<div class="cfg-actions">
-         <button onclick="saveConfig(false,false)">保存</button>
-         <button onclick="saveConfig(true,false)">保存并热重载</button>
-         <button onclick="saveConfig(true,true)">保存并重启进程</button>
+         <button onclick="saveConfig(false)">保存</button>
+         <button onclick="saveConfig(true)">保存并重启进程</button>
        </div>
        <div class="detail" id="cfgmsg" style="margin-top:8px">带 �️ 的字段要重启进程才生效；清空一个框 = 回默认值。</div>`;
 }
 
-async function saveConfig(reload, restart){
+async function saveConfig(restart){
   const msg = t => { $('#cfgmsg').innerHTML = t; };
   const updates = {};
   document.querySelectorAll('#panel-config [data-name]').forEach(el => {
@@ -468,17 +467,12 @@ async function saveConfig(reload, restart){
   const r = await post('/api/config', {updates});
   if(r.error) return msg('保存失败：' + esc(r.error));
   const changed = Object.entries(r.changed || {});
-  let text = changed.length ? '已写回 .env：' + changed.map(([k,v]) => `${k}=${esc(v)}`).join('，')
+  let text = changed.length ? '已生效：' + changed.map(([k,v]) => `${k}=${esc(v)}`).join('，')
                             : '没有改动';
   if(r.stale.length) text += `<br>⚠ 要重启进程才生效：${esc(r.stale.join('，'))}`;
   msg(text);
   if(restart){ msg(text + '<br>正在重启进程…'); await post('/api/restart', {}); return; }
-  if(reload){
-    const g = await post('/api/reload', {});
-    if(g.error) return msg(text + '<br>热重载失败：' + esc(g.error));
-    msg(text + `<br>已热重载；生效的改动：${esc(JSON.stringify(g.changed))}`);
-    state();
-  }
+  state();
 }
 
 async function showPanel(){

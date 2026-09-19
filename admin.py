@@ -76,17 +76,34 @@ CONFIG_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         'backoff_start_after', 'backoff_base_seconds', 'backoff_max_seconds',
         'backoff_bypass_messages')),
     ('专注模式', ('enable_focus', 'focus_enter_activity', 'focus_idle_seconds', 'focus_max_seconds')),
+    ('回复行为', ('reply_context_length', 'agent_max_replies', 'focus_score_bonus',
+                'quote_replies', 'quote_min_activity', 'quote_window_seconds')),
     ('人格与表达', ('personality', 'reply_style', 'behavior_style', 'reply_styles', 'style_probability')),
     ('决策者', ('reply_mode', 'enable_planner', 'planner_url', 'planner_key', 'planner_model', 'planner_temperature',
                 'planner_max_tokens', 'planner_thinking', 'planner_json_schema', 'enable_tools',
                 'planner_rounds')),
-    ('出站', ('send_interval', 'typo_rate', 'quote_replies', 'dry_run')),
+    ('出站', ('send_interval', 'typo_rate', 'dry_run')),
     ('观测', ('trace_path',)),
     ('改了要重启进程', ('relay_host', 'relay_port', 'relay_unix', 'admin_port', 'log_path', 'log_level',
                     'describe_media', 'media_cache_path', 'describe_concurrency', 'describe_timeout',
                     'describe_max_tokens', 'describe_history_limit', 'profile_path', 'habit_path',
                     'moment_path', 'emoji_path', 'scope_path', 'moment_batch')),
 )
+
+# 面板能改的数值项之范围。越界当场拒——比如上下文填 0 会在模型调用时才炸
+RANGES: dict[str, tuple[float, float]] = {
+    'agent_max_replies': (1, 10),
+    'focus_score_bonus': (0, 100),
+    'quote_min_activity': (0, 50),
+    'quote_window_seconds': (10, 3600),
+    'reply_context_length': (1, 200),
+    'reply_necessity_threshold': (0, 200),
+    'reply_activity_window': (10, 3600),
+    'style_probability': (0.0, 1.0),
+    'typo_rate': (0.0, 1.0),
+    'send_interval': (0.0, 60.0),
+    'request_timeout': (1.0, 600.0),
+}
 
 
 _FIELDS = {field.name: field for field in dataclass_fields(Config)}
@@ -122,12 +139,6 @@ def _readable(changed: dict) -> dict:
     """ 给日志和响应看的变更集；密钥不回显内容。 """
     return {name: ('（已更新）' if name in SECRET_FIELDS else str(value))
             for name, value in changed.items()}
-
-
-def _stale(new: Config, old: Config) -> list[str]:
-    """ 改了、但热重载管不着的字段：得重启进程。 """
-    return [f.name for f in dataclass_fields(Config)
-            if f.name in RESTART_FIELDS and getattr(new, f.name) != getattr(old, f.name)]
 
 
 def _validate_prompt(text: str) -> None:
@@ -613,7 +624,11 @@ class Admin:
         return {'groups': groups, 'dotenv': str(self.dotenv)}
 
     def write_config(self, updates: dict) -> dict:
-        """ 校验 → 写回 .env。校验不过**一个字都不写**（一个笔误不能让 bot 下次起不来）。 """
+        """ 校验 → 写回 .env → 热字段**立刻生效**。
+
+        校验不过一个字都不写（一个笔误不能让 bot 下次起不来）。热字段当场 apply，
+        面板不用再点一次「热重载」；只有要整进程重启的字段才留在 stale 里。
+        """
         updates = {str(key).strip().lower(): value for key, value in updates.items()}
         unknown = sorted(set(updates) - set(_FIELDS))
         if unknown:
@@ -625,6 +640,9 @@ class Admin:
             if name in SECRET_FIELDS and not str(raw).strip():
                 continue                       # 留空 = 保持原值
             candidate[name] = _parse(_FIELDS[name], raw)
+            low, high = RANGES.get(name, (None, None))
+            if low is not None and not low <= candidate[name] <= high:
+                raise ValueError(f'{name} 要在 {low}~{high} 之间，收到 {candidate[name]}')
 
         try:
             config = Config(**candidate)       # 先验一遍再落盘
@@ -632,10 +650,14 @@ class Admin:
             raise ValueError(f'配置不合法：{e}') from e
 
         changed = {name: candidate[name] for name in updates if candidate[name] != current[name]}
-        if changed:
-            update_dotenv(self.dotenv, {name.upper(): _dotenv_value(value)
-                                       for name, value in changed.items()})
-        return {'changed': _readable(changed), 'stale': _stale(config, self.runtime.config)}
+        if not changed:
+            return {'changed': {}, 'stale': []}
+        update_dotenv(self.dotenv, {name.upper(): _dotenv_value(value)
+                                   for name, value in changed.items()})
+        stale = self.runtime.apply(config)
+        logger.warning(f'管理后台改了配置 {_readable(changed)}；'
+                       f'需要重启进程的：{stale or "（无）"}')
+        return {'changed': _readable(changed), 'stale': stale}
 
     def reload_config(self) -> dict:
         """ 重新读 .env 并热重载。
@@ -847,6 +869,18 @@ def _self_check() -> None:
     admin = Admin(runtime, sidecar=Path(tempfile.gettempdir()) / 'bot-admin-selfcheck.db')
     admin.decisions._conn.execute('DELETE FROM decision')      # 干净起点
 
+    # apply 的替身：真 apply 在 test_runtime.py 里测；这里只记下落盘后生效的配置
+    applied: list[Config] = []
+
+    def fake_apply(cfg: Config) -> list[str]:
+        stale = [f.name for f in dataclass_fields(Config)
+                 if f.name in RESTART_FIELDS and getattr(cfg, f.name) != getattr(runtime.config, f.name)]
+        runtime.config = cfg
+        applied.append(cfg)
+        return stale
+
+    runtime.apply = fake_apply
+
     def msg(msg_type, content, clean='', is_self=False, msg_id=9202842881785760589):
         return types.SimpleNamespace(
             msg_id=msg_id, msg_type=msg_type, content=content, clean_text=clean,
@@ -1008,13 +1042,28 @@ def _self_check() -> None:
         admin.write_config({'enable_focus': False})
         assert 'ENABLE_FOCUS=0' in admin.dotenv.read_text(encoding='utf-8')
 
-        # 热重载：重读 .env 并交给 runtime.apply（真 apply 在 test_runtime.py 里测）
-        applied: list[Config] = []
-        runtime.apply = lambda cfg: (applied.append(cfg), [])[1]
+        # 热重载：重读 .env 并交给 runtime.apply
+        applied.clear()
         admin.dotenv.write_text('TYPO_RATE=0.25\n', encoding='utf-8')
         result = admin.reload_config()
         assert applied and applied[0].typo_rate == 0.25, applied
         assert result['changed']['typo_rate'] == '0.25', result
+
+        # 保存即生效：write_config 自己调 apply，面板不用再点一次「热重载」
+        applied.clear()
+        admin.write_config({'agent_max_replies': '2'})
+        assert applied and applied[0].agent_max_replies == 2, applied
+        # 越界的数值当场拒，且一个字都不写
+        try:
+            admin.write_config({'reply_context_length': '0'})
+            raise AssertionError('越界值应该被拒')
+        except ValueError as e:
+            assert 'reply_context_length' in str(e), e
+
+    # reload_config 用 Config.from_env() 重建，把自检的两个哨兵路径带回了默认值——
+    # 下面统计卡的断言依赖它们指向不存在的文件，钉回去
+    runtime.config = replace(runtime.config, trace_path='/no/such/trace.jsonl',
+                             log_path='/no/such/bot.log')
 
     # 状态落库（统计卡的分母）+ 比率公式
     bus.subscribe(admin.decisions.write)
