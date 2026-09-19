@@ -30,6 +30,7 @@ class FakeWechat:
         self.online: list = []                          # 假线上搜索结果
         self.names = {'wxid_bot': 'Bot'}                # wxid -> 显示名，查不到就回 wxid
         self.revoked: list[tuple[str, int]] = []        # (会话, msg_id)
+        self.refs: list = []                            # 每条出站的 ref_svrid（引用回复）
         self.revoke_fail = False
 
     async def revoke(self, to, msg_id):
@@ -50,11 +51,12 @@ class FakeWechat:
     def wxid(self) -> str:
         return 'wxid_bot'
 
-    async def send_text(self, text, receiver, at_list=''):
+    async def send_text(self, text, receiver, at_list='', ref_svrid=None):
         self.attempts.append((receiver, text))
         if self.fail:
             raise RuntimeError('解析长链 newsendmsg 响应失败: invalid data: unsupported wiretype 7')
         self.sent.append((receiver, text))
+        self.refs.append(ref_svrid)
         return {'sent': True, 'msg_id': RELAY_MSG_ID}
 
     async def media_bytes(self, msg):
@@ -275,6 +277,21 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.history.sizes(), {'456@chatroom': 2})   # 入站 + 自己的回复
         self.assertEqual(self.bot.reply_count, 1)
         self.assertEqual(self.bot.outbox.depth(), 0)
+
+    async def test_quote_replies_carry_the_trigger_svr_id(self):
+        """ 开引用后，每条文字回复都引「这一轮在回的那条」：ref_svrid = 它的 svrId。 """
+        self.bot.quote_replies = True
+        self.bot.set_default_plugin(FakePlugin(texts=['收到']))
+        msg = make_msg()
+        await self.bot.on_message(msg)
+        await asyncio.sleep(0.1)
+        self.assertEqual(self.bot._wechat.refs, [msg.msg_id])
+
+    async def test_quote_replies_off_by_default(self):
+        self.bot.set_default_plugin(FakePlugin(texts=['收到']))
+        await self.bot.on_message(make_msg())
+        await asyncio.sleep(0.1)
+        self.assertIn(None, self.bot._wechat.refs)      # 没开引用就不带 ref_svrid
 
     async def test_reply_is_in_history_before_it_is_sent(self):
         """回复一决策就写历史，不等打字延迟过完。

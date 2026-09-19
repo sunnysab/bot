@@ -133,6 +133,9 @@ class Config:
     admin_port: int = 8099
     # 演习模式：全链路照跑（门控/决策/表达/状态都有），但不真发、自己的回复不进历史
     dry_run: bool = False
+    # 回复时引用被打断的那条消息（微信的「回复某条」）。真机（filehelper）验过：
+    # 自己发的和别人发的都能引用，客户端渲染正常
+    quote_replies: bool = True
     # 回复轨迹 JSONL（攒数据给以后做效果评估）
     trace_path: str = 'reply_trace.jsonl'
     log_path: str = 'bot.log'
@@ -170,6 +173,7 @@ if __name__ == '__main__':
     assert tuned.backoff_start_after == 3 and tuned.backoff_max_seconds == 60.0, tuned
     assert base.describe_max_tokens == 1024, base     # thinking 模型的推理也算进生成预算
     assert base.reply_mode == 'agent', base           # 默认单段式；two_stage 留作对照
+    assert base.quote_replies is True, base            # 真机验过，引用回复默认开
     # 管理后台端口和演习开关也能从环境变量调
     assert base.admin_port == 8099 and base.dry_run is False, base
     os.environ.update(ADMIN_PORT='0', DRY_RUN='1')

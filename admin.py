@@ -79,7 +79,7 @@ CONFIG_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ('决策者', ('reply_mode', 'enable_planner', 'planner_url', 'planner_key', 'planner_model', 'planner_temperature',
                 'planner_max_tokens', 'planner_thinking', 'planner_json_schema', 'enable_tools',
                 'planner_rounds')),
-    ('出站', ('send_interval', 'typo_rate', 'dry_run')),
+    ('出站', ('send_interval', 'typo_rate', 'quote_replies', 'dry_run')),
     ('观测', ('trace_path',)),
     ('改了要重启进程', ('relay_host', 'relay_port', 'relay_unix', 'admin_port', 'log_path', 'log_level',
                     'describe_media', 'media_cache_path', 'describe_concurrency', 'describe_timeout',

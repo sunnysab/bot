@@ -35,6 +35,8 @@ class Outbound:
     # 这条出站对应历史里的哪条记录。撤回成功后要抹掉它，否则模型下一轮
     # 还看得见自己已经撤回的话（见 Bot.revoke）
     record: 'SingleRecord | None' = None
+    # 引用回复的目标（被引消息的 64 位 svrId）；0 = 不引用
+    ref_svrid: int = 0
 
 
 class OutboundQueue:
@@ -51,13 +53,14 @@ class OutboundQueue:
         self._task: asyncio.Task | None = None
 
     def put(self, receiver: str, text: str, sender: str = '',
-            reply_to=None, chat_name: str = '', record=None) -> None:
+            reply_to=None, chat_name: str = '', record=None, ref_svrid: int = 0) -> None:
         # 非阻塞入队，避免拖住 SDK 的顺序事件循环
         # ponytail: 无界队列，个人 bot 量级够用；刷屏再换成有界 + 丢弃策略
         bus.publish(Status.QUEUED, chat_id=receiver, chat_name=chat_name,
                     reply_to=reply_to, origin='bot', detail=f'{len(text)} 字')
         self._queue.put_nowait(Outbound(receiver, text, sender,
-                                        reply_to=_key(reply_to), chat_name=chat_name, record=record))
+                                        reply_to=_key(reply_to), chat_name=chat_name, record=record,
+                                        ref_svrid=ref_svrid or 0))
 
     def put_emoji(self, receiver: str, emoji: Emoji, sender: str = '',
                   reply_to=None, chat_name: str = '', record=None) -> None:

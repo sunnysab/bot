@@ -39,7 +39,7 @@ class FakeBot:
         return [types.SimpleNamespace(peer='456@chatroom'), types.SimpleNamespace(peer='gh_news'),
                 types.SimpleNamespace(peer='wxid_bob')]
 
-    async def get_messages(self, limit, user, reverse, exclude_system):
+    async def get_messages(self, limit, contact, reverse, exclude_system):
         return [
             make_message(msg_type=1, content='第一条', clean_text='第一条', create_time=200),
             make_message(msg_type=3, content='<img cdnurl="x"/>', clean_text='', create_time=201),
@@ -54,8 +54,9 @@ class FakeBot:
         name = self.contacts.get(user)
         return [types.SimpleNamespace(username=user, name=name)] if name else []
 
-    async def send_text(self, to, text, at_users, at_names):
-        self.sent.append({'to': to, 'text': text, 'at_users': at_users, 'at_names': at_names})
+    async def send_text(self, to, text, at_users, at_names, ref_svrid=None):
+        self.sent.append({'to': to, 'text': text, 'at_users': at_users, 'at_names': at_names,
+                          'ref_svrid': ref_svrid})
         return {'sent': True}
 
 
@@ -108,6 +109,13 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
         sent = self.wechat._bot.sent[0]
         self.assertEqual(sent['at_users'], ['notify@all'])
         self.assertEqual(sent['text'], ' @所有人\n\n开会了')
+
+    async def test_send_text_can_quote(self):
+        """ 引用目标透传到 SDK；不引用时不带这个字段。 """
+        await self.wechat.send_text('收到', '456@chatroom', ref_svrid=7100000000000000123)
+        self.assertEqual(self.wechat._bot.sent[0]['ref_svrid'], 7100000000000000123)
+        await self.wechat.send_text('普通的', '456@chatroom')
+        self.assertIsNone(self.wechat._bot.sent[1]['ref_svrid'])
 
     async def test_dry_run_does_not_send(self):
         self.wechat.dry_run = True

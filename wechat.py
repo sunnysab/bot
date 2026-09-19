@@ -70,11 +70,12 @@ class Wechat:
         """ 默认消息处理函数 """
         logger.info(f'{msg.sender}: {msg.content}')
 
-    async def send_text(self, msg: str, receiver: str, at_list: str = '') -> dict:
+    async def send_text(self, msg: str, receiver: str, at_list: str = '', ref_svrid: int | None = None) -> dict:
         """ 发送消息
         :param msg: 消息字符串
         :param receiver: 接收人wxid或者群id
         :param at_list: 要@的wxid, 多个用逗号分隔; @所有人的wxid为：notify@all
+        :param ref_svrid: 引用回复的目标（被引消息的 64 位 svrId）；不传就是普通消息
         """
         if self.dry_run:
             logger.info(f'[DRY RUN] To {receiver}: {msg}')
@@ -98,7 +99,8 @@ class Wechat:
         logger.info(f'To {receiver}: {text}')
         # 返回值里带 relay 给的 msg_id（微信服务端消息 ID）。管理后台靠它把
         # 「排队中 → 已发送」贴到 relay 库里的那条出站记录上，不能丢
-        return await self._bot.send_text(to=receiver, text=text, at_users=at_users, at_names=at_names)
+        return await self._bot.send_text(to=receiver, text=text, at_users=at_users, at_names=at_names,
+                                         ref_svrid=ref_svrid)
 
     async def search_emoji(self, keyword: str, limit: int = 10) -> list[Emoji]:
         """ 按关键词搜表情。返回的已经是可直接发送的完整元数据。 """
@@ -168,8 +170,8 @@ class Wechat:
         直接返回 relay 的原始消息，不走 fetch_history 那层历史记录封装——
         面板要 msg_id 才能把状态贴上去，也要原始 XML 才能渲染媒体。
         """
-        return await self._bot.get_messages(limit=limit, user=peer, reverse=True,
-                                            exclude_system=exclude_system)
+        return await self._bot.get_messages(limit=limit, contact=peer, reverse=True,
+                                           exclude_system=exclude_system)
 
     async def sender_names(self, chat: str, senders) -> dict[str, str]:
         """ 把 wxid 批量解析成显示名（群昵称 > 备注）。
@@ -246,7 +248,8 @@ class Wechat:
 
         返回一个列表。每个元素为一个元组，格式为 (发送者名称, 消息内容, 创建时间)
         """
-        messages = await self._bot.get_messages(limit=count, user=wxid, reverse=True, exclude_system=True)
+        messages = await self._bot.get_messages(limit=count, contact=wxid, reverse=True,
+                                                exclude_system=True)
 
         result = ChatWindow()
         for msg in messages:

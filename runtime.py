@@ -109,7 +109,7 @@ HOT_FIELDS = frozenset({
     'reply_necessity_threshold', 'reply_activity_window',
     'enable_focus', 'focus_enter_activity', 'focus_idle_seconds', 'focus_max_seconds',
     'backoff_start_after', 'backoff_base_seconds', 'backoff_max_seconds', 'backoff_bypass_messages',
-    'typo_rate', 'dry_run',
+    'typo_rate', 'dry_run', 'quote_replies',
     'personality', 'reply_style', 'behavior_style', 'reply_styles', 'style_probability',
     'enable_planner', 'reply_mode', 'planner_url', 'planner_model', 'planner_key', 'planner_temperature',
     'planner_max_tokens', 'planner_thinking', 'planner_json_schema', 'enable_tools',
@@ -174,7 +174,7 @@ class Runtime:
                    keeper=MomentKeeper(self.ai, self.memories, batch=config.moment_batch),
                    emojis=self.emojis, emoji_path=config.emoji_path,
                    emoji_describer=self.emoji_describer, typo_rate=config.typo_rate,
-                   dry_run=config.dry_run)
+                   quote_replies=config.quote_replies, dry_run=config.dry_run)
 
     def _make_describer(self) -> MediaDescriber | None:
         if not self.config.describe_media:
@@ -267,6 +267,7 @@ class Runtime:
         self.chat_plugin = self._make_chat_plugin()
         self._install_plugins()
         self.bot.typo_rate = config.typo_rate
+        self.bot.quote_replies = config.quote_replies
         self.bot.dry_run = config.dry_run
         self.bot.wechat.dry_run = config.dry_run
         self.bot.outbox.set_interval(config.send_interval)

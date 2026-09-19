@@ -65,7 +65,7 @@ class Bot:
                  describer: MediaDescriber | None = None, describe_history_limit: int = 3,
                  keeper: MomentKeeper | None = None, emojis: EmojiLibrary | None = None,
                  emoji_path: str = '', emoji_describer=None, typo_rate: float = 0.0,
-                 rng: random.Random | None = None):
+                 quote_replies: bool = False, rng: random.Random | None = None):
         """ 初始化机器人
 
         @param host: weixin-rs relay 服务器地址
@@ -81,6 +81,7 @@ class Bot:
         @param emoji_path: 表情库落盘位置；留空则不落盘（重启就没了）
         @param emoji_describer: 给偷来的表情补「使用场景」的后台任务；为 None 则不补
         @param typo_rate: 出站文本抖错别字的概率（0 为关闭）
+        @param quote_replies: 回复时引用被打断的那条消息（微信的「回复某条」）
         @param rng: 错别字用的随机源，测试时可注入
         """
         async def callback(msg: Message) -> None:
@@ -102,6 +103,7 @@ class Bot:
         self.emoji_path = emoji_path
         self.emoji_describer = emoji_describer
         self.typo_rate = typo_rate
+        self.quote_replies = quote_replies
         # 运行计数：面板的统计卡要看（拍的那些常数到底撞了多少次）
         self.typo_count = 0
         self.emoji_count = 0
@@ -290,7 +292,8 @@ class Bot:
         return min(think + typing, 50)
 
     def enqueue(self, chat: str, text: str = '', sender: str = '', reply_to=None,
-                chat_name: str = '', emoji: Emoji | None = None, verbatim: bool = False) -> None:
+                chat_name: str = '', emoji: Emoji | None = None, verbatim: bool = False,
+                ref_svrid: int = 0) -> None:
         """ 决策已定：**先把这条写进历史**，再交给出站队列。
 
         历史在决策时就落，不等真发出去。回复会卡在打字延迟和最小发送间隔里好几秒，
@@ -314,7 +317,7 @@ class Bot:
             record = self._history.push_message(chat, sender, stored, int(time.time()), is_self=True)
         if final:
             self.outbox.put(chat, final, sender=sender, reply_to=reply_to, chat_name=chat_name,
-                            record=record)
+                            record=record, ref_svrid=ref_svrid)
         if emoji:
             # 表情排在文字后面：先说一句，再补个表情收尾。
             # 同轮既有文字又有表情时，历史里记的是文字那条，表情不重复挂一个 record
@@ -328,7 +331,8 @@ class Bot:
         error = ''
         try:
             if item.text:
-                result = await self._wechat.send_text(item.text, item.receiver)
+                result = await self._wechat.send_text(item.text, item.receiver,
+                                                      ref_svrid=item.ref_svrid or None)
                 relay_id = _relay_id(result)
             if item.emoji:
                 result = await self._wechat.send_emoji(item.emoji, item.receiver)
@@ -426,6 +430,18 @@ class Bot:
         preview = sent.text if len(sent.text) <= 20 else sent.text[:20] + '…'
         return f'已撤回：「{preview}」'
 
+    def _quote_target(self, msg: Message) -> int:
+        """ 引用回复的目标：被回复那条的 64 位 svrId；关掉时返回 0。
+
+        `msg.msg_id` 就是 svrId（relay 的 server_id），正是 `<refermsg><svrid>` 要的东西。
+        """
+        if not self.quote_replies:
+            return 0
+        try:
+            return int(msg.msg_id)
+        except (TypeError, ValueError):
+            return 0
+
     async def _run_plugins(self, msg: Message, self_name: str, source: str) -> Reply:
         """ 把当前消息交给该会话的插件链，收集要回复的文本和表情。 """
         ctx = MessageContext(msg=msg, history=self._history.get_context(msg.reply_target),
@@ -510,7 +526,8 @@ class Bot:
                         detail=f'拦下 {len(response.texts) - len(texts)} 条媒体占位符')
         for text in texts:
             self.enqueue(msg.reply_target, text, sender=self_name,
-                         reply_to=msg.msg_id, chat_name=source, verbatim=response.verbatim)
+                         reply_to=msg.msg_id, chat_name=source, verbatim=response.verbatim,
+                         ref_svrid=self._quote_target(msg))
         if response.emoji:
             self.enqueue(msg.reply_target, sender=self_name, reply_to=msg.msg_id,
                          chat_name=source, emoji=response.emoji)
