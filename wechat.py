@@ -147,20 +147,25 @@ class Wechat:
         return [c for c in await self._bot.get_conversations(limit=limit)
                 if self.is_session(c.peer)]
 
-    async def media_info(self, msg_id: int, outdir) -> dict:
-        """ 管理后台用：让 relay 把附件下到 outdir，返回 {path, ext, size}。
-
-        下载的活只能 relay 干（它才认得 CDN blob），bot 负责要字节。
-        relay 按 msg_id 命中自己的缓存，所以只有第一次会真去 CDN。
-        """
-        return await self._bot.download_media(msg_id=msg_id, outdir=str(outdir))
-
     async def status(self) -> dict:
         """ relay 的连接 / 登录状态。管理后台的健康卡用。 """
         return await self._bot.get_status()
 
+    async def media_bytes_by_id(self, msg_id: int) -> tuple[bytes, str]:
+        """ 取一条消息的附件字节，返回 (data, ext)。
+
+        **附件由 relay 下载并保管**（它认得 CDN blob，也有自己的磁盘缓存），bot 只按
+        msg_id 要字节——不关心它缓存在哪个目录、叫什么名字，更不该去扒它的文件。
+        """
+        data = await self._bot.call('get_media_bytes', {'msg_id': msg_id})
+        payload = data if isinstance(data, dict) else {}
+        encoded = payload.get('data_base64')
+        if not encoded:
+            raise ValueError(f'relay 没返回附件内容（msg_id={msg_id}）')
+        return base64.b64decode(encoded), str(payload.get('ext') or '')
+
     async def media_bytes(self, msg: Message) -> bytes:
-        """ 取一条消息附件的原始字节。
+        """ 取一条消息附件的原始字节（识图用）。
 
         **不走 SDK 的 `msg.get_media_bytes()`**：那条路走 PKT_DL_OPEN 分块流，
         而 relay 的 DL_OPEN 分支按 `RelayRequest`（action + params）解包，SDK 只塞了
@@ -170,11 +175,8 @@ class Wechat:
         这里走普通 RPC 的 `get_media_bytes`（形状是对的），拿 base64 再解回来，
         失败时的报错就是 relay 的原始报错。
         """
-        data = await self._bot.call('get_media_bytes', {'msg_id': msg.msg_id})
-        encoded = (data or {}).get('data_base64') if isinstance(data, dict) else None
-        if not encoded:
-            raise ValueError(f'relay 没返回附件内容（msg_id={msg.msg_id}）')
-        return base64.b64decode(encoded)
+        raw, _ = await self.media_bytes_by_id(msg.msg_id)
+        return raw
 
     async def messages(self, peer: str, limit: int = 300, exclude_system: bool = True):
         """ 管理后台用：某个会话的历史。

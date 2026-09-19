@@ -56,8 +56,9 @@ RPC_TIMEOUT = 15.0
 MEDIA_TIMEOUT = 60.0         # 第一次要现下（CDN 握手 + 拉字节），比普通 RPC 慢得多
 LOG_TAIL_BYTES = 256 * 1024  # 只看日志尾巴，不把整份读进内存
 
-# 附件落盘目录。relay 按 msg_id 命名且自己也有缓存，所以同一张图只会下这一次
-MEDIA_DIR = Path(__file__).parent / 'media_cache'
+# 语音转码的派生目录。**原始附件不在这里**——下载和保管都是 relay 的事，
+# bot 只按 msg_id 要字节；这里只放 SILK → WAV 的结果（浏览器放不了 SILK）
+DERIVED_MEDIA_DIR = Path(__file__).parent / 'media_cache' / 'derived'
 # 浏览器要的 content-type。relay 只回扩展名，这里转一下；认不出的一律当二进制
 MEDIA_TYPES = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
                '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
@@ -185,17 +186,24 @@ def _quote(content: str, kind) -> dict | None:
     return {'content': parsed['content'], 'name': name, 'text': parsed['referred_message']}
 
 
-def _silk_to_wav(silk: Path) -> Path:
-    """ 微信语音是 SILK，浏览器放不了，转成 24k 单声道 WAV。
+def _silk_to_wav(data: bytes, msg_id: str) -> bytes:
+    """ 微信语音是 SILK，浏览器放不了，转成 24k 单声道 WAV 并缓存。
 
+    输入是字节（附件归 relay 管），转码结果落 bot 自己的派生目录。
     pilk 是可选依赖，缺了就让面板回退到文字（外面会包成 500，前端 onerror 接住）。
     """
-    wav = silk.with_suffix('.wav')
+    wav = DERIVED_MEDIA_DIR / f'{msg_id}.wav'
     if wav.exists():
-        return wav
-    import pilk  # 只有真要看语音时才需要
-    pilk.silk_to_wav(str(silk), str(wav), rate=24000)
-    return wav
+        return wav.read_bytes()
+    DERIVED_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    silk = DERIVED_MEDIA_DIR / f'{msg_id}.silk'
+    silk.write_bytes(data)
+    try:
+        import pilk  # 只有真要看语音时才需要
+        pilk.silk_to_wav(str(silk), str(wav), rate=24000)
+        return wav.read_bytes()
+    finally:
+        silk.unlink(missing_ok=True)
 
 
 class DecisionLog:
@@ -253,7 +261,6 @@ class Admin:
         self.host = host
         self.port = port
         self.dotenv = DOTENV_PATH      # 自检里会换成临时文件
-        self.media_dir = MEDIA_DIR     # 同上
         self.decisions = DecisionLog(sidecar)
         self.server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -431,18 +438,16 @@ class Admin:
     def media(self, msg_id: str) -> tuple[bytes, str]:
         """ 取一条消息的附件字节，返回 (data, content-type)。
 
-        交给 relay 下载（它认得 CDN blob，bot 认不得），落盘到 self.media_dir。
-        relay 按 msg_id 命中缓存，所以面板刷新不会重复下载。
+        附件由 relay 下载和保管（它认得 CDN blob，也有自己的磁盘缓存）；bot 只按
+        msg_id 要字节，不关心它存在哪。
         """
         if not msg_id.isdigit():
             raise ValueError(f'msg_id 必须是 relay 的整数 id：{msg_id!r}')
-        info = self.call(self._wechat.media_info(int(msg_id), self.media_dir),
-                         timeout=MEDIA_TIMEOUT)
-        path = Path(info['path'])
-        ext = str(info.get('ext') or path.suffix.lstrip('.')).lower()
+        data, ext = self.call(self._wechat.media_bytes_by_id(int(msg_id)), timeout=MEDIA_TIMEOUT)
+        ext = ext.lower()
         if ext == 'silk':  # 微信语音是 SILK，浏览器放不了，转成 WAV 再吐
-            path, ext = _silk_to_wav(path), 'wav'
-        return path.read_bytes(), MEDIA_TYPES.get(f'.{ext}', 'application/octet-stream')
+            data, ext = _silk_to_wav(data, msg_id), 'wav'
+        return data, MEDIA_TYPES.get(f'.{ext}', 'application/octet-stream')
 
     def log_tail(self, tail: int = 200, only: str = '') -> list[str]:
         """ 日志尾巴。loguru 一直在写，面板里看得到就不必 SSH。 """
@@ -902,15 +907,11 @@ def _self_check() -> None:
     link = admin._row(msg(49, '<msg><appmsg><title>一篇文章</title><type>5</type></appmsg></msg>'))
     assert link['quote'] is None, link
 
-    # 附件接口：relay 落盘 → bot 读字节 → 带 content-type 吐给浏览器
-    async def fake_media_info(msg_id, outdir):
-        path = Path(outdir) / f'download_{msg_id}.jpg'
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b'\xff\xd8\xff\x00')
-        return {'path': str(path), 'ext': 'jpg', 'size': 4}
+    # 附件接口：relay 下载并保管 → bot 只要字节 → 带 content-type 吐给浏览器
+    async def fake_media_bytes(msg_id):
+        return b'\xff\xd8\xff\x00', 'jpg'
 
-    runtime.bot.wechat.media_info = fake_media_info
-    admin.media_dir = Path(tempfile.mkdtemp())
+    runtime.bot.wechat.media_bytes_by_id = fake_media_bytes
     admin.call = lambda coro, timeout=0: asyncio.run(coro)  # 没有事件循环，就地跑
     assert admin.media('12345') == (b'\xff\xd8\xff\x00', 'image/jpeg')
     try:
