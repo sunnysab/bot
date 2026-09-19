@@ -131,9 +131,21 @@ class Wechat:
         logger.info(f'Revoke {msg_id} in {to}')
         return await self._bot.revoke(to=to, msg_id=msg_id)
 
+    def is_session(self, peer: str) -> bool:
+        """ 这个 peer 值不值得当会话：私聊（`wxid_`）或群（`@chatroom`）。
+
+        **自己的 wxid 不算**。relay 的 device-sync（msg_type=51，from/to 都是自己）
+        会被 `list_conversations` 按 peer 分组成一个假会话，而 `get_messages` 的
+        contact 过滤是 `from_user=? OR to_user=?`——点进去就是**全部**发给 bot 的消息。
+        公众号 / filehelper / weixin 也一并排掉，会话的定义只写在这一处。
+        """
+        return bool(peer) and peer != self.wxid \
+            and (peer.startswith('wxid_') or peer.endswith('@chatroom'))
+
     async def conversations(self, limit: int = 20):
         """ 管理后台用：会话列表（带 display_name / last_message / msg_count）。 """
-        return await self._bot.get_conversations(limit=limit)
+        return [c for c in await self._bot.get_conversations(limit=limit)
+                if self.is_session(c.peer)]
 
     async def media_info(self, msg_id: int, outdir) -> dict:
         """ 管理后台用：让 relay 把附件下到 outdir，返回 {path, ext, size}。
@@ -192,9 +204,7 @@ class Wechat:
         """ 获取最近的聊天会话 """
         # 公众号推送会占满会话列表，多取一些再过滤掉
         conversations = await self._bot.get_conversations(limit=max(count * 5, 50))
-        sessions = [c.peer for c in conversations
-                    if c.peer.startswith('wxid_') or c.peer.endswith('@chatroom')]
-        return sessions[:count]
+        return [c.peer for c in conversations if self.is_session(c.peer)][:count]
 
     async def get_display_name(self, wxid: str, chatroom: str = '') -> str:
         """ 获取联系人的显示名称. 对于群友，优先使用本地的备注，其次使用群昵称，最后使用微信昵称

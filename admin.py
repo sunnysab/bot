@@ -355,9 +355,6 @@ class Admin:
         # 让首次打开的面板白屏 15 秒。正常一次也就几百毫秒
         for chat in self.call(self._wechat.conversations(limit=CHATS_LIMIT), timeout=5.0):
             peer = getattr(chat, 'peer', '')
-            # 公众号 / filehelper / weixin 这些不进列表，和 get_recent_sessions 一个规矩
-            if not (peer.startswith('wxid_') or peer.endswith('@chatroom')):
-                continue
             last = getattr(chat, 'last_message', None) or {}
             name = getattr(chat, 'display_name', '') or peer
             # 预览也得走 render()：last_message 的 clean_text 对媒体/系统消息就是原始 XML，

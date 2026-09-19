@@ -37,7 +37,7 @@ class FakeBot:
     async def get_conversations(self, limit):
         self.requested_limit = limit
         return [types.SimpleNamespace(peer='456@chatroom'), types.SimpleNamespace(peer='gh_news'),
-                types.SimpleNamespace(peer='wxid_bob')]
+                types.SimpleNamespace(peer='wxid_bob'), types.SimpleNamespace(peer='wxid_me')]
 
     async def get_messages(self, limit, contact, reverse, exclude_system):
         return [
@@ -93,6 +93,7 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
 
     async def test_get_recent_sessions_filters_non_contacts(self):
         sessions = await self.wechat.get_recent_sessions(3)
+        # wxid_me = 自己（relay 的 device-sync 会按 peer 分出一个和自己聊的假会话）
         self.assertEqual(sessions, ['456@chatroom', 'wxid_bob'])
         # 公众号会占满会话列表，必须多取一批再过滤
         self.assertGreater(self.wechat._bot.requested_limit, 3)
