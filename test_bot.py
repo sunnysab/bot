@@ -29,6 +29,14 @@ class FakeWechat:
         self.emoji_queries: list[str] = []
         self.online: list = []                          # 假线上搜索结果
         self.names = {'wxid_bot': 'Bot'}                # wxid -> 显示名，查不到就回 wxid
+        self.revoked: list[tuple[str, int]] = []        # (会话, msg_id)
+        self.revoke_fail = False
+
+    async def revoke(self, to, msg_id):
+        self.revoked.append((to, msg_id))
+        if self.revoke_fail:
+            raise RuntimeError('已超过 120(2 分钟)撤回时限（已过 300s）')
+        return {'sent': True}
 
     async def search_emoji(self, keyword, limit=10):
         self.emoji_queries.append(keyword)
@@ -438,6 +446,71 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
         self.assertEqual(self.bot._wechat.sent, [])
         self.assertEqual(self.bot._wechat.emojis_sent, [('456@chatroom', 'a' * 32)])
+
+
+class TestRevoke(unittest.IsolatedAsyncioTestCase):
+    """ 撤回：模型只说「撤哪条」，relay 要的 msg_id 由 Bot 记账解析。 """
+
+    async def asyncSetUp(self):
+        self.bot = Bot('127.0.0.1', 9999, x_delay=0, send_interval=0)
+        self.bot._wechat = FakeWechat()
+        await self.bot.outbox.start()
+
+    async def asyncTearDown(self):
+        await self.bot.outbox.stop()
+
+    async def send(self, texts):
+        self.bot.set_default_plugin(FakePlugin(texts=list(texts)))
+        await self.bot.on_message(make_msg())
+        await asyncio.sleep(0.1)          # 让出站队列真的发出去、记账完成
+
+    def window(self):
+        return self.bot._history.get_context('456@chatroom')
+
+    async def test_revoke_last_drops_it_from_history(self):
+        await self.send(['在的 咋啦'])
+        self.assertIn('在的 咋啦', [r.text for r in self.window()])
+
+        result = await self.bot.revoke('456@chatroom', index=1)
+        self.assertEqual(self.bot._wechat.revoked, [('456@chatroom', RELAY_MSG_ID)])
+        self.assertIn('已撤回', result)
+        # 撤了就得从上下文里抹掉，否则下一轮模型以为自己说过
+        self.assertNotIn('在的 咋啦', [r.text for r in self.window()])
+
+    async def test_revoke_by_text_when_unambiguous(self):
+        await self.send(['在的 咋啦'])
+        result = await self.bot.revoke('456@chatroom', text='咋啦')
+        self.assertIn('已撤回', result)
+        self.assertEqual(len(self.bot._wechat.revoked), 1)
+
+    async def test_ambiguous_text_lists_candidates_and_revokes_nothing(self):
+        await self.send(['在的', '在的呀'])
+        result = await self.bot.revoke('456@chatroom', text='在的')
+        self.assertNotIn('已撤回', result)
+        self.assertIn('有好几条', result)
+        self.assertIn('1. 在的呀', result)          # 1 = 最近一条
+        self.assertEqual(self.bot._wechat.revoked, [])
+
+    async def test_listing_is_newest_first(self):
+        await self.send(['第一条', '第二条'])
+        result = await self.bot.revoke('456@chatroom')
+        self.assertIn('1. 第二条', result)
+        self.assertIn('2. 第一条', result)
+
+    async def test_out_of_window_is_refused_without_a_call(self):
+        await self.send(['在的'])
+        self.bot._sent['456@chatroom'][0].ts -= 200      # 人为推过 2 分钟窗口
+        result = await self.bot.revoke('456@chatroom', index=1)
+        self.assertIn('没有可撤回', result)
+        self.assertEqual(self.bot._wechat.revoked, [])
+
+    async def test_relay_refusal_is_reported_verbatim(self):
+        await self.send(['在的'])
+        self.bot._wechat.revoke_fail = True
+        result = await self.bot.revoke('456@chatroom', index=1)
+        self.assertIn('撤回失败', result)
+        self.assertIn('时限', result)
+        self.assertIn('在的', [r.text for r in self.window()])   # 没删掉
 
 
 class FakeDescriber:

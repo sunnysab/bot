@@ -1,6 +1,7 @@
 import asyncio
 import random
 import time
+from dataclasses import dataclass
 from typing import TypeVar
 
 from loguru import logger
@@ -21,6 +22,8 @@ EMOJI_LOCAL_ENOUGH = 3
 EMOJI_RESULT_LIMIT = 8
 EMOJI_SAVE_INTERVAL = 5.0      # 表情库最长隔这么久落一次盘（热度是运行时累加的）
 STALE_MESSAGE_SECONDS = 300.0  # 比这更旧的消息只当上下文：relay 长链重连会补推离线积压
+REVOKE_WINDOW_SECONDS = 120.0  # relay 只认 2 分钟内的撤回，超了不必白跑一次 RPC
+SENT_KEEP = 10                 # 每个会话最多记这么多条自己的出站，只用来撤回
 
 FILTERED_KINDS = {
     MessageKind.VOICE: '语音', MessageKind.EMOJI: '表情', MessageKind.LOCATION: '位置',
@@ -38,6 +41,20 @@ def _aslist(x: T | list[T]) -> list[T]:
 def _relay_id(result) -> int | None:
     """ 从 relay 的发送回执里取 server_id。拿不到（演习 / 服务端没回 / 假 relay）返回 None。 """
     return result.get('msg_id') if isinstance(result, dict) else None
+
+
+@dataclass
+class Sent:
+    """ 本进程发出去的一条消息。
+
+    relay 的 msg_id 只有 _deliver 拿得到，而且撤回必须用它，所以得主动记一笔。
+    record 指向历史里的那条，撤回成功后从上下文里抹掉。
+    """
+
+    msg_id: int
+    ts: float
+    text: str
+    record: SingleRecord | None = None
 
 
 class Bot:
@@ -94,6 +111,8 @@ class Bot:
         # 每个会话一轮跑一个：跑 LLM 的那几秒里新来的消息攒成下一块，等这轮结束合成一轮处理
         self._turns: dict[str, asyncio.Task] = {}
         self._blocks: dict[str, list[tuple[Message, str, str]]] = {}
+        # 自己发出去的消息（按会话分），撤回的定位依据。只留最近几条，越攒越多没意义
+        self._sent: dict[str, list[Sent]] = {}
 
         assert x_delay >= 0
         self.delay_coefficient = x_delay
@@ -290,13 +309,17 @@ class Bot:
             self.emoji_count += 1
         stored = final or (f'[表情：{emoji.desc or "表情"}]' if emoji else '')
         # 演习：没发出去、不进历史、也不在 relay 里。正文只能靠事件带出去
+        record = None
         if stored and not self.dry_run:
-            self._history.push_message(chat, sender, stored, int(time.time()), is_self=True)
+            record = self._history.push_message(chat, sender, stored, int(time.time()), is_self=True)
         if final:
-            self.outbox.put(chat, final, sender=sender, reply_to=reply_to, chat_name=chat_name)
+            self.outbox.put(chat, final, sender=sender, reply_to=reply_to, chat_name=chat_name,
+                            record=record)
         if emoji:
-            # 表情排在文字后面：先说一句，再补个表情收尾
-            self.outbox.put_emoji(chat, emoji, sender=sender, reply_to=reply_to, chat_name=chat_name)
+            # 表情排在文字后面：先说一句，再补个表情收尾。
+            # 同轮既有文字又有表情时，历史里记的是文字那条，表情不重复挂一个 record
+            self.outbox.put_emoji(chat, emoji, sender=sender, reply_to=reply_to,
+                                  chat_name=chat_name, record=None if final else record)
 
     async def _deliver(self, item: Outbound) -> None:
         """ 真正发送，由 OutboundQueue 串行调用。历史和计数在 enqueue 时就已经落好。 """
@@ -316,6 +339,11 @@ class Bot:
             error = str(e)
             logger.warning(f'发送报错，按已投递处理（不重试）{item.receiver}: {e}')
 
+        # 记下自己的出站 msg_id：撤回只有这里拿得到。就算上面报过错，
+        # 只要拿到 id 就说明 relay 已经收下了（长链回执解析有 bug，消息通常已投递）
+        if relay_id and not self.dry_run:
+            self._remember(item, relay_id)
+
         if self.dry_run:
             # 演习：没发出去、不进历史、也不在 relay 里。正文只能靠事件带出去，
             # 否则面板上这条回复就彻底消失了
@@ -328,6 +356,75 @@ class Bot:
         bus.publish(Status.FAILED if error else Status.SENT, chat_id=item.receiver,
                     chat_name=item.chat_name, msg_id=relay_id, reply_to=item.reply_to,
                     origin='bot', detail=error[:200])
+
+    def _remember(self, item: Outbound, relay_id) -> None:
+        """ 记下一条自己的出站，撤回时靠它定位。 """
+        try:
+            msg_id = int(relay_id)
+        except (TypeError, ValueError):
+            return
+        text = item.text or (f'[表情：{item.emoji.desc or "表情"}]' if item.emoji else '')
+        entries = self._sent.setdefault(item.receiver, [])
+        entries.append(Sent(msg_id=msg_id, ts=time.time(), text=text, record=item.record))
+        del entries[:-SENT_KEEP]
+
+    def _revocable(self, chat: str) -> list[Sent]:
+        """ 当前还能撤的：2 分钟内、本进程发出去的。顺便把过期的清掉。 """
+        now = time.time()
+        entries = [sent for sent in self._sent.get(chat, ())
+                   if now - sent.ts <= REVOKE_WINDOW_SECONDS]
+        if entries:
+            self._sent[chat] = entries
+        else:
+            self._sent.pop(chat, None)
+        return entries
+
+    @staticmethod
+    def _listing(entries: list[Sent]) -> str:
+        """ 候选表。**按时间从新到旧编号**，1 = 最近一条，跟人的直觉一致。 """
+        lines = []
+        for number, sent in enumerate(reversed(entries), 1):
+            preview = sent.text if len(sent.text) <= 30 else sent.text[:30] + '…'
+            lines.append(f'{number}. {preview}')
+        return '\n'.join(lines)
+
+    async def revoke(self, chat: str, index: int = 0, text: str = '') -> str:
+        """ 撤回自己发过的话，返回给模型看的回执。
+
+        index：1 = 最近一条，2 = 再往前一条。text：原话里的一小段，只在
+        **唯一命中**时直接撤，命中 0 条或多条都把候选表回给模型让它自己挑。
+        两个都不给也是列候选表。这样模型不需要（也拿不到）relay 的 msg_id。
+        """
+        if index and text:
+            return '一次只能按 index 或 text 指定一种。'
+        entries = self._revocable(chat)
+        if not entries:
+            return '没有可撤回的消息（只能撤自己 2 分钟内发出去的）。'
+        if text:
+            hits = [i for i, sent in enumerate(entries) if text in sent.text]
+            if len(hits) != 1:
+                head = '没找到这条' if not hits else '有好几条都对得上，请用 index 指定'
+                return f'{head}。可撤回的（1 = 最近一条）：\n{self._listing(entries)}'
+            target = hits[0]
+        elif index:
+            if not 1 <= index <= len(entries):
+                return f'没有第 {index} 条。可撤回的（1 = 最近一条）：\n{self._listing(entries)}'
+            target = len(entries) - index          # 1 = 最近 = 列表尾巴
+        else:
+            return f'可撤回的（1 = 最近一条）：\n{self._listing(entries)}'
+
+        sent = entries[target]
+        try:
+            await self._wechat.revoke(chat, sent.msg_id)
+        except Exception as e:
+            # relay 会给可读的原因（超 2 分钟是 410），原样转给模型
+            logger.warning(f'撤回失败（{chat} msg_id={sent.msg_id}）: {e}')
+            return f'撤回失败：{e}'
+        entries.pop(target)
+        if sent.record is not None:
+            self._history.get_context(chat).forget(sent.record)
+        preview = sent.text if len(sent.text) <= 20 else sent.text[:20] + '…'
+        return f'已撤回：「{preview}」'
 
     async def _run_plugins(self, msg: Message, self_name: str, source: str) -> Reply:
         """ 把当前消息交给该会话的插件链，收集要回复的文本和表情。 """

@@ -117,6 +117,18 @@ class Wechat:
         logger.info(f'To {receiver}: 表情「{emoji.desc or emoji.md5}」')
         return await self._bot.send_emoji(to=receiver, emoji=emoji.to_relay())
 
+    async def revoke(self, to: str, msg_id: int) -> dict:
+        """ 撤回自己发出的一条消息。
+
+        msg_id 是 send_text / send_emoji 回执里的那个。relay 只认**本进程发过、
+        2 分钟内**的消息（超时它用 410 快失败），别人的和手机上发的撤不了。
+        """
+        if self.dry_run:
+            logger.info(f'[DRY RUN] Revoke {msg_id} in {to}')
+            return {'sent': False, 'dry_run': True}
+        logger.info(f'Revoke {msg_id} in {to}')
+        return await self._bot.revoke(to=to, msg_id=msg_id)
+
     async def conversations(self, limit: int = 20):
         """ 管理后台用：会话列表（带 display_name / last_message / msg_count）。 """
         return await self._bot.get_conversations(limit=limit)

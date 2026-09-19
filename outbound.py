@@ -7,8 +7,12 @@
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from loguru import logger
+
+if TYPE_CHECKING:
+    from context import SingleRecord
 
 from emojis import Emoji
 from events import Status, bus
@@ -28,6 +32,9 @@ class Outbound:
     # 在那之前面板只能靠 reply_to 把「排队中/输入中」挂到对应的入站气泡上
     reply_to: str = ''
     chat_name: str = ''
+    # 这条出站对应历史里的哪条记录。撤回成功后要抹掉它，否则模型下一轮
+    # 还看得见自己已经撤回的话（见 Bot.revoke）
+    record: 'SingleRecord | None' = None
 
 
 class OutboundQueue:
@@ -44,21 +51,21 @@ class OutboundQueue:
         self._task: asyncio.Task | None = None
 
     def put(self, receiver: str, text: str, sender: str = '',
-            reply_to=None, chat_name: str = '') -> None:
+            reply_to=None, chat_name: str = '', record=None) -> None:
         # 非阻塞入队，避免拖住 SDK 的顺序事件循环
         # ponytail: 无界队列，个人 bot 量级够用；刷屏再换成有界 + 丢弃策略
         bus.publish(Status.QUEUED, chat_id=receiver, chat_name=chat_name,
                     reply_to=reply_to, origin='bot', detail=f'{len(text)} 字')
         self._queue.put_nowait(Outbound(receiver, text, sender,
-                                        reply_to=_key(reply_to), chat_name=chat_name))
+                                        reply_to=_key(reply_to), chat_name=chat_name, record=record))
 
     def put_emoji(self, receiver: str, emoji: Emoji, sender: str = '',
-                  reply_to=None, chat_name: str = '') -> None:
+                  reply_to=None, chat_name: str = '', record=None) -> None:
         """ 发表情。同样过队列——不然它会绕过限速和打字延迟。 """
         bus.publish(Status.QUEUED, chat_id=receiver, chat_name=chat_name,
                     reply_to=reply_to, origin='bot', detail='表情')
         self._queue.put_nowait(Outbound(receiver, '', sender, emoji,
-                                        reply_to=_key(reply_to), chat_name=chat_name))
+                                        reply_to=_key(reply_to), chat_name=chat_name, record=record))
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._worker(), name='outbound')

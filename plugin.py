@@ -45,6 +45,11 @@ from tools import (
 # 插件自己不发表情——发送统一走 OutboundQueue，那里的限速不能绕过去。
 EmojiSearch = Callable[[str], Awaitable[list[Emoji]]]
 
+# 撤回：把「自己发错的那条」撤掉。由 Bot 提供——它记着每条出站的 msg_id，
+# 而且撤回是传输层的事。入参 (会话, index, text)，返回给模型看的回执。
+# 没注入就不挂这个工具。
+Revoke = Callable[[str, int, str], Awaitable[str]]
+
 # 决策者的工具。规则的细节写在这里，planner.txt 里只列一行——
 # 模型看得到每个工具自己的说明书，比在系统提示里堆一大段更不容易漏。
 SEARCH_EMOJI = ToolSpec(
@@ -79,6 +84,16 @@ REPLY = ToolSpec(
     parameters={'type': 'object',
                 'properties': {'text': {'type': 'string', 'description': '要发出去的原话'}},
                 'required': ['text']})
+REVOKE = ToolSpec(
+    name='revoke',
+    description='撤回自己刚说错的话。只能撤自己 2 分钟内发出去的那几条，撤了就没了。'
+                'index：1 是最近发的一条，2 是再往前一条；也可以给 text（原话里的一小段），'
+                '只在唯一命中时直接撤。两个都不给会列出当前能撤的。撤完可以接着说别的。',
+    parameters={'type': 'object',
+                'properties': {'index': {'type': 'integer', 'description': '1 = 最近一条'},
+                               'text': {'type': 'string', 'description': '原话里的一小段'}}})
+
+REVOKE_PER_TURN = 3      # 一轮最多撤几条：撤回不可逆，别让模型连点
 AGENT_MAX_REPLIES = 3    # agent 模式一轮最多发几条
 
 
@@ -384,7 +399,7 @@ class ChatPlugin(Plugin):
                  planner_ai: AiProvider | None = None,
                  emoji_search: EmojiSearch | None = None, enable_tools: bool = True,
                  planner_rounds: int = 3, emoji_policy: EmojiPolicy | None = None,
-                 reply_mode: str = 'two_stage',
+                 reply_mode: str = 'two_stage', revoke: Revoke | None = None,
                  timeout: float = 60.0, rng: random.Random | None = None):
         """ 聊天插件
 
@@ -403,6 +418,7 @@ class ChatPlugin(Plugin):
         :param planner_rounds: 决策循环最多几轮（搜 → 发 两轮就够）
         :param emoji_policy: 发表情的节制（间隔 + 不重复）；模型看不见自己上次什么时候发的
         :param reply_mode: 'two_stage' = 决策者 + 表达者；'agent' = 单模型，回话就是 reply 工具
+        :param revoke: 撤回入口（Bot 提供）；不传就没有 revoke 工具
         :param timeout: 单次模型调用超时（秒）
         :param rng: 抽临时风格用的随机源，测试时可注入
         """
@@ -421,6 +437,7 @@ class ChatPlugin(Plugin):
         self.planner_rounds = planner_rounds
         self.emoji_policy = emoji_policy or EmojiPolicy()
         self.reply_mode = reply_mode
+        self.revoke = revoke
         self.timeout = timeout
         self.rng = rng
 
@@ -565,10 +582,28 @@ class ChatPlugin(Plugin):
             tools.append((SEND_EMOJI, send))
         return tools
 
+    def _revoke_tool(self, ctx: MessageContext):
+        """ 撤回自己刚发错的一条。一轮最多撤 REVOKE_PER_TURN 次（不可逆，别让模型连点）。 """
+        calls = {'n': 0}
+
+        async def revoke(arguments: dict) -> ToolResult:
+            if self.revoke is None:
+                return ToolResult('这会儿撤不了。')
+            if calls['n'] >= REVOKE_PER_TURN:
+                return ToolResult('这一轮撤得够多了，先说想说的。')
+            calls['n'] += 1
+            return ToolResult(await self.revoke(ctx.msg.reply_target,
+                                                arg_int(arguments, 'index', 0),
+                                                arg_str(arguments, 'text')))
+
+        return revoke
+
     def _tools(self, state: dict, terminal: ToolSpec, handler, ctx: MessageContext) -> list:
-        """ 一轮的完整工具集：表情对 + 终点动作（speak / reply）。 """
+        """ 一轮的完整工具集：表情对 + 终点动作（speak / reply）+（可选）撤回。 """
         tools = self._emoji_tools(state)
         tools.append((terminal, handler))
+        if self.revoke is not None:
+            tools.append((REVOKE, self._revoke_tool(ctx)))
         return tools
 
     async def _plan_with_tools(self, ctx: MessageContext, blocks: dict[str, str],

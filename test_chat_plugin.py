@@ -14,7 +14,7 @@ from habits import Habit, HabitStore
 from moments import Moment, MomentStore
 from necessity import NECESSITY_THRESHOLD
 from persona import Persona
-from plugin import ChatPlugin, RepeatPlugin, ReplyPolicy, clean_reply
+from plugin import REVOKE_PER_TURN, ChatPlugin, RepeatPlugin, ReplyPolicy, clean_reply
 from profiles import Profile, ProfileStore
 from reply_trace import TraceLogger
 from reply_trace import find as find_trace
@@ -653,11 +653,12 @@ class TestToolLoop(unittest.IsolatedAsyncioTestCase):
         """ 提示词的输出格式必须跟走哪条路一致，不能两个都写。 """
         plugin = self.plugin([])
         ctx = proactive_ctx()
-        tool_prompt = await plugin._planner_prompt(ctx, ('search_emoji', 'send_emoji', 'speak'))
+        tool_prompt = await plugin._planner_prompt(ctx, ('search_emoji', 'send_emoji', 'speak', 'revoke'))
         json_prompt = await plugin._planner_prompt(ctx)
 
         self.assertIn('什么工具都不调，就等于这一轮不发言', tool_prompt)
         self.assertIn('search_emoji', tool_prompt)
+        self.assertIn('revoke', tool_prompt)
         self.assertNotIn('只输出一个 JSON', tool_prompt)
 
         self.assertIn('只输出一个 JSON', json_prompt)
@@ -674,6 +675,48 @@ class TestToolLoop(unittest.IsolatedAsyncioTestCase):
         self.assertIn('speak', prompt)
         self.assertNotIn('search_emoji', prompt)
         self.assertNotIn('send_emoji', prompt)
+
+
+class TestRevokeTool(unittest.IsolatedAsyncioTestCase):
+    """ 撤回工具：模型只说「撤哪条」，relay 要的 msg_id 由 Bot 解析。 """
+
+    def setUp(self):
+        self.revoked = []
+
+    async def revoke(self, chat, index, text):
+        self.revoked.append((chat, index, text))
+        return '已撤回：「在的 咋啦」'
+
+    def plugin(self, turns):
+        self.ai = ToolAi(turns)
+        return ChatPlugin(self.ai, context_length=10, revoke=self.revoke)
+
+    async def test_revoke_is_exposed_and_called(self):
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('revoke', index=1),))])
+        reply = await plugin.handle(proactive_ctx())
+        self.assertIn('revoke', self.ai.tools_seen[0])
+        # 会话键是 reply_target（wxid/群 id），不是显示名
+        self.assertEqual(self.revoked, [('456@chatroom', 1, '')])
+        # 撤完没说话 = 本轮沉默
+        self.assertTrue(reply.stop)
+
+    async def test_text_target_is_passed_through(self):
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('revoke', text='在的'),))])
+        await plugin.handle(proactive_ctx())
+        self.assertEqual(self.revoked, [('456@chatroom', 0, '在的')])
+
+    async def test_revoke_is_hidden_without_a_backend(self):
+        ai = ToolAi([AssistantTurn()])
+        plugin = ChatPlugin(ai, context_length=10)
+        await plugin.handle(proactive_ctx())
+        self.assertNotIn('revoke', ai.tools_seen[0])
+
+    async def test_revoke_is_capped_per_turn(self):
+        """ 撤回不可逆，一轮最多撤几条，不能让它连点。 """
+        calls = tuple(_call('revoke', index=1) for _ in range(REVOKE_PER_TURN + 1))
+        plugin = self.plugin([AssistantTurn(tool_calls=calls)])
+        await plugin.handle(proactive_ctx())
+        self.assertEqual(len(self.revoked), REVOKE_PER_TURN)
 
 
 class TestAgentMode(unittest.IsolatedAsyncioTestCase):

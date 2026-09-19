@@ -121,6 +121,18 @@ class ChatWindow:
         self._history.append(record)
         return record
 
+    def forget(self, record: SingleRecord) -> bool:
+        """ 抹掉一条记录（撤回自己说过的话用）。
+
+        按**对象身份**找，不按内容——同一句话可能说过两遍，按内容会删错那条。
+        返回是否真的删掉了。
+        """
+        for index, item in enumerate(self._history):
+            if item is record:
+                del self._history[index]
+                return True
+        return False
+
     def sort(self):
         """ 按照时间戳排序 """
         self._history.sort(key=lambda x: x.t)
@@ -249,4 +261,11 @@ if __name__ == '__main__':
     assert lines[0].endswith('张三: 在吗'), lines
     assert lines[1].endswith('我: 在'), lines
     assert all(re.match(r'\[\d\d-\d\d \d\d:\d\d\] ', line) for line in lines), lines
+
+    # 撤回：按对象身份删，删完 transcript 里就没有了
+    kept = window[len(window) - 1]
+    assert window.forget(window[1]) is True
+    assert '我: 在' not in str(window)
+    assert window.forget(kept) is True and len(window) == 1
+    assert window.forget(kept) is False          # 删过的不再删
     print('ok')
