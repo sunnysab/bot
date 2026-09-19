@@ -56,6 +56,7 @@ CHATS_LIMIT = 50
 MESSAGES_LIMIT = 300         # v1 一次拉满，relay 的 get_messages 还不能翻页
 RPC_TIMEOUT = 15.0
 MEDIA_TIMEOUT = 60.0         # 第一次要现下（CDN 握手 + 拉字节），比普通 RPC 慢得多
+MEDIA_CONCURRENCY = 3        # 面板同时向 relay 要几个附件：relay 的 CDN 回退不持短链锁
 LOG_TAIL_BYTES = 256 * 1024  # 只看日志尾巴，不把整份读进内存
 
 # 语音转码的派生目录。**原始附件不在这里**——下载和保管都是 relay 的事，
@@ -275,6 +276,9 @@ class Admin:
         self.port = port
         self.dotenv = DOTENV_PATH      # 自检里会换成临时文件
         self.decisions = DecisionLog(sidecar)
+        # 面板一次刷一堆图，不能把它们同时全砸给 relay（它的 CDN 回退那次握手的
+        # 并发保护有已知缺口）。这里限一下，顺便不让附件把模型的 relay 调用挤掉
+        self._media_gate = threading.Semaphore(MEDIA_CONCURRENCY)
         self.server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -394,16 +398,23 @@ class Admin:
             })
         return out
 
-    def messages(self, chat: str, limit: int = MESSAGES_LIMIT) -> list[dict]:
+    def messages(self, chat: str, limit: int = MESSAGES_LIMIT,
+                 before: int = 0, after: int = 0) -> dict:
+        """ 会话历史（分页）。`before`/`after` 是 relay 的 `messages.id` 游标。
+
+        返回 {'messages': [...], 'has_more': bool}。has_more 靠「满页 = 可能还有」近似，
+        relay 的 get_messages 不把 has_more 透给 SDK——测到不够再给 SDK 加。
+        """
         if not chat:
-            return []
-        raw = self.call(self._wechat.messages(chat, limit=limit))
+            return {'messages': [], 'has_more': False}
+        raw = self.call(self._wechat.messages(chat, limit=limit, before_id=before, after_id=after))
         # relay 的 sender_display_name 查不到时会拿 wxid 当名字，那不是名字。
         # 只对真正拿不到的那几个查（查到的会缓存），不是每条都查
         unknown = [m.sender for m in raw
                    if not m.is_self and m.sender and m.sender_display_name == m.sender]
         names = self.call(self._wechat.sender_names(chat, unknown)) if unknown else {}
-        return [row for row in (self._row(msg, names) for msg in raw) if row]
+        rows = [row for row in (self._row(msg, names) for msg in raw) if row]
+        return {'messages': rows, 'has_more': len(raw) >= limit}
 
     def _row(self, msg, names: dict[str, str] | None = None) -> dict | None:
         kind = MessageKind.of(msg.msg_type)
@@ -456,7 +467,8 @@ class Admin:
         """
         if not msg_id.isdigit():
             raise ValueError(f'msg_id 必须是 relay 的整数 id：{msg_id!r}')
-        data, ext = self.call(self._wechat.media_bytes_by_id(int(msg_id)), timeout=MEDIA_TIMEOUT)
+        with self._media_gate:
+            data, ext = self.call(self._wechat.media_bytes_by_id(int(msg_id)), timeout=MEDIA_TIMEOUT)
         ext = ext.lower()
         if ext == 'silk':  # 微信语音是 SILK，浏览器放不了，转成 WAV 再吐
             data, ext = _silk_to_wav(data, msg_id), 'wav'
@@ -724,7 +736,9 @@ class Admin:
             if route == '/api/messages':
                 chat = (query.get('chat') or [''])[0]
                 limit = int((query.get('limit') or [MESSAGES_LIMIT])[0])
-                return self._json(handler, {'messages': self.messages(chat, limit)})
+                before = int((query.get('before') or ['0'])[0])
+                after = int((query.get('after') or ['0'])[0])
+                return self._json(handler, self.messages(chat, limit, before, after))
             if route == '/api/events':
                 since = int((query.get('since') or ['0'])[0])
                 return self._json(handler, {'seq': bus.latest_seq(),
