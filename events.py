@@ -18,7 +18,7 @@ from __future__ import annotations
 import itertools
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import asdict, dataclass
 
 from loguru import logger
@@ -120,11 +120,12 @@ class EventBus:
         self._lock = threading.Lock()
         self._seq = itertools.count(1)
         self._ring: deque[Event] = deque(maxlen=ring)
-        # msg_id -> 最近一条事件，给「这条消息现在什么状态」用
-        self._latest: dict[str, Event] = {}
+        # msg_id -> 最近一条事件，给「这条消息现在什么状态」用。有界（和环一样大）：
+        # 长跑时 msg_id 只增不减，无界字典就是一个慢慢涨的内存泄漏
+        self._latest: OrderedDict[str, Event] = OrderedDict()
         # 被回复的消息 msg_id -> 那个回复最近到哪一步了。
         # 出站要等 relay 收下才有自己的身份，所以回复的进度挂在被回复的那条上
-        self._by_reply: dict[str, Event] = {}
+        self._by_reply: OrderedDict[str, Event] = OrderedDict()
         # 每条事件都要跑一遍的回调（落盘用）。同步调用，自己负责快
         self._subscribers: list = []
 
@@ -149,8 +150,14 @@ class EventBus:
                 self._ring.append(event)
                 if event.msg_id:
                     self._latest[event.msg_id] = event
+                    self._latest.move_to_end(event.msg_id)
+                    while len(self._latest) > self._ring.maxlen:
+                        self._latest.popitem(last=False)
                 if event.reply_to:
                     self._by_reply[event.reply_to] = event
+                    self._by_reply.move_to_end(event.reply_to)
+                    while len(self._by_reply) > self._ring.maxlen:
+                        self._by_reply.popitem(last=False)
                 subscribers = list(self._subscribers)
             # 出了锁再通知：订户要落盘，别把发布路径锁住
             for fn in subscribers:
@@ -235,6 +242,8 @@ def _self_check() -> None:
     last = b.latest_seq()
     assert len(b.since(0)) == 3 and len(b.since(last)) == 0
     assert [e.seq for e in b.since(last - 3)] == [last - 2, last - 1, last]
+    # msg_id / reply_to 索引也要有界：只增不减的字典就是一个慢慢涨的内存泄漏
+    assert len(b._latest) <= 3 and len(b._by_reply) <= 3, (len(b._latest), len(b._by_reply))
 
     # 分组映射；未知状态也不能炸
     assert Status.group(Status.SENT) == 'replied'
