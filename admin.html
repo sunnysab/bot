@@ -253,12 +253,20 @@ async function loadChats(){
 
 async function loadMessages(){
   if(!current) return;
+  const chat = current;
   reloading = true;
-  const {messages} = await get(`/api/messages?chat=${encodeURIComponent(current)}&limit=300`);
-  $('#stream').innerHTML = messages.length ? messages.map(row).join('')
+  const data = await get(`/api/messages?chat=${encodeURIComponent(chat)}&limit=300`);
+  reloading = false;
+  // 后台 500（多半是 relay RPC 超时：启动时识图/下载会把 RPC 排队）。以前这里对
+  // undefined 取 .length 直接抛异常，抛完 #stream 就永远停在「左边选一个会话」= 视图卡死
+  if(!data.messages){
+    $('#stream').innerHTML = `<div class="empty">消息没取到：${esc(data.error||'后台没响应')}（2 秒后重试）</div>`;
+    setTimeout(() => { if(chat === current) loadMessages(); }, 2000);
+    return;
+  }
+  $('#stream').innerHTML = data.messages.length ? data.messages.map(row).join('')
     : '<div class="empty">这个会话没有消息</div>';
   $('#stream').scrollTop = $('#stream').scrollHeight;
-  reloading = false;
 }
 
 function patch(msgId, status, detail, target){

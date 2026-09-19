@@ -325,7 +325,9 @@ class Admin:
                      'wxid': status.get('wxid', ''), 'nickname': status.get('nickname', ''),
                      'uin': status.get('uin')}
         except Exception as e:  # noqa: BLE001 —— relay 挂了也要能把面板打开
-            relay['error'] = str(e)
+            # 带上类型名：`str(TimeoutError())` 是空串，面板就会显示“relay 取不到状态”却什么都
+            # 说不出来——那正是最难查的一种失败
+            relay['error'] = f'{type(e).__name__}: {e}'
 
         focus = [{'chat': chat, 'rounds': session.rounds, 'reason': session.reason,
                   'idle_left': max(0.0, runtime.focus.idle - (now - session.last_message)),
