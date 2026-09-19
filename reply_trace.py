@@ -31,6 +31,8 @@ class TraceRecord:
     reply: tuple[str, ...]      # 实际发出的内容，空 = 模型选择不发言
     latency_ms: int
     plan: str = ''              # Planner 的决策（两段式时才有）
+    # 这一轮走的哪条路：two_stage / agent。A/B 对比时靠它分组
+    mode: str = ''
     # 触发这一轮的微信消息 ID（relay 的 server_id）。管理后台的「为什么没回」
     # 抽屉就靠它把气泡和这一轮对上；老记录没有这个字段，读出来是空串
     msg_id: str = ''

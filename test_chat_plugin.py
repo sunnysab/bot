@@ -676,9 +676,79 @@ class TestToolLoop(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('send_emoji', prompt)
 
 
+class TestAgentMode(unittest.IsolatedAsyncioTestCase):
+    """ 单段式：判断和台词一次做完，回话就是 reply 工具调用，不再叫表达者。 """
+
+    def plugin(self, turns, search=None, **kwargs):
+        self.ai = ToolAi(turns)
+        self.search = FakeEmojiSearch(search or {})
+        return ChatPlugin(self.ai, context_length=10, emoji_search=self.search,
+                          reply_mode='agent', **kwargs)
+
+    async def test_reply_tool_produces_the_text_directly(self):
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('reply', text='这也太离谱了'),))])
+        reply = await plugin.handle(proactive_ctx())
+        self.assertEqual(reply.texts, ['这也太离谱了'])
+        self.assertEqual(self.ai.reply_calls, [])       # 没走表达者
+        self.assertIn('reply', self.ai.tools_seen[0])
+        # reply 终止本轮：不再多跑一轮去确认，一次调用就够
+        self.assertEqual(len(self.ai.rounds), 1)
+
+    async def test_multiple_replies_become_multiple_messages(self):
+        plugin = self.plugin([AssistantTurn(tool_calls=(
+            _call('reply', text='第一条'), _call('reply', text='第二条')))])
+        reply = await plugin.handle(proactive_ctx())
+        self.assertEqual(reply.texts, ['第一条', '第二条'])
+
+    async def test_sticker_and_text_in_one_turn(self):
+        plugin = self.plugin(
+            [AssistantTurn(tool_calls=(_call('search_emoji', keyword='无语'),)),
+             AssistantTurn(tool_calls=(_call('send_emoji', index=1),
+                                       _call('reply', text='确实'))),
+             ],
+            search={'无语': [_emoji()]})
+        reply = await plugin.handle(proactive_ctx())
+        self.assertEqual(reply.texts, ['确实'])
+        self.assertEqual(reply.emoji.desc, '无语')
+
+    async def test_no_tool_call_is_silent(self):
+        plugin = self.plugin([AssistantTurn(content='接不上')])
+        reply = await plugin.handle(proactive_ctx())
+        self.assertEqual(reply.texts, [])
+        self.assertTrue(reply.stop)
+
+    async def test_must_speak_gets_one_forced_round(self):
+        """ 被点名却什么都不调：只补一轮提醒。 """
+        plugin = self.plugin([AssistantTurn(),
+                              AssistantTurn(tool_calls=(_call('reply', text='在'),))])
+        reply = await plugin.handle(make_ctx(make_msg(is_chatroom=False)))
+        self.assertEqual(reply.texts, ['在'])
+        self.assertIn('必须回应', json.dumps(self.ai.rounds[1], ensure_ascii=False))
+
+    async def test_agent_prompt_switches_on_available_tools(self):
+        plugin = self.plugin([])
+        prompt = await plugin._agent_prompt(proactive_ctx(), ('search_emoji', 'send_emoji', 'reply'))
+        self.assertIn('reply', prompt)
+        self.assertIn('search_emoji', prompt)
+        self.assertIn('什么工具都不调', prompt)
+        self.assertNotIn('只输出一个 JSON', prompt)
+        # 没接表情搜索时提示词里不能提它，否则模型会去调一个不存在的工具
+        bare = await plugin._agent_prompt(proactive_ctx(), ('reply',))
+        self.assertNotIn('search_emoji', bare)
+
+    async def test_model_failure_still_silences_cleanly(self):
+        class Boom(ToolAi):
+            async def chat_tools(self, prompt, messages, tools):
+                raise RuntimeError('网络挂了')
+
+        plugin = ChatPlugin(Boom([]), context_length=10, reply_mode='agent')
+        reply = await plugin.handle(proactive_ctx())
+        self.assertEqual(reply.texts, [])
+        self.assertTrue(reply.stop)
+
+
 class TestCleanReply(unittest.TestCase):
     """ 模型顺手带的包装不能漏到群里。 """
-
     def test_strips_nickname_prefix(self):
         self.assertEqual(clean_reply('Bot：在的', names=('Bot',)), '在的')
         self.assertEqual(clean_reply('Bot: 在的', names=('Bot',)), '在的')

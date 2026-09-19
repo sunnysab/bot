@@ -111,7 +111,7 @@ HOT_FIELDS = frozenset({
     'backoff_start_after', 'backoff_base_seconds', 'backoff_max_seconds', 'backoff_bypass_messages',
     'typo_rate', 'dry_run',
     'personality', 'reply_style', 'behavior_style', 'reply_styles', 'style_probability',
-    'enable_planner', 'planner_url', 'planner_model', 'planner_key', 'planner_temperature',
+    'enable_planner', 'reply_mode', 'planner_url', 'planner_model', 'planner_key', 'planner_temperature',
     'planner_max_tokens', 'planner_thinking', 'planner_json_schema', 'enable_tools',
     'planner_rounds', 'request_timeout', 'trace_path',
 })
@@ -216,6 +216,7 @@ class Runtime:
                           enable_planner=config.enable_planner, planner_ai=self.planner_ai,
                           emoji_search=self.bot.search_emoji, enable_tools=config.enable_tools,
                           planner_rounds=config.planner_rounds, emoji_policy=self.emoji_policy,
+                          reply_mode=config.reply_mode,
                           timeout=config.request_timeout)
 
     def _install_plugins(self) -> None:

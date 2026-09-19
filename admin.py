@@ -76,7 +76,7 @@ CONFIG_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         'backoff_bypass_messages')),
     ('专注模式', ('enable_focus', 'focus_enter_activity', 'focus_idle_seconds', 'focus_max_seconds')),
     ('人格与表达', ('personality', 'reply_style', 'behavior_style', 'reply_styles', 'style_probability')),
-    ('决策者', ('enable_planner', 'planner_url', 'planner_key', 'planner_model', 'planner_temperature',
+    ('决策者', ('reply_mode', 'enable_planner', 'planner_url', 'planner_key', 'planner_model', 'planner_temperature',
                 'planner_max_tokens', 'planner_thinking', 'planner_json_schema', 'enable_tools',
                 'planner_rounds')),
     ('出站', ('send_interval', 'typo_rate', 'dry_run')),

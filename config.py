@@ -109,6 +109,9 @@ class Config:
     style_probability: float = 0.0
     # 两段式：Planner 判断说与不说，Expressor 负责说成人话
     enable_planner: bool = True
+    # 回复链路：'two_stage' = 决策者 + 表达者；'agent' = 单模型，回话本身就是工具调用
+    # （reply）。**默认 agent**：离线 A/B 里开口率持平，延迟 −40%、token −30%
+    reply_mode: str = 'agent'
     # Planner 可以单独配一个 OpenAI 兼容服务；**留空就走主模型（推荐）**。
     # 不要指到本地小模型：实测 2B 那档「开口 0/9、推理原地打转」，
     # 连「说一个字」都是 finish=length + content 空（见 notes/未完成.md）
@@ -166,6 +169,7 @@ if __name__ == '__main__':
     tuned = Config.from_env()
     assert tuned.backoff_start_after == 3 and tuned.backoff_max_seconds == 60.0, tuned
     assert base.describe_max_tokens == 1024, base     # thinking 模型的推理也算进生成预算
+    assert base.reply_mode == 'agent', base           # 默认单段式；two_stage 留作对照
     # 管理后台端口和演习开关也能从环境变量调
     assert base.admin_port == 8099 and base.dry_run is False, base
     os.environ.update(ADMIN_PORT='0', DRY_RUN='1')
