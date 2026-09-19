@@ -24,10 +24,6 @@ EMOJI_SAVE_INTERVAL = 5.0      # 表情库最长隔这么久落一次盘（热�
 STALE_MESSAGE_SECONDS = 300.0  # 比这更旧的消息只当上下文：relay 长链重连会补推离线积压
 REVOKE_WINDOW_SECONDS = 120.0  # relay 只认 2 分钟内的撤回，超了不必白跑一次 RPC
 SENT_KEEP = 10                 # 每个会话最多记这么多条自己的出站，只用来撤回
-# 引用回复只在「群里消息多、乱」时用：人少或私聊里每条都带引用很怪，
-# 人一多引用才帮人看清在回哪条。口径跟门控的活跃度一致（180s 窗口）。
-QUOTE_WINDOW_SECONDS = 180.0
-QUOTE_MIN_ACTIVITY = 8
 
 FILTERED_KINDS = {
     MessageKind.VOICE: '语音', MessageKind.EMOJI: '表情', MessageKind.LOCATION: '位置',
@@ -69,7 +65,8 @@ class Bot:
                  describer: MediaDescriber | None = None, describe_history_limit: int = 3,
                  keeper: MomentKeeper | None = None, emojis: EmojiLibrary | None = None,
                  emoji_path: str = '', emoji_describer=None, typo_rate: float = 0.0,
-                 quote_replies: bool = False, rng: random.Random | None = None):
+                 quote_replies: bool = False, quote_min_activity: int = 8,
+                 quote_window: float = 180.0, rng: random.Random | None = None):
         """ 初始化机器人
 
         @param host: weixin-rs relay 服务器地址
@@ -86,6 +83,8 @@ class Bot:
         @param emoji_describer: 给偷来的表情补「使用场景」的后台任务；为 None 则不补
         @param typo_rate: 出站文本抖错别字的概率（0 为关闭）
         @param quote_replies: 回复时引用被打断的那条消息（微信的「回复某条」）
+        @param quote_min_activity: 引用要求窗口内别人至少说这么多条（群不够热闹就不引）
+        @param quote_window: 判断「群里乱不乱」的时间窗口（秒）
         @param rng: 错别字用的随机源，测试时可注入
         """
         async def callback(msg: Message) -> None:
@@ -108,6 +107,8 @@ class Bot:
         self.emoji_describer = emoji_describer
         self.typo_rate = typo_rate
         self.quote_replies = quote_replies
+        self.quote_min_activity = quote_min_activity
+        self.quote_window = quote_window
         # 运行计数：面板的统计卡要看（拍的那些常数到底撞了多少次）
         self.typo_count = 0
         self.emoji_count = 0
@@ -444,8 +445,8 @@ class Bot:
             return 0
         now = time.time()
         activity = sum(1 for r in self._history.get_context(msg.reply_target)
-                       if not r.is_self and now - r.t <= QUOTE_WINDOW_SECONDS)
-        if activity < QUOTE_MIN_ACTIVITY:
+                       if not r.is_self and now - r.t <= self.quote_window)
+        if activity < self.quote_min_activity:
             return 0
         try:
             return int(msg.msg_id)

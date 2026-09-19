@@ -78,6 +78,12 @@ class Config:
     # 群聊参与：必要性打分阈值（越高越沉默）与活跃度统计窗口
     reply_necessity_threshold: int = 60
     reply_activity_window: float = 180.0
+    # 回复行为（面板上直接调，都不用重启）
+    reply_context_length: int = 30       # 每轮送进模型的历史条数
+    agent_max_replies: int = 1           # agent 模式一轮最多发几条消息
+    focus_score_bonus: int = 15          # 专注模式给必要性打分的加分（不豁免门控）
+    quote_min_activity: int = 8          # 窗口内别人至少说这么多条，引用才不突兀
+    quote_window_seconds: float = 180.0  # 判断「群里乱不乱」的时间窗口
     # 专注模式（HFC）：群里热起来就盯一会儿，期间不看门控
     enable_focus: bool = True
     focus_enter_activity: int = 15      # 活动窗口内别人的消息数够多就进
@@ -134,7 +140,7 @@ class Config:
     # 演习模式：全链路照跑（门控/决策/表达/状态都有），但不真发、自己的回复不进历史
     dry_run: bool = False
     # 回复时引用被打断的那条消息（微信的「回复某条」）。真机（filehelper）验过：
-    # 自己发的和别人发的都能引用，客户端渲染正常
+    # 自己发的和别人发的都能引用，客户端渲染正常。只在群聊且最近够热闹时才引
     quote_replies: bool = True
     # 回复轨迹 JSONL（攒数据给以后做效果评估）
     trace_path: str = 'reply_trace.jsonl'
@@ -174,6 +180,12 @@ if __name__ == '__main__':
     assert base.describe_max_tokens == 1024, base     # thinking 模型的推理也算进生成预算
     assert base.reply_mode == 'agent', base           # 默认单段式；two_stage 留作对照
     assert base.quote_replies is True, base            # 真机验过，引用回复默认开
+    # 回复行为也能从环境变量调（面板上要能改）
+    assert base.reply_context_length == 30 and base.agent_max_replies == 1, base
+    assert base.focus_score_bonus == 15 and base.quote_min_activity == 8, base
+    os.environ.update(AGENT_MAX_REPLIES='2', QUOTE_MIN_ACTIVITY='12')
+    behavior = Config.from_env()
+    assert behavior.agent_max_replies == 2 and behavior.quote_min_activity == 12, behavior
     # 管理后台端口和演习开关也能从环境变量调
     assert base.admin_port == 8099 and base.dry_run is False, base
     os.environ.update(ADMIN_PORT='0', DRY_RUN='1')

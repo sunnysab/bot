@@ -107,6 +107,8 @@ class ReplyScope:
 HOT_FIELDS = frozenset({
     'deepseek_key', 'deepseek_model', 'deepseek_url', 'send_interval',
     'reply_necessity_threshold', 'reply_activity_window',
+    'reply_context_length', 'agent_max_replies', 'focus_score_bonus',
+    'quote_min_activity', 'quote_window_seconds',
     'enable_focus', 'focus_enter_activity', 'focus_idle_seconds', 'focus_max_seconds',
     'backoff_start_after', 'backoff_base_seconds', 'backoff_max_seconds', 'backoff_bypass_messages',
     'typo_rate', 'dry_run', 'quote_replies',
@@ -174,7 +176,8 @@ class Runtime:
                    keeper=MomentKeeper(self.ai, self.memories, batch=config.moment_batch),
                    emojis=self.emojis, emoji_path=config.emoji_path,
                    emoji_describer=self.emoji_describer, typo_rate=config.typo_rate,
-                   quote_replies=config.quote_replies, dry_run=config.dry_run)
+                   quote_replies=config.quote_replies, quote_min_activity=config.quote_min_activity,
+                   quote_window=config.quote_window_seconds, dry_run=config.dry_run)
 
     def _make_describer(self) -> MediaDescriber | None:
         if not self.config.describe_media:
@@ -197,6 +200,7 @@ class Runtime:
         return ReplyPolicy(threshold=config.reply_necessity_threshold,
                            activity_window=config.reply_activity_window,
                            aliases=self._make_persona().aliases,
+                           focus_score_bonus=config.focus_score_bonus,
                            backoff=self.backoff, focus=self.focus)
 
     def _make_persona(self) -> Persona:
@@ -209,7 +213,7 @@ class Runtime:
 
     def _make_chat_plugin(self) -> ChatPlugin:
         config = self.config
-        return ChatPlugin(self.ai, context_length=30, policy=self._make_policy(),
+        return ChatPlugin(self.ai, context_length=config.reply_context_length, policy=self._make_policy(),
                           persona=self._make_persona(), profiles=self.profiles,
                           habits=self.habits, memories=self.memories,
                           tracer=TraceLogger(config.trace_path),
@@ -217,6 +221,7 @@ class Runtime:
                           emoji_search=self.bot.search_emoji, enable_tools=config.enable_tools,
                           planner_rounds=config.planner_rounds, emoji_policy=self.emoji_policy,
                           reply_mode=config.reply_mode, revoke=self.bot.revoke,
+                          agent_max_replies=config.agent_max_replies,
                           timeout=config.request_timeout)
 
     def _install_plugins(self) -> None:
@@ -268,6 +273,8 @@ class Runtime:
         self._install_plugins()
         self.bot.typo_rate = config.typo_rate
         self.bot.quote_replies = config.quote_replies
+        self.bot.quote_min_activity = config.quote_min_activity
+        self.bot.quote_window = config.quote_window_seconds
         self.bot.dry_run = config.dry_run
         self.bot.wechat.dry_run = config.dry_run
         self.bot.outbox.set_interval(config.send_interval)

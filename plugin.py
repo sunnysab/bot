@@ -93,10 +93,6 @@ REVOKE = ToolSpec(
                                'text': {'type': 'string', 'description': '原话里的一小段'}}})
 
 REVOKE_PER_TURN = 3      # 一轮最多撤几条：撤回不可逆，别让模型连点
-AGENT_MAX_REPLIES = 1    # agent 模式一轮最多发几条：一条说完就够，别刷屏
-# 专注模式只加分，不整个豁免门控：豁免会把「存在感」惩罚也绕过，
-# 群里就变成机器人一个人的独角戏（实测占比到过 37/58 还在回）
-FOCUS_SCORE_BONUS = 15
 
 
 @dataclass(slots=True)
@@ -308,18 +304,21 @@ class ReplyPolicy:
 
     def __init__(self, threshold: int = NECESSITY_THRESHOLD, activity_window: float = 180.0,
                  aliases: tuple[str, ...] = (), backoff: IdleBackoff | None = None,
-                 focus: FocusMode | None = None):
+                 focus: FocusMode | None = None, focus_score_bonus: int = 15):
         """ :param threshold: 必要性分数阈值，越高越沉默
         :param activity_window: 统计群活跃度的时间窗口（秒）
         :param aliases: 机器人自己的其他叫法，命中就当被叫到名字
         :param backoff: 连续沉默退避；不传则用默认（连续两轮不开口开始歇 15s）
-        :param focus: 专注模式；群聊得热时盯一会儿，期间门控和退避都让路
+        :param focus: 专注模式；群聊得热时盯一会儿，期间给必要性打分加分
+        :param focus_score_bonus: 专注期的加分。**只加分，不豁免门控**——豁免会把
+            存在感惩罚一起绕过，群里就成了机器人一个人的独角戏
         """
         self.threshold = threshold
         self.activity_window = activity_window
         self.aliases = aliases
         self.backoff = backoff if backoff is not None else IdleBackoff()
         self.focus = focus
+        self.focus_score_bonus = focus_score_bonus
 
     def evaluate_detailed(self, ctx: MessageContext, now: float) -> GateDecision:
         """ 门控 + 理由。面板要显示「跳过的原因」，所以不能再只给 None。 """
@@ -339,7 +338,7 @@ class ReplyPolicy:
         if result.kind == 'proactive' and self.focus:
             if self.focus.tick(ctx.contact, now, activity):
                 result = replace(result, focused=True, reasons=(*result.reasons, '专注'),
-                                 score=min(100, result.score + FOCUS_SCORE_BONUS))
+                                 score=min(100, result.score + self.focus_score_bonus))
         if result.score < self.threshold:
             return GateDecision(allowed=False, score=result.score, kind=result.kind,
                                 reasons=result.reasons, blocked_by='score',
@@ -404,7 +403,8 @@ class ChatPlugin(Plugin):
                  emoji_search: EmojiSearch | None = None, enable_tools: bool = True,
                  planner_rounds: int = 3, emoji_policy: EmojiPolicy | None = None,
                  reply_mode: str = 'two_stage', revoke: Revoke | None = None,
-                 timeout: float = 60.0, rng: random.Random | None = None):
+                 timeout: float = 60.0, rng: random.Random | None = None,
+                 agent_max_replies: int = 1):
         """ 聊天插件
 
         :param ai_provider: AI 服务提供者
@@ -425,6 +425,7 @@ class ChatPlugin(Plugin):
         :param revoke: 撤回入口（Bot 提供）；不传就没有 revoke 工具
         :param timeout: 单次模型调用超时（秒）
         :param rng: 抽临时风格用的随机源，测试时可注入
+        :param agent_max_replies: agent 模式一轮最多发几条消息
         """
         self.ai = ai_provider
         self._planner_ai = planner_ai
@@ -444,6 +445,7 @@ class ChatPlugin(Plugin):
         self.revoke = revoke
         self.timeout = timeout
         self.rng = rng
+        self.agent_max_replies = agent_max_replies
 
         from jinja2 import Template
         base = Path(__file__).parent
@@ -669,7 +671,7 @@ class ChatPlugin(Plugin):
             text = arg_str(arguments, 'text')
             if not text:
                 return ToolResult('text 是空的，没发出去。')
-            if len(replies) >= AGENT_MAX_REPLIES:
+            if len(replies) >= self.agent_max_replies:
                 return ToolResult('这一轮说得够多了，剩下的下轮再说。')
             replies.append(text)
             # stop=True：调完本轮就收，别再多跑一轮去确认。同一轮里的多个 reply
