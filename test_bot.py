@@ -32,6 +32,8 @@ class FakeWechat:
         self.revoked: list[tuple[str, int]] = []        # (会话, msg_id)
         self.refs: list = []                            # 每条出站的 ref_svrid（引用回复）
         self.revoke_fail = False
+        self.voices: list[int] = []                     # 请求过转写的语音 msg_id
+        self.transcript = None                          # 非 None = 转写成功，返回这段文本
 
     async def revoke(self, to, msg_id):
         self.revoked.append((to, msg_id))
@@ -68,6 +70,13 @@ class FakeWechat:
         if self.image is None:
             raise RuntimeError('下载附件失败: invalid data: 消息无 cdnurl')
         return self.image
+
+    async def voice_text(self, msg, timeout=20):
+        """ 语音转写。默认返回空（= 转写失败），测成功的路径就设 self.transcript。 """
+        self.voices.append(msg.msg_id)
+        if self.transcript is None:
+            raise RuntimeError('语音转写失败: relay 拒绝：dry_run=true')
+        return self.transcript
 
     async def get_display_name(self, wxid, chatroom=''):
         return self.names.get(wxid, wxid)
@@ -231,6 +240,28 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         xml = '<msg><emoji md5="m1" desc="ChEKB2RlZmF1bHQSBuWVp+WVpw==" cdnurl="u" /></msg>'
         await self.bot.on_message(make_msg(text=xml, msg_type=47, is_self=True))
         self.assertEqual([e.md5 for e in self.bot.emojis.search('啧啧')], ['m1'])
+
+    async def test_voice_is_transcribed_before_deciding(self):
+        """ 语音先转成文字再进历史，模型才接得上；否则只看到 `[语音 3″]`。 """
+        self.bot._wechat.transcript = '我的麦好像有点炸'
+        self.bot.set_default_plugin(FakePlugin(texts=['收到']))
+        msg = make_msg(text='<msg><voicemsg voicelength="3000" /></msg>', msg_type=34)
+        await self.bot.on_message(msg)
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(self.bot._wechat.voices, [msg.msg_id])
+        self.assertEqual(self._window()[0].text, '[语音 3″：我的麦好像有点炸]')
+        self.assertEqual([text for _, text in self.bot._wechat.sent], ['收到'])
+
+    async def test_voice_transcription_failure_keeps_the_placeholder(self):
+        """ 转写失败不能把这一轮带崩，也不该丢掉「这里有条语音」。 """
+        self.bot._wechat.transcript = None                     # voice_text 会抛
+        self.bot.set_default_plugin(FakePlugin(texts=['收到']))
+        await self.bot.on_message(make_msg(text='<msg><voicemsg voicelength="3000" /></msg>', msg_type=34))
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(self._window()[0].text, '[语音 3″]')
+        self.assertEqual([text for _, text in self.bot._wechat.sent], ['收到'])
 
     async def test_attached_plugin_overrides_defaults(self):
         self.bot.set_default_plugin(FakePlugin(texts=['hi']))

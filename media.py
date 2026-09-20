@@ -49,10 +49,11 @@ class Media:
         return self.needs_description and self.downloadable
 
 
-PLACEHOLDER = re.compile(r'^\[(图片|表情|语音|视频|位置|链接|文件|合并转发|小程序)([：: ][^\]]*)?\]$')
+PLACEHOLDER = re.compile(r'^\[(图片|表情|语音|视频|位置|链接|文件|合并转发|小程序)(\s*\d+\u2033)?([：: ][^\]]*)?\]$')
 
-# 占位符里的标签。语音会带上时长（`[语音 3″]`）——模型知道时长比只知道「有语音」有用，
-# 而上面的 PLACEHOLDER 正则允许标签后面跟一个空格，就是为了这个
+# 占位符里的标签。语音会带上时长（`[语音 3″]`）——模型知道时长比只知道「有语音」有用；
+# 转写成功后写成 `[语音 3″：文本]`，所以时长后面还允许跟一个 `：…`。
+# 发送前用 PLACEHOLDER 拦下这类文本，否则模型会把历史里的占位符当话说出去
 KIND_LABEL = {'image': '图片', 'emoji': '表情', 'voice': '语音', 'video': '视频'}
 
 
@@ -306,6 +307,7 @@ if __name__ == '__main__':
     assert parse_video('<msg><videomsg /></msg>').placeholder == '[视频]'
     # 带时长的占位符也得被拦下来（这是发到群里的最后一道防线）
     assert is_placeholder('[语音 3″]') and is_placeholder('[视频 15″]')
+    assert is_placeholder('[语音 3″：我的麦好像有点炸]')      # 转写过的那条也得拦住
     assert is_placeholder('[图片：一只橘猫]') and not is_placeholder('[语音 3″] 顺便说一句')
     assert render(34, '<msg><voicemsg voicelength="3000" /></msg>', 'x')[0] == '[语音 3″]'
 

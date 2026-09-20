@@ -803,6 +803,14 @@ class TestAgentMode(unittest.IsolatedAsyncioTestCase):
                        history=history_with(1, now=time.time()))
         self.assertIsNone(await plugin.handle(ctx))
 
+    async def test_transcribed_voice_reaches_the_model(self):
+        """ 历史里已经是 `[语音 3″：文本]`，入口不该再把它挡掉。 """
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('reply', text='骑车注意安全'),))])
+        ctx = make_ctx(make_msg(is_chatroom=True, msg_type=34, content='[语音 3″：我正在骑车回家]'),
+                       history=history_with(12, now=time.time()))
+        reply = await plugin.handle(ctx)
+        self.assertEqual(reply.texts, ['骑车注意安全'])
+
     async def test_per_conversation_persona_reaches_the_prompt(self):
         """ 分会话人设只盖这个会话，且真的进了 system prompt。 """
         store = PersonaStore(Path(tempfile.mkdtemp()) / 'personas.json')

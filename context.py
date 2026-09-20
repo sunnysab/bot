@@ -242,6 +242,10 @@ class MessageContext:
         """ 表情包（sticker）。占位符 `[表情：摊倒]` 自带语义，不用识图。 """
         return self.kind is MessageKind.EMOJI
 
+    @property
+    def is_voice(self) -> bool:
+        return self.kind is MessageKind.VOICE
+
 
 if __name__ == '__main__':
     # 自检：已知类型映射到语义，未知类型落到 OTHER

@@ -569,6 +569,16 @@ class Bot:
         # 硬试也是一次注定失败的 RPC（见 media.Media.downloadable）
         download = ((lambda m=msg: self._wechat.media_bytes(m))
                     if (media and media.describable) else None)
+        # 语音：先让 relay 转成文字再进历史，否则模型只看到 `[语音 3″]`，什么也接不上。
+        # 转写要上传 + 轮询（秒级），失败就保留占位符——不能让它拖垮消息链
+        if kind is MessageKind.VOICE and not msg.is_self and media is not None:
+            try:
+                transcript = await self._wechat.voice_text(msg)
+            except Exception as e:  # noqa: BLE001 —— 转写失败不是这一轮的错
+                logger.warning(f'语音转写失败（msg_id={msg.msg_id}）: {e}')
+                transcript = ''
+            if transcript:
+                msg.content = msg.clean_text = f'{media.placeholder[:-1]}：{transcript}]'
 
         # 手机上自己发的消息：写进上下文让模型看见，但**不触发任何插件**。
         # 从群里看人设确实在说话（transcript 里渲染成「我」），所以存在感统计也算数

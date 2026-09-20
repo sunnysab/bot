@@ -99,6 +99,9 @@ def _score_content(text: str) -> tuple[int, list[str]]:
     cleaned = (text or '').strip()
     if not cleaned:
         return 0, []
+    if cleaned.startswith('[语音') and '：' in cleaned:
+        # 转写过、有内容的语音，等同于一句话
+        return 25, ['语音']
     if cleaned.startswith('[表情'):
         # 表情是有人在表达情绪，接一下比假装没看见自然；图片/语音那种还得自己去看才有意义
         return 20, ['表情']

@@ -178,6 +178,16 @@ class Wechat:
         raw, _ = await self.media_bytes_by_id(msg.msg_id)
         return raw
 
+    async def voice_text(self, msg: Message, timeout: int = 20) -> str:
+        """ 语音转文字。
+
+        附件和转写都在 relay 做（转写要把 SILK 上传到微信服务端再轮询，bot 做不了），
+        relay 用 `{wxid}_voice_{msg_id}` 当 voiceId，所以同一条消息重复请求能命中结果。
+        拿不到文本就返回空串——调用方保留占位符就行，别让转写拖垮消息链。
+        """
+        result = await self._bot.transcribe_voice(msg.msg_id, timeout=timeout)
+        return str((result or {}).get('text') or '')
+
     async def messages(self, peer: str, limit: int = 300, exclude_system: bool = True,
                        before_id: int = 0, after_id: int = 0):
         """ 管理后台用：某个会话的历史。

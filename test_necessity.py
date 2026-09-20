@@ -42,6 +42,12 @@ class TestNecessity(unittest.TestCase):
         self.assertGreaterEqual(score('[表情：摊倒]', activity=10).score, NECESSITY_THRESHOLD)
         self.assertLess(score('[表情：摊倒]', activity=1).score, NECESSITY_THRESHOLD)
 
+    def test_transcribed_voice_counts_as_content(self):
+        # 转写过、有内容的语音等同于一句话；没转写的（只有时长）仍不够格
+        self.assertGreaterEqual(score('[语音 3″：我的麦好像有点炸]', activity=10).score,
+                                NECESSITY_THRESHOLD)
+        self.assertLess(score('[语音 3″]', activity=20).score, NECESSITY_THRESHOLD)
+
     def test_active_group_plain_chatter_stays_below_threshold(self):
         # 封顶 40 < 阈值 60：群热本身不再够格，闲话要说过线得有内容分
         self.assertLess(score('今天真冷', activity=10).score, NECESSITY_THRESHOLD)
