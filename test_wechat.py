@@ -40,8 +40,9 @@ class FakeBot:
                 types.SimpleNamespace(peer='wxid_bob'), types.SimpleNamespace(peer='wxid_me')]
 
     async def get_messages(self, limit, contact, reverse, exclude_system,
-                           before_id=None, after_id=None):
+                           before_id=None, after_id=None, query=None):
         self.page = {'limit': limit, 'before_id': before_id, 'after_id': after_id}
+        self.query = query
         return [
             make_message(msg_type=1, content='第一条', clean_text='第一条', create_time=200),
             make_message(msg_type=3, content='<img cdnurl="x"/>', clean_text='', create_time=201),
@@ -50,6 +51,13 @@ class FakeBot:
 
     async def get_chatroom_member(self, chatroom, wxid):
         return types.SimpleNamespace(name=self.group_card or wxid)
+
+    async def get_chatroom(self, chatroom):
+        members = getattr(self, 'members', [('wxid_alice', 'Alice', 'AliceGroupCard')])
+        return types.SimpleNamespace(members=[
+            types.SimpleNamespace(wxid=wxid, display_name=display, group_nickname=card, nickname='',
+                                  name=display or card or wxid)
+            for wxid, display, card in members])
 
     async def get_contact(self, user):
         self.contact_calls.append(user)
@@ -186,6 +194,22 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
         self.wechat._bot.group_card = ''
         self.assertEqual(await self.wechat.get_display_name('wxid_nobody', '456@chatroom'),
                          'wxid_nobody')
+
+    async def test_find_member_matches_display_name_and_group_card(self):
+        self.wechat._bot.members = [('wxid_alice', 'Alice', 'AliceGroupCard'), ('wxid_bob', 'Bob', '')]
+        self.assertEqual(await self.wechat.find_member('456@chatroom', 'Bob'), 'wxid_bob')
+        self.assertEqual(await self.wechat.find_member('456@chatroom', 'AliceGroupCard'), 'wxid_alice')
+
+    async def test_find_member_prefers_exact_over_partial(self):
+        """ @ 错人比不 @ 更难看：模糊命中不止一个就不猜。 """
+        self.wechat._bot.members = [('wxid_a', '小张', ''), ('wxid_b', '张老师', '')]
+        self.assertEqual(await self.wechat.find_member('456@chatroom', '张'), '')
+        self.assertEqual(await self.wechat.find_member('456@chatroom', '小张'), 'wxid_a')
+
+    async def test_find_member_is_a_noop_outside_chatrooms(self):
+        self.wechat._bot.members = [('wxid_alice', 'Alice', '')]
+        self.assertEqual(await self.wechat.find_member('wxid_alice', 'Alice'), '')
+        self.assertEqual(await self.wechat.find_member('456@chatroom', ''), '')
 
 
 if __name__ == '__main__':

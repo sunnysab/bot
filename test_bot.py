@@ -31,6 +31,7 @@ class FakeWechat:
         self.names = {'wxid_bot': 'Bot'}                # wxid -> 显示名，查不到就回 wxid
         self.revoked: list[tuple[str, int]] = []        # (会话, msg_id)
         self.refs: list = []                            # 每条出站的 ref_svrid（引用回复）
+        self.ats: list = []                             # 每条出站的 at_list（@ 人）
         self.revoke_fail = False
         self.voices: list[int] = []                     # 请求过转写的语音 msg_id
         self.transcript = None                          # 非 None = 转写成功，返回这段文本
@@ -59,6 +60,7 @@ class FakeWechat:
             raise RuntimeError('解析长链 newsendmsg 响应失败: invalid data: unsupported wiretype 7')
         self.sent.append((receiver, text))
         self.refs.append(ref_svrid)
+        self.ats.append(at_list)
         return {'sent': True, 'msg_id': DAEMON_MSG_ID}
 
     async def media_bytes(self, msg):
@@ -83,13 +85,14 @@ class FakeWechat:
 
 
 class FakePlugin(Plugin):
-    def __init__(self, texts=None, stop=False, emoji=None):
+    def __init__(self, texts=None, stop=False, emoji=None, at=''):
         self.texts = texts or []
         self._stop = stop
         self.emoji = emoji
+        self.at = at
 
     async def handle(self, ctx):
-        return Reply(texts=list(self.texts), stop=self._stop, emoji=self.emoji)
+        return Reply(texts=list(self.texts), stop=self._stop, emoji=self.emoji, at=self.at)
 
 
 def make_msg(text='hello', is_self=False, msg_type=1, create_time=None):
@@ -371,6 +374,20 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         await self.bot.on_message(make_msg())
         await asyncio.sleep(0.1)
         self.assertIn(None, self.bot._wechat.refs)      # 没开引用就不带 ref_svrid
+
+    async def test_at_reaches_the_transport(self):
+        """ 插件层只负责把 wxid 带回来，怎么 @ 是出站那一段的事。 """
+        self.bot.set_default_plugin(FakePlugin(texts=['你问他去'], at='wxid_zhang'))
+        await self.bot.on_message(make_msg())
+        await asyncio.sleep(0.1)
+        self.assertEqual(self.bot._wechat.sent, [('456@chatroom', '你问他去')])
+        self.assertEqual(self.bot._wechat.ats, ['wxid_zhang'])
+
+    async def test_no_at_means_no_at_list(self):
+        self.bot.set_default_plugin(FakePlugin(texts=['收到']))
+        await self.bot.on_message(make_msg())
+        await asyncio.sleep(0.1)
+        self.assertEqual(self.bot._wechat.ats, [None])
 
     async def test_reply_is_in_history_before_it_is_sent(self):
         """回复一决策就写历史，不等打字延迟过完。

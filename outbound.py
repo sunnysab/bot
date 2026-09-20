@@ -37,6 +37,8 @@ class Outbound:
     record: 'SingleRecord | None' = None
     # 引用回复的目标（被引消息的 64 位 svrId）；0 = 不引用
     ref_svrid: int = 0
+    # 要 @ 的群成员 wxid，多个用逗号分隔；空 = 不 @
+    at_list: str = ''
 
 
 class OutboundQueue:
@@ -53,14 +55,15 @@ class OutboundQueue:
         self._task: asyncio.Task | None = None
 
     def put(self, receiver: str, text: str, sender: str = '',
-            reply_to=None, chat_name: str = '', record=None, ref_svrid: int = 0) -> None:
+            reply_to=None, chat_name: str = '', record=None, ref_svrid: int = 0,
+            at_list: str = '') -> None:
         # 非阻塞入队，避免拖住 SDK 的顺序事件循环
         # ponytail: 无界队列，个人 bot 量级够用；刷屏再换成有界 + 丢弃策略
         bus.publish(Status.QUEUED, chat_id=receiver, chat_name=chat_name,
                     reply_to=reply_to, origin='bot', detail=f'{len(text)} 字')
         self._queue.put_nowait(Outbound(receiver, text, sender,
                                         reply_to=_key(reply_to), chat_name=chat_name, record=record,
-                                        ref_svrid=ref_svrid or 0))
+                                        ref_svrid=ref_svrid or 0, at_list=at_list))
 
     def put_emoji(self, receiver: str, emoji: Emoji, sender: str = '',
                   reply_to=None, chat_name: str = '', record=None) -> None:

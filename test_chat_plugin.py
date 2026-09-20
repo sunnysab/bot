@@ -771,6 +771,124 @@ class TestRevokeTool(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.revoked), REVOKE_PER_TURN)
 
 
+class TestMessageSearchTool(unittest.IsolatedAsyncioTestCase):
+    """ 查历史：窗口里没有的东西，模型自己发起去搜。 """
+
+    def setUp(self):
+        self.asked = []
+
+    async def search(self, chat, keyword):
+        self.asked.append((chat, keyword))
+        return '[09-14 20:30] Alice: 上次说的那家店叫啥' if keyword == '店' else ''
+
+    def plugin(self, turns, **kwargs):
+        self.ai = ToolAi(turns)
+        return ChatPlugin(self.ai, context_length=10, message_search=self.search,
+                          reply_mode='agent', **kwargs)
+
+    async def test_hits_are_fed_back_and_the_turn_continues(self):
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('search_messages', keyword='店'),)),
+                              AssistantTurn(tool_calls=(_call('reply', text='就叫老张面馆'),))])
+        reply = await plugin.handle(proactive_ctx())
+
+        self.assertIn('search_messages', self.ai.tools_seen[0])
+        self.assertEqual(self.asked, [('456@chatroom', '店')])
+        # 搜到的东西要进下一轮的对话，否则搜了也白搜
+        self.assertIn('上次说的那家店', json.dumps(self.ai.rounds[1], ensure_ascii=False))
+        self.assertEqual(reply.texts, ['就叫老张面馆'])
+
+    async def test_a_miss_says_so_and_the_model_can_still_speak(self):
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('search_messages', keyword='不存在的词'),)),
+                              AssistantTurn(tool_calls=(_call('reply', text='这个我真想不起来了'),))])
+        reply = await plugin.handle(proactive_ctx())
+        self.assertIn('没搜到', json.dumps(self.ai.rounds[1], ensure_ascii=False))
+        self.assertEqual(reply.texts, ['这个我真想不起来了'])
+
+    async def test_empty_keyword_does_not_touch_the_backend(self):
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('search_messages'),)), AssistantTurn()])
+        await plugin.handle(proactive_ctx())
+        self.assertEqual(self.asked, [])
+        self.assertIn('没给关键词', json.dumps(self.ai.rounds[1], ensure_ascii=False))
+
+    async def test_tool_is_hidden_without_a_backend(self):
+        ai = ToolAi([AssistantTurn()])
+        await ChatPlugin(ai, context_length=10).handle(proactive_ctx())
+        self.assertNotIn('search_messages', ai.tools_seen[0])
+
+
+class TestAtTool(unittest.IsolatedAsyncioTestCase):
+    """ @ 人：模型给群昵称，wxid 由 Bot 查，只在群聊里且只在有这个人时生效。 """
+
+    MEMBERS = {'张三': 'wxid_zhang'}
+
+    def setUp(self):
+        self.looked = []
+
+    async def lookup(self, chat, name):
+        self.looked.append((chat, name))
+        return self.MEMBERS.get(name, '')
+
+    def plugin(self, turns, **kwargs):
+        self.ai = ToolAi(turns)
+        return ChatPlugin(self.ai, context_length=10, member_lookup=self.lookup,
+                          reply_mode='agent', **kwargs)
+
+    async def test_at_name_becomes_a_wxid_on_the_reply(self):
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('reply', text='你问他去', at='张三'),))])
+        reply = await plugin.handle(proactive_ctx())
+        self.assertEqual(self.looked, [('456@chatroom', '张三')])
+        self.assertEqual(reply.at, 'wxid_zhang')
+        self.assertEqual(reply.texts, ['你问他去'])
+
+    async def test_at_is_optional(self):
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('reply', text='在'),))])
+        reply = await plugin.handle(proactive_ctx())
+        self.assertEqual(self.looked, [])
+        self.assertEqual(reply.at, '')
+
+    async def test_unknown_name_still_sends_the_text(self):
+        """ @ 不到人不是不发这条消息的理由。 """
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('reply', text='在', at='查无此人'),))])
+        reply = await plugin.handle(proactive_ctx())
+        self.assertEqual(reply.at, '')
+        self.assertEqual(reply.texts, ['在'])
+
+    async def test_private_chat_cannot_at(self):
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('reply', text='在', at='张三'),))])
+        ctx = proactive_ctx()
+        ctx.msg.is_chatroom = False
+        reply = await plugin.handle(ctx)
+        self.assertEqual(self.looked, [])
+        self.assertEqual(reply.at, '')
+
+    async def test_only_the_first_at_of_a_turn_counts(self):
+        calls = (_call('reply', text='在', at='张三'), _call('reply', text='再来一句', at='李四'))
+        plugin = self.plugin([AssistantTurn(tool_calls=calls)], agent_max_replies=2)
+        reply = await plugin.handle(proactive_ctx())
+        self.assertEqual(reply.at, 'wxid_zhang')
+        # 同一个名字不用查两遍，也不能把 @ 换到别人身上
+        self.assertEqual(self.looked, [('456@chatroom', '张三')])
+
+    async def test_notes_tell_the_model_what_happened(self):
+        """ 工具回执要说清楚 @ 成没成——模型看不到自己在群里发出去的样子。 """
+        plugin = self.plugin([])
+        ctx = proactive_ctx()
+        state: dict = {'at': ''}
+        self.assertIn('这条会 @张三', await plugin._resolve_at({'at': '张三'}, state, ctx))
+        self.assertEqual(state['at'], 'wxid_zhang')
+        self.assertIn('已经 @ 过别人', await plugin._resolve_at({'at': '李四'}, state, ctx))
+        self.assertIn('没找到叫', await plugin._resolve_at({'at': '查无此人'}, {'at': ''}, ctx))
+        self.assertEqual(await plugin._resolve_at({}, {'at': ''}, ctx), '')
+
+    async def test_two_stage_speak_carries_the_at_too(self):
+        """ 两段式也不能是个只会写提示词的空壳。 """
+        ai = ToolAi([AssistantTurn(tool_calls=(_call('speak', intent='问他', at='张三'),))])
+        plugin = ChatPlugin(ai, context_length=10, member_lookup=self.lookup)
+        reply = await plugin.handle(proactive_ctx())
+        self.assertEqual(reply.at, 'wxid_zhang')
+        self.assertEqual(reply.texts, ['收到'])
+
+
 class TestAgentMode(unittest.IsolatedAsyncioTestCase):
     """ 单段式：判断和台词一次做完，回话就是 reply 工具调用，不再叫表达者。 """
 

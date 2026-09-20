@@ -253,6 +253,25 @@ class Wechat:
             self._names[key] = name
         return name or wxid
 
+    async def find_member(self, chatroom: str, name: str) -> str:
+        """ 按显示名在群里找人，返回 wxid；找不到或不止一个候选就返回空串。
+
+        @ 错人比不 @ 更难看，所以只做精确匹配（群昵称 / 备注 / 昵称）和唯一的子串匹配。
+        """
+        if not name or not chatroom.endswith('@chatroom'):
+            return ''
+        try:
+            members = (await self._bot.get_chatroom(chatroom)).members
+        except Exception as e:
+            logger.warning(f'取群成员失败（{chatroom}）: {e}')
+            return ''
+        exact = [m.wxid for m in members
+                 if name in (m.display_name, m.group_nickname, m.nickname)]
+        if exact:
+            return exact[0]
+        loose = [m.wxid for m in members if name in m.name]
+        return loose[0] if len(loose) == 1 else ''
+
     async def _resolve_contact(self, wxid: str) -> str:
         """ 从联系人表查显示名，查不到就现查一次。
 
@@ -269,13 +288,16 @@ class Wechat:
             logger.debug(f'failed to resolve contact {wxid}: {e}')
         return ''
 
-    async def fetch_history(self, wxid: str, count: int = 50) -> ChatWindow:
+    async def fetch_history(self, wxid: str, count: int = 50, query: str = '') -> ChatWindow:
         """ 获取群或联系人的聊天记录
+
+        :param query: 内容关键字，给了就只取命中的（daemon 做 LIKE 匹配），
+            同一条件的排序和条数含义不变：最多 count 条、最新在前
 
         返回一个列表。每个元素为一个元组，格式为 (发送者名称, 消息内容, 创建时间)
         """
         messages = await self._bot.get_messages(limit=count, contact=wxid, reverse=True,
-                                                exclude_system=True)
+                                                query=query or None, exclude_system=True)
 
         result = ChatWindow()
         for msg in messages:

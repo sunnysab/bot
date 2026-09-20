@@ -161,6 +161,22 @@ class Bot:
                 self.save_emojis()
         return merged[:EMOJI_RESULT_LIMIT]
 
+    async def lookup_member(self, chat: str, name: str) -> str:
+        """ 群昵称 → wxid。@ 人用：模型看到的是名字，daemon 要的是 wxid。 """
+        return await self._wechat.find_member(chat, name)
+
+    async def search_messages(self, chat: str, keyword: str, count: int = 40) -> str:
+        """ 给模型查更早的聊天记录。命中就返回 transcript 形状的几行，没命中返回空串。
+
+        搜的是 daemon 本地缓存的记录（它同步微信本机的库），只能搜到它见过的那部分。
+        """
+        window = await self._wechat.fetch_history(chat, count, query=keyword)
+        names = await self._wechat.sender_names(chat, [r.sender for r in window if not r.is_self])
+        for record in window:
+            if not record.is_self and record.sender in names:
+                record.sender = names[record.sender]
+        return str(window)
+
     def steal_emoji(self, msg) -> None:
         """ 群里发的表情顺手存下来。
 
@@ -293,7 +309,7 @@ class Bot:
 
     def enqueue(self, chat: str, text: str = '', sender: str = '', reply_to=None,
                 chat_name: str = '', emoji: Emoji | None = None, verbatim: bool = False,
-                ref_svrid: int = 0) -> None:
+                ref_svrid: int = 0, at_list: str = '') -> None:
         """ 决策已定：**先把这条写进历史**，再交给出站队列。
 
         历史在决策时就落，不等真发出去。回复会卡在打字延迟和最小发送间隔里好几秒，
@@ -317,7 +333,7 @@ class Bot:
             record = self._history.push_message(chat, sender, stored, int(time.time()), is_self=True)
         if final:
             self.outbox.put(chat, final, sender=sender, reply_to=reply_to, chat_name=chat_name,
-                            record=record, ref_svrid=ref_svrid)
+                            record=record, ref_svrid=ref_svrid, at_list=at_list)
         if emoji:
             # 表情排在文字后面：先说一句，再补个表情收尾。
             # 同轮既有文字又有表情时，历史里记的是文字那条，表情不重复挂一个 record
@@ -332,6 +348,7 @@ class Bot:
         try:
             if item.text:
                 result = await self._wechat.send_text(item.text, item.receiver,
+                                                      at_list=item.at_list or None,
                                                       ref_svrid=item.ref_svrid or None)
                 daemon_id = _daemon_id(result)
             if item.emoji:
@@ -456,14 +473,16 @@ class Bot:
         texts: list[str] = []
         emoji = None
         verbatim = False
+        at = ''
         for plugin in self._plugins.get_plugins_for_contact(source):
             reply = await plugin.handle(ctx) or Reply()
             texts.extend(reply.texts)
             emoji = emoji or reply.emoji
             verbatim = verbatim or reply.verbatim
+            at = at or reply.at
             if reply.stop:
                 break
-        return Reply(texts=texts, emoji=emoji, verbatim=verbatim)
+        return Reply(texts=texts, emoji=emoji, verbatim=verbatim, at=at)
 
     def _schedule_turn(self, msg: Message, self_name: str, source: str) -> None:
         """ 把这条消息排进它所在会话的「当前这一块」，交由后台任务回复。
@@ -531,7 +550,7 @@ class Bot:
         for text in texts:
             self.enqueue(msg.reply_target, text, sender=self_name,
                          reply_to=msg.msg_id, chat_name=source, verbatim=response.verbatim,
-                         ref_svrid=self._quote_target(msg))
+                         ref_svrid=self._quote_target(msg), at_list=response.at)
         if response.emoji:
             self.enqueue(msg.reply_target, sender=self_name, reply_to=msg.msg_id,
                          chat_name=source, emoji=response.emoji)

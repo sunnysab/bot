@@ -234,6 +234,8 @@ class Runtime:
                           emoji_search=self.bot.search_emoji, enable_tools=config.enable_tools,
                           planner_rounds=config.planner_rounds, emoji_policy=self.emoji_policy,
                           reply_mode=config.reply_mode, revoke=self.bot.revoke,
+                          member_lookup=self.bot.lookup_member,
+                          message_search=self.bot.search_messages,
                           agent_max_replies=config.agent_max_replies,
                           personas=self.personas,
                           timeout=config.request_timeout)

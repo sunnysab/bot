@@ -52,6 +52,14 @@ EmojiSearch = Callable[[str], Awaitable[list[Emoji]]]
 # 没注入就不挂这个工具。
 Revoke = Callable[[str, int, str], Awaitable[str]]
 
+# 找群成员：模型看到的是群昵称，daemon 要的是 wxid。由 Bot 提供。
+# 入参 (群, 昵称)，返回 wxid；没这个人返回空串。
+MemberLookup = Callable[[str, str], Awaitable[str]]
+
+# 查历史：当前窗口里没有的更早的记录，由模型自己发起去搜。
+# 入参 (会话, 关键词)，返回拼好的几行记录；没命中返回空串。
+MessageSearch = Callable[[str, str], Awaitable[str]]
+
 # 决策者的工具。规则的细节写在这里，planner.txt 里只列一行——
 # 模型看得到每个工具自己的说明书，比在系统提示里堆一大段更不容易漏。
 SEARCH_EMOJI = ToolSpec(
@@ -76,17 +84,22 @@ SEND_EMOJI = ToolSpec(
 SPEAK = ToolSpec(
     name='speak',
     description='让机器人用文字说一句。intent 是你想表达什么，不是台词本身——'
-                '台词由别人负责写。调用这个工具本轮就结束了。',
+                '台词由别人负责写。调用这个工具本轮就结束了。'
+                'at 只在群聊里给：填某个群友的昵称，这一句就会 @ 他。',
     parameters={'type': 'object',
                 'properties': {'intent': {'type': 'string', 'description': '想表达什么'},
-                               'emotion': {'type': 'string', 'description': '什么情绪'}},
+                               'emotion': {'type': 'string', 'description': '什么情绪'},
+                               'at': {'type': 'string', 'description': '要 @ 的群友昵称，不 @ 就别填'}},
                 'required': ['intent']})
 REPLY = ToolSpec(
     name='reply',
     description='用机器人的身份在群里说一句。text 就是要发出去的原话本身（不是意图、不是转述），'
-                '写法像微信打字，一轮只说一条。调完本轮就结束，什么都不调就是这一轮不发言。',
+                '写法像微信打字，一轮只说一条。调完本轮就结束，什么都不调就是这一轮不发言。'
+                'at 只在群聊里给：填某个群友的昵称，这一句就会 @ 他；'
+                '如果对方是在点名问你，@ 回去更清楚。',
     parameters={'type': 'object',
-                'properties': {'text': {'type': 'string', 'description': '要发出去的原话'}},
+                'properties': {'text': {'type': 'string', 'description': '要发出去的原话'},
+                               'at': {'type': 'string', 'description': '要 @ 的群友昵称，不 @ 就别填'}},
                 'required': ['text']})
 REVOKE = ToolSpec(
     name='revoke',
@@ -96,6 +109,15 @@ REVOKE = ToolSpec(
     parameters={'type': 'object',
                 'properties': {'index': {'type': 'integer', 'description': '1 = 最近一条'},
                                'text': {'type': 'string', 'description': '原话里的一小段'}}})
+SEARCH_MESSAGES = ToolSpec(
+    name='search_messages',
+    description='在**更早的**聊天记录里按关键词找回原话，返回带时间和说话人的几条。'
+                '当前聊天记录里只看得到最近一段，别人说「你刚才说的那个」「上次」「之前」'
+                '而你想不起来是什么时，用它。关键词给具体一点（人名、话题里的词），'
+                '别拿「的」「这个」这种泛词去搜。搜不到就是真没有，别反复搜索。',
+    parameters={'type': 'object',
+                'properties': {'keyword': {'type': 'string', 'description': '要找的原话里的词'}},
+                'required': ['keyword']})
 
 REVOKE_PER_TURN = 3      # 一轮最多撤几条：撤回不可逆，别让模型连点
 
@@ -111,6 +133,7 @@ class Reply:
     texts: list[str] = field(default_factory=list)
     stop: bool = False
     emoji: Emoji | None = None      # 本轮要发的表情；发送由 Bot 统一走队列，插件不发
+    at: str = ''                    # 要 @ 的群成员 wxid；由 Bot 解析名字后带回
     verbatim: bool = False          # 一字不改发出去（复读机：抖错别字就不叫复读了）
 
 
@@ -428,7 +451,9 @@ class ChatPlugin(Plugin):
                  planner_rounds: int = 3, emoji_policy: EmojiPolicy | None = None,
                  reply_mode: str = 'two_stage', revoke: Revoke | None = None,
                  timeout: float = 60.0, rng: random.Random | None = None,
-                 agent_max_replies: int = 1, personas: PersonaStore | None = None):
+                 agent_max_replies: int = 1, personas: PersonaStore | None = None,
+                 member_lookup: MemberLookup | None = None,
+                 message_search: MessageSearch | None = None):
         """ 聊天插件
 
         :param ai_provider: AI 服务提供者
@@ -451,6 +476,8 @@ class ChatPlugin(Plugin):
         :param rng: 抽临时风格用的随机源，测试时可注入
         :param agent_max_replies: agent 模式一轮最多发几条消息
         :param personas: 分会话人设覆盖；传了就按会话取人设，没覆盖的回落到 persona
+        :param member_lookup: 群昵称 → wxid；不传就 @ 不了人
+        :param message_search: 搜更早聊天记录；不传就没 search_messages 工具
         """
         self.ai = ai_provider
         self._planner_ai = planner_ai
@@ -469,6 +496,8 @@ class ChatPlugin(Plugin):
         self.emoji_policy = emoji_policy or EmojiPolicy()
         self.reply_mode = reply_mode
         self.revoke = revoke
+        self.member_lookup = member_lookup
+        self.message_search = message_search
         self.timeout = timeout
         self.rng = rng
         self.agent_max_replies = agent_max_replies
@@ -528,10 +557,11 @@ class ChatPlugin(Plugin):
         started = time.perf_counter()
         plan = ''
         emoji: Emoji | None = None
+        at = ''
         if self.enable_planner:
             self._emit(ctx, Status.DECIDING, f'{necessity.kind} · 分数 {necessity.score}')
             if self._tools_ready:
-                decided, emoji, tool_log = await self._plan_with_tools(ctx, blocks, transcript)
+                decided, emoji, at, tool_log = await self._plan_with_tools(ctx, blocks, transcript)
             else:
                 decided, tool_log = await self._plan(ctx, necessity, blocks, transcript), ''
             # 决策本身没跑通（超时/报错）：不算「不发言」，照走表达者
@@ -562,7 +592,7 @@ class ChatPlugin(Plugin):
             self._emit(ctx, Status.EMPTY_REPLY)
             return self._silent(ctx, now, emoji=emoji)
         self.policy.record(ctx, spoke=True, now=now)
-        return Reply(texts=texts, emoji=emoji)
+        return Reply(texts=texts, emoji=emoji, at=at)
 
     def _emit(self, ctx: MessageContext, status: str, detail: str = '', **fields) -> None:
         """ 把这一轮的状态发给管理后台。失败也不影响聊天（bus 自己吞异常）。
@@ -638,28 +668,66 @@ class ChatPlugin(Plugin):
 
         return revoke
 
+    def _message_tools(self, ctx: MessageContext) -> list:
+        """ 查更早的聊天记录。当前窗口里搜不到的东西，模型自己发起去搜。 """
+        if self.message_search is None:
+            return []
+
+        async def search(arguments: dict) -> ToolResult:
+            keyword = arg_str(arguments, 'keyword')
+            if not keyword:
+                return ToolResult('没给关键词，什么也没搜到。')
+            found = await self.message_search(ctx.msg.reply_target, keyword)
+            if not found:
+                return ToolResult(f'更早的记录里没搜到跟「{keyword}」有关的，换个词或者当你不知道。')
+            return ToolResult(f'更早的记录里翻到这些（只看跟当前话题有关的）：\n{found}')
+
+        return [(SEARCH_MESSAGES, search)]
+
+    async def _resolve_at(self, arguments: dict, state: dict, ctx: MessageContext) -> str:
+        """ 解析 @ 目标，把 wxid 存进 state（本轮结束时由 Reply 带出去给 Bot 发）。
+
+        返回一句给模型看的回执；没提 @ 就返回空串。名字对不上人时不拦回复——
+        @ 不到人不是不发这条消息的理由。
+        """
+        name = arg_str(arguments, 'at')
+        if not name:
+            return ''
+        if not ctx.msg.is_chatroom:
+            return '（这是私聊，@ 不了人。）'
+        if self.member_lookup is None:
+            return '（这会儿 @ 不了人。）'
+        if state.get('at'):
+            return f'（这一轮已经 @ 过别人了，「{name}」没算。）'
+        wxid = await self.member_lookup(ctx.msg.reply_target, name)
+        if not wxid:
+            return f'（群里没找到叫「{name}」的人，这条没 @ 成。）'
+        state['at'] = wxid
+        return f'（这条会 @{name}。）'
+
     def _tools(self, state: dict, terminal: ToolSpec, handler, ctx: MessageContext) -> list:
-        """ 一轮的完整工具集：表情对 + 终点动作（speak / reply）+（可选）撤回。 """
+        """ 一轮的完整工具集：表情对 + 终点动作（speak / reply）+ 查历史 +（可选）撤回。 """
         tools = self._emoji_tools(state)
         tools.append((terminal, handler))
+        tools.extend(self._message_tools(ctx))
         if self.revoke is not None:
             tools.append((REVOKE, self._revoke_tool(ctx)))
         return tools
 
     async def _plan_with_tools(self, ctx: MessageContext, blocks: dict[str, str],
-                               transcript: str) -> tuple[Plan | None, Emoji | None, str]:
-        """ 带工具的决策循环（两段式）。返回（决策, 选中的表情, 工具调用记录）。
+                               transcript: str) -> tuple[Plan | None, Emoji | None, str, str]:
+        """ 带工具的决策循环（两段式）。返回（决策, 选中的表情, 要 @ 的人, 工具调用记录）。
 
         模型只挑动作（搜表情 / 选一张 / 说要说话），不写台词——台词还是表达者的事。
         一个工具都不调 = 本轮不发言；调了动作类工具本轮就结束。
         """
-        state: dict = {'candidates': [], 'picked': []}
+        state: dict = {'candidates': [], 'picked': [], 'at': ''}
         said = {'intent': '', 'emotion': ''}
 
         async def speak(arguments: dict) -> ToolResult:
             said['intent'] = arg_str(arguments, 'intent')
             said['emotion'] = arg_str(arguments, 'emotion')
-            return ToolResult('好，交给表达者。', stop=True)
+            return ToolResult(f'好，交给表达者。{await self._resolve_at(arguments, state, ctx)}', stop=True)
 
         toolbox = Toolbox(self._tools(state, SPEAK, speak, ctx))
         prompt = await self._planner_prompt(ctx, toolbox.names)
@@ -686,19 +754,19 @@ class ChatPlugin(Plugin):
         emoji = state['picked'][0] if state['picked'] else None
         log = toolbox.render_calls()
         if emoji is None and not said['intent']:
-            return Plan(speak=False, analysis=analysis), None, log
+            return Plan(speak=False, analysis=analysis), None, '', log
         plan = Plan(speak=bool(said['intent']), analysis=analysis, intent=said['intent'],
                     emotion=said['emotion'], emoji=emoji.desc if emoji else '')
-        return plan, emoji, log
+        return plan, emoji, state['at'], log
 
     async def _reply_agent(self, ctx: MessageContext, blocks: dict[str, str], transcript: str,
-                           must_speak: bool) -> tuple[list[str], Emoji | None, str]:
+                           must_speak: bool) -> tuple[list[str], Emoji | None, str, str]:
         """ 单段式：模型自己判断、自己写台词，回话就是一次 `reply` 调用。
 
         与 _plan_with_tools 只差终点动作：那边调 speak（只说意图），这边调 reply（原话）。
-        表情工具、撤回工具、循环骨架完全一致。
+        表情工具、查历史工具、撤回工具、循环骨架完全一致。
         """
-        state: dict = {'candidates': [], 'picked': []}
+        state: dict = {'candidates': [], 'picked': [], 'at': ''}
         replies: list[str] = []
 
         async def reply(arguments: dict) -> ToolResult:
@@ -708,9 +776,10 @@ class ChatPlugin(Plugin):
             if len(replies) >= self.agent_max_replies:
                 return ToolResult('这一轮说得够多了，剩下的下轮再说。')
             replies.append(text)
+            note = await self._resolve_at(arguments, state, ctx)
             # stop=True：调完本轮就收，别再多跑一轮去确认。同一轮里的多个 reply
             # 照样全部执行（Toolbox.call 是先把这轮的调用跑完再 break），所以多行不受影响
-            return ToolResult(f'好，这条算说完了（第 {len(replies)} 条）。', stop=True)
+            return ToolResult(f'好，这条算说完了（第 {len(replies)} 条）。{note}', stop=True)
 
         toolbox = Toolbox(self._tools(state, REPLY, reply, ctx))
         prompt = await self._agent_prompt(ctx, toolbox.names)
@@ -739,21 +808,22 @@ class ChatPlugin(Plugin):
                 messages.append(tool_message(call, result.content))
             if stopped:
                 break
-        return replies, (state['picked'][0] if state['picked'] else None), toolbox.render_calls()
+        return (replies, (state['picked'][0] if state['picked'] else None),
+                state['at'], toolbox.render_calls())
 
     async def _agent_round(self, ctx: MessageContext, blocks: dict[str, str], transcript: str,
                            must_speak: bool, necessity: NecessityScore, now: float) -> Reply:
         """ agent 模式的一轮：决策和表达在同一次调用里完成，没有表达者这一步。 """
         self._emit(ctx, Status.DECIDING, f'{necessity.kind} · agent')
         started = time.perf_counter()
-        texts, emoji, tool_log = await self._reply_agent(ctx, blocks, transcript, must_speak)
+        texts, emoji, at, tool_log = await self._reply_agent(ctx, blocks, transcript, must_speak)
         self._trace(ctx, necessity, transcript, texts or None, self._elapsed(started), tool_log)
         cleaned = self._clean(texts, ctx)
         if not cleaned:
             self._emit(ctx, Status.PLANNER_SILENT, 'agent 选择不发言')
             return self._silent(ctx, now, emoji=emoji)
         self.policy.record(ctx, spoke=True, now=now)
-        return Reply(texts=cleaned, emoji=emoji)
+        return Reply(texts=cleaned, emoji=emoji, at=at)
 
     async def _ask_tools(self, prompt: str, messages: list[dict], tools: list[dict],
                          ctx: MessageContext) -> AssistantTurn | None:
