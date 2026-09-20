@@ -236,10 +236,10 @@ class EndProcessing(Plugin):
 
 
 class RepeatPlugin(Plugin):
-    def __init__(self, repeat_count: int = 2, context_length: int = 10, max_length: int = 20):
+    def __init__(self, repeat_count: int = 3, context_length: int = 10, max_length: int = 20):
         """ 跟队形（复读机）插件
 
-        :param repeat_count: 队形阈值
+        :param repeat_count: 队形阈值。三条起才叫队形，两条更像碰巧重了
         :param context_length: 拉取的上下文长度
         :param max_length: 单条队形的最大长度。 python 会计算中文字符长度，一个中文字符算一个长度。
         """

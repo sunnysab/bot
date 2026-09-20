@@ -565,10 +565,12 @@ class Bot:
             bus.publish(Status.PLACEHOLDER_BLOCKED, chat_id=msg.reply_target, chat_name=source,
                         msg_id=msg.msg_id,
                         detail=f'拦下 {len(response.texts) - len(texts)} 条媒体占位符')
+        # 复读机是跟队形，不引用具体某条：引用了就像专门回那个人，不像凑热闹
+        ref_svrid = 0 if response.verbatim else self._quote_target(msg)
         for text in texts:
             self.enqueue(msg.reply_target, text, sender=self_name,
                          reply_to=msg.msg_id, chat_name=source, verbatim=response.verbatim,
-                         ref_svrid=self._quote_target(msg), at_list=response.at)
+                         ref_svrid=ref_svrid, at_list=response.at)
         if response.emoji:
             self.enqueue(msg.reply_target, sender=self_name, reply_to=msg.msg_id,
                          chat_name=source, emoji=response.emoji)

@@ -556,9 +556,30 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
 
         await self.bot.on_message(line('牛啊牛啊', 'Alice'))
         await self.bot.on_message(line('牛啊牛啊', 'Bob'))
+        await self.bot.on_message(line('牛啊牛啊', 'Carol'))
         await asyncio.sleep(0.05)
 
         self.assertEqual([text for _, text in self.bot._wechat.sent], ['牛啊牛啊'])
+
+    async def test_repeat_does_not_quote(self):
+        """ 跟队形就是跟队形，不该引用某一条（引用像专门回那个人）。 """
+        self.bot.quote_replies = True
+        window = self.bot._history.get_context('456@chatroom')
+        for i in range(8):  # 把群填「乱」，让 _quote_target 有条件返回 svrid
+            window.append(f'用户{i}', f'别人说的{i}', int(time.time()))
+        self.bot.set_default_plugin(RepeatPlugin())
+
+        def line(who):
+            msg = make_msg(text='牛啊')
+            msg.sender_name = who
+            return msg
+
+        for who in ('Alice', 'Bob', 'Carol'):
+            await self.bot.on_message(line(who))
+        await asyncio.sleep(0.1)
+
+        self.assertEqual([text for _, text in self.bot._wechat.sent], ['牛啊'])
+        self.assertEqual(self.bot._wechat.refs, [None])
 
     async def test_typos_are_applied_on_send_and_in_history(self):
         """ 错别字在出站那一刻抖，历史里记的也得是抖过的版本。 """

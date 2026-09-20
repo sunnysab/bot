@@ -498,6 +498,7 @@ class TestRepeatPlugin(unittest.IsolatedAsyncioTestCase):
         window.append('Bob', '[表情：欢迎]', 2)
         window.append('Carol', '牛啊', 3)
         window.append('Dave', '[表情：欢迎]', 4)
+        window.append('Eve', '牛啊', 5)
         reply = await RepeatPlugin().handle(make_ctx(make_msg(), history=window))
         self.assertEqual(reply.texts, ['牛啊'])
 
@@ -507,6 +508,7 @@ class TestRepeatPlugin(unittest.IsolatedAsyncioTestCase):
         window = ChatWindow()
         window.append('Alice', '这啥 官网？（引用前文的消息：[图片]）', 1)
         window.append('Bob', '这啥 官网？（引用前文的消息：[图片]）', 2)
+        window.append('Carol', '这啥 官网？（引用前文的消息：[图片]）', 3)
         reply = await RepeatPlugin().handle(make_ctx(make_msg(), history=window))
         self.assertEqual(reply.texts, ['这啥 官网？'])
 
@@ -514,6 +516,7 @@ class TestRepeatPlugin(unittest.IsolatedAsyncioTestCase):
         window = ChatWindow()
         window.append('Alice', '牛啊', 1)
         window.append('Bob', '牛啊', 2)
+        window.append('Carol', '牛啊', 3)
         reply = await RepeatPlugin().handle(make_ctx(make_msg(), history=window))
         self.assertEqual(reply.texts, ['牛啊'])
         self.assertTrue(reply.stop)
@@ -522,7 +525,8 @@ class TestRepeatPlugin(unittest.IsolatedAsyncioTestCase):
         window = ChatWindow(sample_history())
         window.append('Alice', '牛啊', 1)
         window.append('Bob', '牛啊', 2)
-        window.append('Bot', '牛啊', 3, is_self=True)
+        window.append('Carol', '牛啊', 3)
+        window.append('Bot', '牛啊', 4, is_self=True)
         reply = await RepeatPlugin().handle(make_ctx(make_msg(), history=window))
         self.assertIsNone(reply)
 
