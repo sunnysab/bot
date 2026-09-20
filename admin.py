@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import sqlite3
@@ -57,6 +58,7 @@ DEFAULT_PORT = 8099          # 8080 在本机被 iptv 占了，别用
 CHATS_LIMIT = 50
 MESSAGES_LIMIT = 300         # v1 一次拉满，daemon 的 get_messages 还不能翻页
 RPC_TIMEOUT = 15.0
+LOGIN_TIMEOUT = 60.0          # 取二维码要现走一次短链握手 + getloginqrcode，比普通 RPC 慢得多
 MEDIA_TIMEOUT = 60.0         # 第一次要现下（CDN 握手 + 拉字节），比普通 RPC 慢得多
 MEDIA_CONCURRENCY = 3        # 面板同时向 daemon 要几个附件：daemon 的 CDN 回退不持短链锁
 LOG_TAIL_BYTES = 256 * 1024  # 只看日志尾巴，不把整份读进内存
@@ -352,9 +354,9 @@ class Admin:
         daemon: dict = {'ok': False}
         try:
             status = self.call(self._wechat.status(), timeout=5.0)
-            daemon = {'ok': True,
+            daemon = {'ok': True, 'logged_in': bool(status.get('logged_in')),
                      'wxid': status.get('wxid', ''), 'nickname': status.get('nickname', ''),
-                     'uin': status.get('uin')}
+                     'uin': status.get('uin'), 'status': status.get('status')}
         except Exception as e:  # noqa: BLE001 —— daemon 挂了也要能把面板打开
             # 带上类型名：`str(TimeoutError())` 是空串，面板就会显示“daemon 取不到状态”却什么都
             # 说不出来——那正是最难查的一种失败
@@ -380,6 +382,31 @@ class Admin:
                          'typo': bot.typo_count},
             'uptime': round(now - _STARTED_AT, 1),
         }
+
+    # ---------- 登录 ----------
+
+    def login_qr(self) -> dict:
+        """ 面板扫码登录第一步：取二维码。png 转 base64，面板直接塞进 data: URL。 """
+        qr = self.call(self._wechat.login_qr(), timeout=LOGIN_TIMEOUT)
+        return {'uuid': qr.uuid, 'url': qr.url, 'expires_in': qr.expires_in,
+                'png': base64.b64encode(qr.png).decode() if qr.png else ''}
+
+    def login_poll(self) -> dict:
+        """ 轮询一次扫码状态。daemon 报「没有进行中的登录」（重启 / 流程结束）不是故障。 """
+        try:
+            return self.call(self._wechat.login_qr_poll())
+        except Exception as e:  # noqa: BLE001
+            return {'status': 'idle', 'error': str(e)}
+
+    def login_cancel(self) -> dict:
+        try:
+            return self.call(self._wechat.login_qr_cancel())
+        except Exception as e:  # noqa: BLE001
+            return {'status': 'idle', 'error': str(e)}
+
+    def logout(self) -> dict:
+        """ 退出登录：daemon 注销并停长链。bot 本身不重启，等下次扫码。 """
+        return self.call(self._wechat.logout())
 
     def chats(self) -> list[dict]:
         out = []
@@ -742,6 +769,8 @@ class Admin:
                 return self._json(handler, self.state())
             if route == '/api/health':
                 return self._json(handler, self.health())
+            if route == '/api/login':
+                return self._json(handler, self.login_poll())
             if route == '/api/chats':
                 return self._json(handler, {'chats': self.chats()})
             if route == '/api/messages':
@@ -794,6 +823,12 @@ class Admin:
         try:
             if route == '/api/dry_run':
                 return self._json(handler, self.set_dry_run(bool(payload.get('on'))))
+            if route == '/api/login':
+                return self._json(handler, self.login_qr())
+            if route == '/api/login_cancel':
+                return self._json(handler, self.login_cancel())
+            if route == '/api/logout':
+                return self._json(handler, self.logout())
             if route == '/api/send':
                 return self._json(handler, self.send(payload.get('chat', ''), payload.get('text', '')))
             if route == '/api/focus':
@@ -1021,6 +1056,22 @@ def _self_check() -> None:
         raise AssertionError('非数字 msg_id 应该被拒')
     except ValueError:
         pass
+
+    # 登录卡：二维码出 base64（面板直接塞 data: URL），轮询拿不到进行中的登录不能报 500
+    qr = types.SimpleNamespace(uuid='u1', url='https://weixin.qq.com/x', expires_in=300, png=b'\x89PNG')
+
+    async def fake_login_qr():
+        return qr
+
+    async def fake_login_poll():
+        raise RuntimeError('没有进行中的扫码登录（先调 login_qr_start）')
+
+    runtime.bot.wechat.login_qr = fake_login_qr
+    runtime.bot.wechat.login_qr_poll = fake_login_poll
+    box = admin.login_qr()
+    assert box == {'uuid': 'u1', 'url': 'https://weixin.qq.com/x', 'expires_in': 300,
+                   'png': base64.b64encode(b'\x89PNG').decode()}, box
+    assert admin.login_poll()['status'] == 'idle', admin.login_poll()
 
     # 「为什么没回」抽屉：没有 trace 也不能炸
     drawer = admin.trace(9202842881785760589)

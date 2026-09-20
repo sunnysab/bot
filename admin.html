@@ -133,6 +133,7 @@
     <div class="tabs">
       <button data-tab="trace" class="on">这条消息</button>
       <button data-tab="health">健康</button>
+      <button data-tab="login">登录</button>
       <button data-tab="log">日志</button>
       <button data-tab="stats">统计</button>
       <button data-tab="assets">资料</button>
@@ -140,6 +141,7 @@
     </div>
     <div id="panel-trace"></div>
     <div id="panel-health" style="display:none"></div>
+    <div id="panel-login" style="display:none"></div>
     <div id="panel-log" style="display:none"></div>
     <div id="panel-stats" style="display:none"></div>
     <div id="panel-assets" style="display:none"></div>
@@ -165,9 +167,10 @@ const $ = s => document.querySelector(s);
 // 「允许回复」名单、分会话人设都按显示名存，插件链也按显示名分发；
 // peer id（`xxx@chatroom` / `wxid_xxx`）只用来调 /api/messages、/api/media
 // 这类按会话取数据的接口。混用会写出一个和读取对不上的记录（已踩过一次）。
-// 后台 500 时返回的是 {error}，直接 json() 会让调用方拿到 undefined 再炸掉
-// 整个初始化（启动竞态时 /api/chats 就是这样把页面留白的）。失败一律给 {}
-const get = async u => { const r = await fetch(u); return r.ok ? r.json() : {}; };
+// 后台 500 时返回的是 {error}。以前失败一律给 {}，于是调用方只能瞎猜——会话列表
+// 就变成了「daemon 可能还没起」这种废话。现在照常解析：调用方要么读 error 说清楚，
+// 要么当没这回事，拿到的仍是普通对象，不会炸
+const get = async u => { const r = await fetch(u); return await r.json().catch(() => ({})); };
 const post = async (u, body) => (await fetch(u, {method:'POST', headers:{'Content-Type':'application/json'},
                                                 body: JSON.stringify(body)})).json();
 
@@ -184,7 +187,14 @@ window.mediaFail = el => {
 };
 
 async function loadChats(){
-  ({chats = []} = await get('/api/chats'));
+  const data = await get('/api/chats');
+  chats = data.chats || [];      // 显式覆盖：登出后不能留着上一版那份列表
+  if(!chats.length){
+    $('#chats').innerHTML = `<div class="empty">${esc(whyNoChats(data))}</div>`;
+    // 登录随时可能完成：5s 再看一眼（跟 /api/state 同一个节奏）
+    setTimeout(loadChats, 5000);
+    return;
+  }
   $('#chats').innerHTML = chats.map(c =>
     `<div class="chat ${c.chat_id===current?'on':''}" data-chat="${esc(c.chat_id)}" data-name="${esc(c.name)}">
        <div class="n">${esc(c.name)}<span style="display:flex;gap:6px;align-items:center;flex:none">
@@ -192,9 +202,7 @@ async function loadChats(){
          <span class="allow ${c.allowed?'on':''}" title="允许回复" data-on="${c.allowed?1:0}">${c.allowed?'✓':'✕'}</span>
        </span></div>
        <div class="l">${c.allowed?'':'<span class="tag">🔇不回</span>'}${c.focus?'<span class="tag">🎯专注</span>':''}${esc(c.last)}</div>
-     </div>`).join('') || '<div class="empty">没有会话（daemon 可能还没起）</div>';
-  // ponytail: daemon 比面板起得慢（要 load_context），空了就 3s 重试，自愈
-  if(!chats.length) setTimeout(loadChats, 3000);
+     </div>`).join('');
   document.querySelectorAll('.chat').forEach(el => {
     const box = el.querySelector('.allow');
     box.onclick = async e => {
@@ -284,9 +292,11 @@ function patch(msgId, status, detail, target){
 async function poll(){
   try{
     const {seq, events} = await get(`/api/events?since=${since}`);
-    since = seq;
+    // 后台真出错时不能把游标写成 undefined：那会让下一次请求带 ?since=undefined，
+    // 接口从此一直 500，面板就永久「断开」了
+    if(seq !== undefined) since = seq;
     let stale = false, touched = false;
-    for(const e of events){
+    for(const e of events || []){
       // 出站事件靠 reply_to 挂在被回复的那条上（daemon 要发出去才有出站的身份）
       if(e.reply_to) patch(e.reply_to, e.status, e.detail, 'reply');
       if(e.msg_id) patch(e.msg_id, e.status, e.detail, 'own');
@@ -311,13 +321,30 @@ async function state(){
   if(s.scope) $('#scopemode').value = s.scope.mode;   // 多开标签页也能同步
 }
 
+// daemon 的三态：正常 / 未登录 / 取不到状态。头栏和登录卡都看它
+let daemonState = {};
+function daemonHeader(d){
+  daemonState = d || {};
+  const dot = $('#daemondot'), lbl = $('#daemon');
+  dot.className = 'dot ' + ((d.ok && d.logged_in) ? 'ok' : 'bad');
+  lbl.textContent = !d.ok ? 'daemon 取不到状态'
+    : (d.logged_in ? `${d.nickname || d.wxid || ''}（daemon 正常）` : '未登录');
+}
+
+// 会话列表为空就说清楚是哪种空。以前一律写「daemon 可能还没起」——「可能」等于没说
+function whyNoChats(d){
+  if(!d.error) return '这个账号还没有会话';
+  if(daemonState.ok === false) return 'daemon 连不上：' + d.error;
+  return daemonState.logged_in === false
+    ? 'daemon 未登录 —— 右上「详情 → 登录」扫码，登录后这里自动刷新'
+    : '取不到会话：' + d.error;
+}
+
 async function health(){
   let h;
   try{ h = await get('/api/health'); }catch(e){ h = null; }
   if(!h || !h.daemon){ $('#panel-health').innerHTML = '<div class="empty">健康检查失败</div>'; return; }
-  const dot = $('#daemondot'), lbl = $('#daemon');
-  dot.className = 'dot ' + (h.daemon.ok ? 'ok' : 'bad');
-  lbl.textContent = h.daemon.ok ? `${h.daemon.nickname}（daemon 正常）` : 'daemon 取不到状态';
+  daemonHeader(h.daemon);
   const kv = o => Object.entries(o).map(([k,v]) => `<span>${esc(k)}</span><span>${esc(JSON.stringify(v))}</span>`).join('');
   $('#panel-health').innerHTML = `
     <h3>daemon</h3><div class="kv">${kv(h.daemon)}</div>
@@ -348,12 +375,79 @@ async function logsWarn(){
     || '<div class="empty">没有警告</div>';
 }
 
+let qrTimer = null;
+
+function stopQr(){ if(qrTimer){ clearTimeout(qrTimer); qrTimer = null; } }
+
+// 「登录」卡：扫码登录 / 退出登录。二维码由 daemon 现取，状态靠轮询
+// `login_qr_poll`；面板本身不自作主张去等，扫多久都行。
+async function login(){
+  const h = await get('/api/health');
+  if(!h || !h.daemon){ $('#panel-login').innerHTML = '<div class="empty">取不到 daemon 状态</div>'; return; }
+  daemonHeader(h.daemon);
+  if(qrTimer) return;                                // 二维码正扫着：别把它重画掉
+  const d = h.daemon;
+  if(d.logged_in){
+    $('#panel-login').innerHTML = `<h3>已登录</h3>
+      <div class="kv"><span>账号</span><span>${esc(d.nickname||'')}（${esc(d.wxid||'')}）</span></div>
+      <div class="cfg-actions"><button onclick="doLogout()">退出登录</button></div>
+      <div class="detail">退出会服务端注销、停长链并清本地会话材料（凭据保留）。想再上就重新扫码。</div>`;
+    return;
+  }
+  $('#panel-login').innerHTML = `<h3>扫码登录</h3>
+    <div class="detail">daemon 当前未登录${d.status === 'expired' ? '（会话已失效，需重新登录）' : ''}。</div>
+    <div id="qrbox"><button onclick="startQr()">出示二维码</button></div>`;
+}
+
+window.startQr = async () => {
+  const box = $('#qrbox');
+  box.innerHTML = '<div class="detail">正在取二维码…</div>';
+  const r = await post('/api/login', {});
+  if(r.error){ box.innerHTML = `<div class="detail">取二维码失败：${esc(r.error)}</div>`; return; }
+  box.innerHTML = `
+    ${r.png ? `<img alt="登录二维码" src="data:image/png;base64,${r.png}"
+                   style="width:220px;height:220px;image-rendering:pixelated">`
+             : `<div class="detail">daemon 没回图，请自己把 url 生成二维码：<br>${esc(r.url)}</div>`}
+    <div class="detail" id="qrmsg">用手机微信扫一扫（${r.expires_in||300}s 内有效）</div>
+    <button onclick="cancelQr()">取消</button>`;
+  pollQr();
+};
+
+// 串行的 setTimeout 链而不是 setInterval：一次没回来就不再发下一次，不叠请求
+function pollQr(){
+  stopQr();
+  const tick = async () => {
+    const r = await get('/api/login');
+    const msg = $('#qrmsg');
+    if(!msg) return;                                   // 面板已经被重画，停
+    if(r.status === 'logged_in'){
+      stopQr(); msg.textContent = `登录成功：${r.nickname||r.wxid||''}`;
+      setTimeout(() => { if(tab === 'login') login(); }, 800);
+      return;
+    }
+    if(r.status === 'cancelled'){ stopQr(); msg.textContent = '已在手机上取消'; return; }
+    if(r.status === 'idle'){ stopQr(); msg.textContent = '登录流程已结束：' + (r.error||''); return; }
+    if(r.error) msg.textContent = '等待中…（' + r.error + '）';   // Retry：网络拖了一下，接着等
+    qrTimer = setTimeout(tick, 2000);
+  };
+  qrTimer = setTimeout(tick, 2000);
+}
+
+window.cancelQr = async () => { stopQr(); await post('/api/login_cancel', {}); login(); };
+
+window.doLogout = async () => {
+  if(!confirm('退出登录会停掉 daemon 的长链，确认？')) return;
+  const r = await post('/api/logout', {});
+  if(r.error) alert('退出失败：' + r.error);
+  login();
+};
+
 function pickedRow(){
   const el = selected && document.querySelector(`[data-id="${CSS.escape(selected)}"]`);
   return el ? el.querySelector('.body').textContent : '';
 }
 
-const TABS = ['trace','health','log','stats','assets','config'];
+const TABS = ['trace','health','login','log','stats','assets','config'];
 
 async function stats(){
   const hours = window.statsHours || 24;
@@ -554,6 +648,7 @@ async function showPanel(){
     }
     $('#panel-trace').innerHTML = html;
   } else if(tab==='health') await health();
+  else if(tab==='login') await login();
   else if(tab==='log') await logs();
   else if(tab==='stats') await stats();
   else if(tab==='assets') await assets();
@@ -596,7 +691,7 @@ window.pick = id => { selected = id; showPanel();
   setInterval(poll, 1000);
   setInterval(state, 5000);
   setInterval(() => { if(!$('#drawer').classList.contains('hide') && tab==='health') health(); }, 5000);
-  await state(); await loadChats(); await health();
+  await state(); await health(); await loadChats();
 })();
 </script>
 </body>

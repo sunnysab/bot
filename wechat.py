@@ -166,6 +166,25 @@ class Wechat:
         """ daemon 的连接 / 登录状态。管理后台的健康卡用。 """
         return await self._bot.get_status()
 
+    async def login_qr(self):
+        """ 扫码登录第一步：取二维码（`LoginQR`，png 为空时用 url 自行渲染）。
+
+        不要求已有登录态——daemon 启动时就可以是未登录的。
+        """
+        return await self._bot.login_qr()
+
+    async def login_qr_poll(self) -> dict:
+        """ 轮询一次扫码状态：waiting / logged_in / cancelled。 """
+        return await self._bot.login_qr_poll()
+
+    async def login_qr_cancel(self) -> dict:
+        """ 放弃扫码：释放 daemon 的登录锁，让新的登录能开始。 """
+        return await self._bot.login_qr_cancel()
+
+    async def logout(self) -> dict:
+        """ 退出登录：服务端注销 + 停长链 + 清本地会话材料（凭据保留，可再扫）。 """
+        return await self._bot.logout()
+
     async def media_bytes_by_id(self, msg_id: int) -> tuple[bytes, str]:
         """ 取一条消息的附件字节，返回 (data, ext)。**同一个 msg_id 只问 daemon 一次**。
 

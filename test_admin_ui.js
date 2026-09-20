@@ -93,12 +93,32 @@ test('出站消息带 out 类，演习回复单独一行', () => {
 // 回归：admin.js 曾经是普通脚本里的顶层 `const esc`，内联脚本再解构一次
 // `const { esc } = window.AdminUI` 就是重复声明 → SyntaxError，整页脚本停住。
 // 分文件跑、各自 new Function 都测不出来，必须在同一个 context 里依次执行。
-test('admin.js 与 admin.html 的内联脚本能共存于同一个全局作用域', () => {
+// admin.js + admin.html 的内联脚本跑在同一个全局作用域里——分文件各自
+// new Function 测不出重复声明（曾经就这么把整页脚本搞停过）
+function panelContext() {
   const context = vm.createContext(domStub());
   vm.runInContext(fs.readFileSync(path.join(__dirname, 'admin.js'), 'utf8'), context);
+  const inline = fs.readFileSync(path.join(__dirname, 'admin.html'), 'utf8')
+                   .split('<script>')[1].split('</script>')[0];
+  vm.runInContext(inline, context);
+  return context;
+}
+
+test('会话列表为空时说清楚是哪种空，不猜', () => {
+  const context = panelContext();
+  const why = (state, data) => {
+    vm.runInContext(`daemonHeader(${JSON.stringify(state)})`, context);
+    return vm.runInContext(`whyNoChats(${JSON.stringify(data)})`, context);
+  };
+  assert.equal(why({ ok: true, logged_in: false }, { error: '401 session expired' }),
+               'daemon 未登录 —— 右上「详情 → 登录」扫码，登录后这里自动刷新');
+  assert.equal(why({ ok: true, logged_in: true }, { error: 'boom' }), '取不到会话：boom');
+  assert.equal(why({ ok: false }, { error: 'dial fail' }), 'daemon 连不上：dial fail');
+  assert.equal(why({ ok: true, logged_in: true }, {}), '这个账号还没有会话');
+});
+
+test('admin.js 与 admin.html 的内联脚本能共存于同一个全局作用域', () => {
+  const context = panelContext();
   assert.equal(vm.runInContext('Object.keys(window.AdminUI).sort().join(",")', context),
                'GROUP,LABEL,SPIN,chip,cursorsOf,esc,mediaBody,row');
-  const html = fs.readFileSync(path.join(__dirname, 'admin.html'), 'utf8');
-  const inner = html.split('<script>')[1].split('</script>')[0];
-  vm.runInContext(inner, context);   // 报 SyntaxError / TypeError 就让这条测试挂
 });
