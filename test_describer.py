@@ -16,7 +16,7 @@ class FakeAi:
         self.calls = 0
         self.last_max_tokens = None
 
-    async def describe(self, image, max_tokens=64, prompt=''):
+    async def describe(self, image, max_tokens=64, prompt='', model=None):
         self.calls += 1
         self.last_max_tokens = max_tokens
         self.last_prompt = prompt

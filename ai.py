@@ -90,8 +90,12 @@ class AiProvider:
         return None
 
     async def describe(self, image: bytes, max_tokens: int = 1024,
-                       prompt: str = DESCRIBE_PROMPT) -> str | None:
-        """ 识图。prompt 可换：读历史用短的，给表情库补使用场景用 emojis.EMOJI_DESCRIBE_PROMPT。 """
+                       prompt: str = DESCRIBE_PROMPT, model: str | None = None) -> str | None:
+        """ 识图。prompt 可换：读历史用短的，给表情库补使用场景用 emojis.EMOJI_DESCRIBE_PROMPT。
+
+        model 可以单独指定识图模型（`DESCRIBE_MODEL`）：主模型是 thinking 的时候，
+        识图换一个不思考的视觉模型能省掉整段推理开销。留空就用主模型。
+        """
         return None
 
     async def summarize(self, prompt: str, text: str, max_tokens: int = 400) -> str | None:
@@ -187,7 +191,7 @@ class OpenAI(AiProvider):
         return turn
 
     async def describe(self, image: bytes, max_tokens: int = 1024,
-                       prompt: str = DESCRIBE_PROMPT) -> str | None:
+                       prompt: str = DESCRIBE_PROMPT, model: str | None = None) -> str | None:
         """ 识图描述：把图片/表情压成一句短语，写入历史记录。
 
         **只在什么都没吐出来时才重试**：这个模型是 thinking 的，推理也算在 max_tokens
@@ -195,10 +199,10 @@ class OpenAI(AiProvider):
         翻倍只换一次更慢的调用，而整条是被 describer 的 timeout 罩着的，多花的那些秒
         正好会把已经拿到的那半段一起超时丢掉（线上就是这样：截断 → 重试 → 超时 → 空）。
         """
-        text, truncated = await self._describe_once(image, prompt, max_tokens)
+        text, truncated = await self._describe_once(image, prompt, max_tokens, model)
         if not text and truncated and max_tokens < RETRY_CEILING:
             logger.debug(f'识图被截断且没拿到内容（max_tokens={max_tokens}），翻倍重试一次')
-            text, truncated = await self._describe_once(image, prompt, max_tokens * 2)
+            text, truncated = await self._describe_once(image, prompt, max_tokens * 2, model)
         if not text:
             logger.warning(f'识图没拿到内容（{"推理吃完了预算" if truncated else "空回复"}，'
                            f'max_tokens={max_tokens}）：thinking 模型的推理也算在生成预算里，'
@@ -206,11 +210,12 @@ class OpenAI(AiProvider):
         return text or None
 
     async def _describe_once(self, image: bytes, prompt: str,
-                             max_tokens: int) -> tuple[str, bool]:
+                             max_tokens: int, model: str | None = None) -> tuple[str, bool]:
         """ 返回 (文本, 是不是被预算截断的)。 """
+        model = model or self.model
         encoded = base64.b64encode(image).decode()
         response = await self.client.chat.completions.create(
-            model=self.model,
+            model=model,
             temperature=0.3,
             max_tokens=max_tokens,
             messages=[{'role': 'user', 'content': [
@@ -218,7 +223,7 @@ class OpenAI(AiProvider):
                 {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{encoded}'}},
             ]}],
         )
-        usage.add(response.usage, self.model)
+        usage.add(response.usage, model)
         choice = response.choices[0]
         text = (choice.message.content or '').strip()
         if not text:
@@ -285,7 +290,7 @@ def _self_check() -> None:
         provider = object.__new__(OpenAI)          # 不跑 __init__，不建 client
         calls: list[int] = []
 
-        async def fake(image, prompt, budget):
+        async def fake(image, prompt, budget, model=None):
             calls.append(budget)
             return ('', True) if budget < 2048 else ('好', False)
 
@@ -295,7 +300,7 @@ def _self_check() -> None:
         # 已经到顶就不再翻倍，返回 None（调用方会记警告）
         calls.clear()
 
-        async def always_truncated(image, prompt, budget):
+        async def always_truncated(image, prompt, budget, model=None):
             calls.append(budget)
             return ('', True)
 
@@ -306,13 +311,23 @@ def _self_check() -> None:
         # 还可能被 describer 的 timeout 把已经拿到的这段一起丢掉
         calls.clear()
 
-        async def truncated_with_text(image, prompt, budget):
+        async def truncated_with_text(image, prompt, budget, model=None):
             calls.append(budget)
             return ('文字：菜单', True)
 
         provider._describe_once = truncated_with_text
         assert await provider.describe(b'x', max_tokens=4096) == '文字：菜单'
         assert calls == [4096], calls
+        # 识图模型可以单独指定（DESCRIBE_MODEL），要真的透传下去
+        seen: list[str | None] = []
+
+        async def capture(image, prompt, budget, model=None):
+            seen.append(model)
+            return ('好', False)
+
+        provider._describe_once = capture
+        assert await provider.describe(b'x', max_tokens=512, model='vision-x') == '好'
+        assert seen == ['vision-x'], seen
         # 没截断就不重试
         calls.clear()
         provider._describe_once = lambda *a: _ok()

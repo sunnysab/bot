@@ -911,7 +911,7 @@ class TestEmojiStealing(unittest.IsolatedAsyncioTestCase):
         from describer import EmojiDescriber
 
         class FakeAi:
-            async def describe(self, image, max_tokens=64, prompt=''):
+            async def describe(self, image, max_tokens=64, prompt='', model=None):
                 return '累到不行|加班到很晚、只想趴着的时候'
 
         # 收到就算本群用过一次（热度 1），够格补场景了

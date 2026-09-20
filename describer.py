@@ -157,9 +157,9 @@ class MediaDescriber:
             return None
         if media.kind == 'image':
             description = await self._ai.describe(image, max_tokens=self._image_max_tokens or self._max_tokens,
-                                                  prompt=IMAGE_DESCRIBE_PROMPT)
+                                                  prompt=IMAGE_DESCRIBE_PROMPT, model=self._model)
         else:
-            description = await self._ai.describe(image, max_tokens=self._max_tokens)
+            description = await self._ai.describe(image, max_tokens=self._max_tokens, model=self._model)
         if description:
             version = IMAGE_PROMPT_VERSION if media.kind == 'image' else ''
             self._cache.put(media.md5, media.kind, description, self._model, version)
@@ -225,7 +225,7 @@ class EmojiDescriber:
                     return
                 text = await asyncio.wait_for(
                     self._ai.describe(image, max_tokens=self._max_tokens,
-                                      prompt=EMOJI_DESCRIBE_PROMPT), self._timeout)
+                                      prompt=EMOJI_DESCRIBE_PROMPT, model=self._model), self._timeout)
         except Exception as e:
             logger.warning(f'补表情场景失败 md5={emoji.md5}: {e}')
             return
@@ -247,7 +247,7 @@ if __name__ == '__main__':
             self.reply = reply
             self.prompts: list[str] = []
 
-        async def describe(self, image, max_tokens=64, prompt=''):
+        async def describe(self, image, max_tokens=64, prompt='', model=None):
             self.prompts.append(prompt)
             return self.reply
 

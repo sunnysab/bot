@@ -174,7 +174,8 @@ async def amain(args: argparse.Namespace) -> None:
                 raise SystemExit('没配 DEEPSEEK_KEY，识图跑不了（只导出请加 --export）')
             ai, _planner = _providers(config)
             describer = None if args.dry_run else MediaDescriber(
-                ai, cache, model=config.deepseek_model, concurrency=args.concurrency,
+                ai, cache, model=config.describe_model or config.deepseek_model,
+                concurrency=args.concurrency,
                 timeout=config.describe_timeout, max_tokens=config.describe_max_tokens,
                 image_max_tokens=config.describe_image_max_tokens)
             try:

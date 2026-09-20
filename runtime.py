@@ -123,7 +123,7 @@ HOT_FIELDS = frozenset({
 # 构造期就定死的东西：路径 / 传输 / 识图 / 日志
 RESTART_FIELDS = frozenset({
     'daemon_host', 'daemon_port', 'daemon_unix', 'admin_port', 'log_path', 'log_level',
-    'describe_media', 'media_cache_path', 'describe_concurrency', 'describe_timeout',
+    'describe_media', 'describe_model', 'media_cache_path', 'describe_concurrency', 'describe_timeout',
     'describe_max_tokens', 'describe_image_max_tokens', 'describe_history_limit',
     'image_inline', 'image_shrink_threshold', 'image_shrink_target', 'image_fetch_timeout',
     'image_cache_dir',
@@ -196,17 +196,21 @@ class Runtime:
     def _make_describer(self) -> MediaDescriber | None:
         if not self.config.describe_media:
             return None
-        return MediaDescriber(self.ai, self.media_cache, model=self.config.deepseek_model,
+        return MediaDescriber(self.ai, self.media_cache, model=self._describe_model(),
                               concurrency=self.config.describe_concurrency,
                               timeout=self.config.describe_timeout,
                               max_tokens=self.config.describe_max_tokens,
                               image_max_tokens=self.config.describe_image_max_tokens)
 
+    def _describe_model(self) -> str:
+        """ 识图用的模型：`describe_model` 留空就用主模型。 """
+        return self.config.describe_model or self.config.deepseek_model
+
     def _make_emoji_describer(self) -> EmojiDescriber | None:
         # 给偷来的表情补「使用场景」：微信的 desc 只有一个标签，够搜标签不够搜场合
         if not self.config.describe_media:
             return None
-        return EmojiDescriber(self.ai, self.emojis, model=self.config.deepseek_model,
+        return EmojiDescriber(self.ai, self.emojis, model=self._describe_model(),
                               timeout=self.config.describe_timeout,
                               max_tokens=self.config.describe_max_tokens)
 

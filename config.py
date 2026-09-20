@@ -63,6 +63,9 @@ class Config:
     send_interval: float = 1.0
     # 媒体（图片 / 缺 desc 的表情）识图描述
     describe_media: bool = True
+    # 识图单独用哪个模型。留空 = 主模型。主模型是 thinking 的时候（如 deepseek-v4.1-flash，
+    # 推理和回答共用 max_tokens、开关还关不掉），换一个不思考的视觉模型能省掉整段推理开销
+    describe_model: str = ''
     media_cache_path: str = 'media_cache.db'
     describe_concurrency: int = 2
     # 单张图的下载+识图超时。中转实测一张普通照片要 ~45s（250 个输出 token 就花了
@@ -198,6 +201,7 @@ if __name__ == '__main__':
     assert tuned.backoff_start_after == 3 and tuned.backoff_max_seconds == 60.0, tuned
     assert base.describe_max_tokens == 1024, base     # thinking 模型的推理也算进生成预算
     assert base.describe_image_max_tokens == 4096, base  # 图片要认全字，预算得给够
+    assert base.describe_model == '', base               # 默认跟主模型；要换识图模型才设
     assert base.image_inline is True and base.image_shrink_target == 1024 * 1024, base
     assert base.reply_mode == 'agent', base           # 默认单段式；two_stage 留作对照
     assert base.quote_replies is True, base            # 真机验过，引用回复默认开
