@@ -105,7 +105,7 @@ RANGES: dict[str, tuple[float, float]] = {
     'reply_min_gap': (0.0, 600.0),
     'reply_rate_window': (10.0, 3600.0),
     'reply_rate_max': (1, 50),
-    'reply_context_length': (1, 200),
+    'reply_context_length': (1, 100),      # 上限对齐 ChatWindow.max_history，再大也读不到
     'reply_necessity_threshold': (0, 200),
     'reply_activity_window': (10, 3600),
     'style_probability': (0.0, 1.0),

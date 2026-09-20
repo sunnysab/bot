@@ -79,7 +79,7 @@ class Config:
     reply_necessity_threshold: int = 60
     reply_activity_window: float = 180.0
     # 回复行为（面板上直接调，都不用重启）
-    reply_context_length: int = 30       # 每轮送进模型的历史条数
+    reply_context_length: int = 60       # 每轮送进模型的历史条数（上限 ChatWindow.max_history=100）
     agent_max_replies: int = 1           # agent 模式一轮最多发几条消息
     focus_score_bonus: int = 0           # 专注期加分。默认 0：热群本来就有压力分，
                                          # 再加就成了「热群必回」（见 necessity.PRESSURE_MAX）
@@ -188,7 +188,7 @@ if __name__ == '__main__':
     assert base.reply_mode == 'agent', base           # 默认单段式；two_stage 留作对照
     assert base.quote_replies is True, base            # 真机验过，引用回复默认开
     # 回复行为也能从环境变量调（面板上要能改）
-    assert base.reply_context_length == 30 and base.agent_max_replies == 1, base
+    assert base.reply_context_length == 60 and base.agent_max_replies == 1, base
     assert base.focus_score_bonus == 0 and base.quote_min_activity == 8, base
     assert base.reply_min_gap == 45.0 and base.reply_rate_max == 5, base
     os.environ.update(AGENT_MAX_REPLIES='2', QUOTE_MIN_ACTIVITY='12')
