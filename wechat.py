@@ -224,8 +224,9 @@ class Wechat:
         msg_id 要字节——不关心它缓存在哪个目录、叫什么名字，更不该去扒它的文件。
 
         自己去重的原因：同一张图会被两条路各要一次——当前轮把它内联给模型看，
-        后台给它补一条写进历史的描述——两边几乎同时发生，而 daemon 的 CDN 回退
-        **不持锁**（它自己标了 ponytail），并发过去就是两次 CDN 下载。
+        后台给它补一条写进历史的描述——两边几乎同时发生。daemon 那边同一张图确实只下
+        一次（`fetch_image_original` 先查缓存再拿锁），但省掉的是两次 RPC 往返、
+        以及一次几百 KB 的 base64 搬运。
 
         失败不进缓存：网络抖动、daemon 刚重启都会失败，下次再试一次就好。
         """
@@ -267,6 +268,10 @@ class Wechat:
         而 daemon 的 DL_OPEN 分支按 `DaemonRequest`（action + params）解包，SDK 只塞了
         params，解不出就被 `unwrap_or_default()` 吞掉，最后报 400「缺少 msg_id」——
         报错和真实原因（图片的 XML 里没有 cdnurl）完全无关，查半天。
+
+        图片现在拿到的是**原图**：入站图片的 XML 里只有缩略图 blob（实测 376/376
+        `cdnmidimgurl == cdnthumburl`），daemon 会先走 getmsgimg 取原图，取不到
+        （服务端已回收，`-352`）才回退缩略图，并在响应里标 `original: false`。
 
         这里走普通 RPC 的 `get_media_bytes`（形状是对的），拿 base64 再解回来，
         失败时的报错就是 daemon 的原始报错。

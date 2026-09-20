@@ -59,8 +59,9 @@ CHATS_LIMIT = 50
 MESSAGES_LIMIT = 300         # v1 一次拉满，daemon 的 get_messages 还不能翻页
 RPC_TIMEOUT = 15.0
 LOGIN_TIMEOUT = 60.0          # 取二维码要现走一次短链握手 + getloginqrcode，比普通 RPC 慢得多
-MEDIA_TIMEOUT = 60.0         # 第一次要现下（CDN 握手 + 拉字节），比普通 RPC 慢得多
-MEDIA_CONCURRENCY = 3        # 面板同时向 daemon 要几个附件：daemon 的 CDN 回退不持短链锁
+MEDIA_TIMEOUT = 60.0         # 图片要现下原图（实测 0.5~1.3s），比普通 RPC 慢得多
+MEDIA_CONCURRENCY = 3        # 面板同时向 daemon 要几个附件：daemon 那边原图是一张一张下的，
+                             # 这里限的是「几个 HTTP 线程被慢 RPC 占着」，别把面板的其它请求挤掉
 LOG_TAIL_BYTES = 256 * 1024  # 只看日志尾巴，不把整份读进内存
 
 # 语音转码的派生目录。**原始附件不在这里**——下载和保管都是 daemon 的事，
@@ -285,8 +286,8 @@ class Admin:
         self.port = port
         self.dotenv = DOTENV_PATH      # 自检里会换成临时文件
         self.decisions = DecisionLog(sidecar)
-        # 面板一次刷一堆图，不能把它们同时全砸给 daemon（它的 CDN 回退那次握手的
-        # 并发保护有已知缺口）。这里限一下，顺便不让附件把模型的 daemon 调用挤掉
+        # 面板一次刷一堆图：daemon 那边原图是串行下的（一次一张），这里限的是并发
+        # 占用的 HTTP 线程数，免得附件把面板的其它请求一起拖住
         self._media_gate = threading.Semaphore(MEDIA_CONCURRENCY)
         self.server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -497,8 +498,9 @@ class Admin:
     def media(self, msg_id: str) -> tuple[bytes, str]:
         """ 取一条消息的附件字节，返回 (data, content-type)。
 
-        附件由 daemon 下载和保管（它认得 CDN blob，也有自己的磁盘缓存）；bot 只按
-        msg_id 要字节，不关心它存在哪。
+        图片由 daemon 取**原图**（CDN 那个 blob 只是缩略图，原图只能走 getmsgimg），
+        其它附件按 CDN 那条路；下载和保管都在 daemon（磁盘缓存 `img_<id>.<ext>` /
+        `download_<id>.<ext>`），bot 只按 msg_id 要字节，不关心它存在哪。
         """
         if not msg_id.isdigit():
             raise ValueError(f'msg_id 必须是 daemon 的整数 id：{msg_id!r}')
