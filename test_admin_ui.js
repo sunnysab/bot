@@ -9,7 +9,31 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
 const ui = require('./admin.js');
+
+// 最小 DOM 垫片：只求把两个脚本在**同一个全局作用域**里跑完
+function domStub() {
+  const el = new Proxy({}, {
+    get: (_t, k) => {
+      if (k === 'classList') return { add() {}, remove() {}, toggle() {}, contains() { return false; } };
+      if (k === 'style' || k === 'dataset') return {};
+      if (k === 'replaceWith') return () => {};
+      return typeof k === 'string' ? (() => el) : undefined;
+    },
+    set: () => true,
+  });
+  const sandbox = {
+    document: { querySelector: () => el, querySelectorAll: () => [], createElement: () => el, body: el },
+    setInterval: () => 0,
+    fetch: () => new Promise(() => {}),   // 永不 resolve：异步分支停在那儿就行
+    CSS: { escape: s => s },
+  };
+  sandbox.window = sandbox;
+  return sandbox;
+}
 
 test('esc 转义 HTML 与引号（引号很重要：模板把它用在 data-* 属性里）', () => {
   assert.equal(ui.esc('<a href="x">&</a>'), '&lt;a href=&quot;x&quot;&gt;&amp;&lt;/a&gt;');
@@ -64,4 +88,17 @@ test('出站消息带 out 类，演习回复单独一行', () => {
   assert.match(ui.row({ msg_id: '1', ts: 1, sender: '我', text: 'x', outgoing: true }), /row out/);
   assert.match(ui.row({ msg_id: '1', ts: 1, sender: '我', text: 'x', dry_text: '演习' }),
              /dry-text/);
+});
+
+// 回归：admin.js 曾经是普通脚本里的顶层 `const esc`，内联脚本再解构一次
+// `const { esc } = window.AdminUI` 就是重复声明 → SyntaxError，整页脚本停住。
+// 分文件跑、各自 new Function 都测不出来，必须在同一个 context 里依次执行。
+test('admin.js 与 admin.html 的内联脚本能共存于同一个全局作用域', () => {
+  const context = vm.createContext(domStub());
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'admin.js'), 'utf8'), context);
+  assert.equal(vm.runInContext('Object.keys(window.AdminUI).sort().join(",")', context),
+               'GROUP,LABEL,SPIN,chip,cursorsOf,esc,mediaBody,row');
+  const html = fs.readFileSync(path.join(__dirname, 'admin.html'), 'utf8');
+  const inner = html.split('<script>')[1].split('</script>')[0];
+  vm.runInContext(inner, context);   // 报 SyntaxError / TypeError 就让这条测试挂
 });
