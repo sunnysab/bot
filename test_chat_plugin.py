@@ -1044,6 +1044,13 @@ class TestCleanReply(unittest.TestCase):
         for text in ('', '   ', '\n\n', 'Bot：', '「」'):
             self.assertEqual(clean_reply(text, names=('Bot',)), '', repr(text))
 
+    def test_only_whitelisted_face_names_survive(self):
+        """ 名字不在内置名单里，发出去就是纯文本方括号，一眼看穿。 """
+        self.assertEqual(clean_reply('好[捂脸]'), '好[捂脸]')
+        self.assertEqual(clean_reply('这也太[抓马]'), '这也太……')   # 删成「这也太」就是残句
+        self.assertEqual(clean_reply('好[笑哭]'), '好……')          # 微信没有 [笑哭]
+        self.assertEqual(clean_reply('[图片：一只橘猫] 真可爱'), '真可爱')
+
     def test_does_not_touch_body(self):
         self.assertEqual(clean_reply('在的，你说「那个」是什么意思'), '在的，你说「那个」是什么意思')
 

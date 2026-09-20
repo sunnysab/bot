@@ -13,7 +13,7 @@ from loguru import logger
 
 from ai import AiProvider
 from context import ChatWindow, MessageContext, SingleRecord
-from emojis import Emoji, EmojiPolicy
+from emojis import FACE_CATALOG, Emoji, EmojiPolicy, filter_faces
 from events import Status, bus
 from focus import FocusMode
 from habits import HabitStore
@@ -178,7 +178,13 @@ def clean_reply(text: str, names: Iterable[str] = ()) -> str:
 
     for pattern in (BOLD, CODE):
         cleaned = pattern.sub(r'\1', cleaned)
-    return cleaned.strip()
+
+    # 内置表情只能发名单里那 147 个，写错了就是纯文本方括号（见 emojis.filter_faces）
+    cleaned, dropped = filter_faces(cleaned)
+    if dropped:
+        logger.warning('回复里的表情名不在内置名单里，已换成省略号：'
+                       + '、'.join(f'[{name}]' for name in dropped))
+    return cleaned
 
 
 def _brief(text: str, limit: int = 80) -> str:
@@ -891,7 +897,7 @@ class ChatPlugin(Plugin):
             identity=persona.identity(ctx.self_name), reply_style=persona.reply_style,
             behavior_style=persona.behavior_style, self_name=ctx.self_name,
             contact=ctx.contact, is_group=ctx.msg.is_chatroom, aliases=persona.aliases,
-            tools=tools)
+            tools=tools, faces=FACE_CATALOG)
 
     def _clean(self, texts: Iterable[str] | None, ctx: MessageContext) -> list[str]:
         """ 模型常顺手带上「昵称：」前缀或引号包裹，不能直接漏到群里。 """
@@ -914,7 +920,8 @@ class ChatPlugin(Plugin):
         persona = self.persona_for(ctx.contact)
         prompt = await self.replyer_template.render_async(
             identity=persona.identity(ctx.self_name), reply_style=persona.reply_style,
-            self_name=ctx.self_name, contact=ctx.contact, is_group=ctx.msg.is_chatroom)
+            self_name=ctx.self_name, contact=ctx.contact, is_group=ctx.msg.is_chatroom,
+            faces=FACE_CATALOG)
         message = self._compose(ctx, blocks, transcript, plan=plan,
                                 alternate=persona.maybe_alternate(self.rng))
         return await self._ask(prompt, message, ctx, image=ctx.is_image)
@@ -967,7 +974,7 @@ class ChatPlugin(Plugin):
 
         replyer = await self.replyer_template.render_async(
             identity=persona.identity(self_name), reply_style=persona.reply_style,
-            self_name=self_name, contact=contact, is_group=True)
+            self_name=self_name, contact=contact, is_group=True, faces=FACE_CATALOG)
         body = f'{new_plan}\n\n{transcript}' if new_plan else transcript
         reply = await self._complete(replyer, body)
         return {'stage': stage, 'plan': new_plan, 'reply': reply or [],

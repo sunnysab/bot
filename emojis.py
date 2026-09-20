@@ -12,9 +12,86 @@ daemon 的 send_emoji 要完整元数据（md5 + cdnurl + encrypturl + aeskey + 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
+
+# ---- 内置表情：写进文本里的方括号表情 ----
+
+# 微信内置表情的**权威名单**，顺序就是微信表情面板的顺序（[微笑] = index 1）。
+# 抄自客户端 XEditor.bin 的 UTF-16LE 字符串表，**不要再手改**：少一个，模型写出来的
+# 那个名字就会以纯文本发进群里（一串方括号，一眼看穿是机器人）；多一个微信不认，
+# 发出去同样是方括号。改名字请从客户端重新提取：
+#   text = open('XEditor.bin','rb').read().decode('utf-16-le', errors='ignore')
+#   从 `[微笑]\x00[撇嘴]` 起是 NUL 分隔的表情数组，**前 147 个**就是这份名单，
+#   后面紧跟的 98 个 ASCII 别名（Smile / Doge / Lol…）是内部标识，不是能发的名字。
+BUILTIN_FACES: tuple[str, ...] = (
+    # 经典 1–105
+    '微笑', '撇嘴', '色', '发呆', '得意', '流泪', '害羞', '闭嘴', '睡', '大哭',
+    '尴尬', '发怒', '调皮', '呲牙', '惊讶', '难过', '酷', '冷汗', '抓狂', '吐',
+    '偷笑', '愉快', '白眼', '傲慢', '饥饿', '困', '惊恐', '流汗', '憨笑', '悠闲',
+    '奋斗', '咒骂', '疑问', '嘘', '晕', '疯了', '衰', '骷髅', '敲打', '再见',
+    '擦汗', '抠鼻', '鼓掌', '糗大了', '坏笑', '左哼哼', '右哼哼', '哈欠', '鄙视', '委屈',
+    '快哭了', '阴险', '亲亲', '吓', '可怜', '菜刀', '西瓜', '啤酒', '篮球', '乒乓',
+    '咖啡', '饭', '猪头', '玫瑰', '凋谢', '嘴唇', '爱心', '心碎', '蛋糕', '闪电',
+    '炸弹', '刀', '足球', '瓢虫', '便便', '月亮', '太阳', '礼物', '拥抱', '强',
+    '弱', '握手', '胜利', '抱拳', '勾引', '拳头', '差劲', '爱你', 'NO', 'OK',
+    '爱情', '飞吻', '跳跳', '发抖', '怄火', '转圈', '磕头', '回头', '跳绳', '投降',
+    '激动', '乱舞', '献吻', '左太极', '右太极',
+    # 第二批 106–119（约 2015）
+    '奸笑', '嘿哈', '捂脸', '机智', '茶', '红包', '蜡烛', '耶', '皱眉', '囧',
+    '鸡', '福', '發', '小狗',
+    # 第三批 120–131（2019）
+    '吃瓜', '加油', '汗', '天啊', 'Emm', '社会社会', '旺柴', '好的', '打脸', '哇',
+    '加油加油', '翻白眼',
+    # 第四批 132–147（微信 8.0）
+    '666', '让我看看', '叹气', '苦涩', '裂开', '脸红', '笑脸', '破涕为笑',
+    '烟花', '庆祝', '恐惧', '无语', '失望', '生病', '合十', '爆竹',
+)
+
+# 名字 -> 规范写法。ASCII 那几个（NO/OK/Emm/666）模型爱写小写，一并收进来，
+# 命中后就按微信的写法还回去。
+FACE_NAMES: dict[str, str] = ({name: name for name in BUILTIN_FACES}
+                              | {name.lower(): name for name in BUILTIN_FACES if name.isascii()})
+
+# 塞进 prompt 让模型照着抄的那一串：[微笑][撇嘴]…
+FACE_CATALOG = ''.join(f'[{name}]' for name in BUILTIN_FACES)
+
+# 一行里的一个方括号。放宽到 60 字是为了连 [图片：一只橘猫] 这类占位标记一起收掉
+FACE_TOKEN = re.compile(r'\[([^\[\]\n]{0,60})\]')
+
+
+def filter_faces(text: str) -> tuple[str, tuple[str, ...]]:
+    """ 把每个 `[名]` 对一遍白名单，不在名单里的换成省略号。
+
+    模型想发表情时写的名字经常不在名单上（[笑哭]、[狗头] 都不是内置的），而微信
+    只认名单里那 147 个——名字错了，群里看到的就是一串纯文本方括号，一眼看穿。
+    所以这里不留情面：不是内置表情名就换掉。**换成「……」而不是直接删**：
+    「这也太[抓马]」删完是「这也太」（残句），换成省略号是「这也太……」（人话），
+    连着的几个只留一个。历史里的 `[图片：…]`/`[表情：…]` 占位标记是例外——
+    那整句本来就不许发（见 media.is_placeholder），直接删。
+
+    返回（洗过的文本, 换掉的名字）。
+    """
+    # 循环导入：media 也用 emojis，跟上边 parse_emoji_xml 一样放到函数里取
+    from media import PLACEHOLDER
+
+    dropped: list[str] = []
+
+    def keep(match: re.Match) -> str:
+        name = match.group(1).strip()
+        canonical = FACE_NAMES.get(name) or FACE_NAMES.get(name.lower())
+        if canonical:
+            return f'[{canonical}]'
+        dropped.append(name)
+        return '' if PLACEHOLDER.match(f'[{name}]') else '……'
+
+    cleaned = FACE_TOKEN.sub(keep, text or '')
+    # 连着删了几个就只剩一个省略号；删掉的地方会留空格（`哈哈 [狗头] 好的`），夹一下
+    cleaned = re.sub(r'(?:……)+', '……', cleaned)
+    return re.sub(r'[ \t]{2,}', ' ', cleaned).strip(), tuple(dropped)
+
 
 # 同一张表情在群里用过多少次，粗略分档——只在挑「本群的梗」时当排序依据
 HOT = 20
@@ -303,6 +380,28 @@ class Emoji:
 
 
 def _self_check() -> None:
+    # 内置表情名单：顺序即微信 index（[微笑] = 1），批次的接缝也要对得上
+    assert len(BUILTIN_FACES) == 147 and len(set(BUILTIN_FACES)) == 147
+    assert BUILTIN_FACES[0] == '微笑' and BUILTIN_FACES[104] == '右太极'
+    assert BUILTIN_FACES[105] == '奸笑' and BUILTIN_FACES[131] == '666'
+    assert BUILTIN_FACES[-1] == '爆竹' and len(BUILTIN_FACES) == 147
+    assert FACE_CATALOG.startswith('[微笑][撇嘴]') and FACE_CATALOG.endswith('[爆竹]')
+
+    # 白名单过滤：名单里的原样留着（ASCII 的按微信写法还原），其余换成省略号
+    assert filter_faces('[捂脸]好啊') == ('[捂脸]好啊', ())
+    assert filter_faces('[no]') == ('[NO]', ())              # 小写也认，但按微信写法还回去
+    assert filter_faces('好[ 捂脸 ]') == ('好[捂脸]', ())       # 名字两边多打了空格
+    assert filter_faces('这也太[抓马]') == ('这也太……', ('抓马',))
+    assert filter_faces('这也太[抓马]了') == ('这也太……了', ('抓马',))
+    assert filter_faces('哈哈 [狗头] 好的') == ('哈哈 …… 好的', ('狗头',))
+    assert filter_faces('[笑哭][狗头]真的假的') == ('……真的假的', ('笑哭', '狗头'))
+    # 历史里的占位标记是例外：整句本来就不许发，直接删（见 media.is_placeholder）
+    assert filter_faces('[图片：一只橘猫] 真可爱') == ('真可爱', ('图片：一只橘猫',))
+    assert filter_faces('[表情：摊倒]') == ('', ('表情：摊倒',))
+    assert filter_faces('[笑哭]') == ('……', ('笑哭',))         # 只发个省略号，比发串方括号强
+    assert filter_faces('') == ('', ()) and filter_faces('没有方括号') == ('没有方括号', ())
+    assert filter_faces('哈哈 [微笑] 好的') == ('哈哈 [微笑] 好的', ())
+
     emoji = Emoji.from_dict({
         'md5': 'a56b036e6416b4206c6e14eb3264de53',
         'len': 348401,
