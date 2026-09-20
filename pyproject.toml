@@ -13,6 +13,7 @@ dependencies = [
     "loguru",
     "python-dotenv",
     "weixin-bot",
+    "pillow>=12.3.0",
 ]
 
 [tool.uv.sources]
@@ -35,6 +36,7 @@ py-modules = [
     "events",
     "focus",
     "habits",
+    "images",
     "main",
     "media",
     "message",

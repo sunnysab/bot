@@ -33,6 +33,7 @@ from describer import EmojiDescriber, MediaCache, MediaDescriber
 from emojis import EmojiLibrary, EmojiPolicy
 from focus import FocusMode
 from habits import HabitStore
+from images import ImageStore
 from moments import MomentKeeper, MomentStore
 from necessity import IdleBackoff, SpeechLimiter
 from persona import Persona
@@ -149,6 +150,8 @@ class Runtime:
 
         # 构造期定死的东西
         self.media_cache = MediaCache(config.media_cache_path)
+        self.images = ImageStore(config.image_cache_dir, config.image_shrink_threshold,
+                                 config.image_shrink_target) if config.image_inline else None
         self.memories = MomentStore(config.moment_path)
         self.emojis = EmojiLibrary.load(config.emoji_path)
         self.profiles = ProfileStore.load(config.profile_path)
@@ -241,6 +244,7 @@ class Runtime:
                           message_search=self.bot.search_messages,
                           agent_max_replies=config.agent_max_replies,
                           personas=self.personas,
+                          image_store=self.images, image_timeout=config.image_fetch_timeout,
                           timeout=config.request_timeout)
 
     def _install_plugins(self) -> None:

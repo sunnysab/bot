@@ -17,6 +17,7 @@ from emojis import FACE_CATALOG, Emoji, EmojiPolicy, filter_faces
 from events import Status, bus
 from focus import FocusMode
 from habits import HabitStore
+from images import ImageStore
 from moments import MomentStore, extract_keywords
 from necessity import (
     NECESSITY_THRESHOLD,
@@ -443,6 +444,19 @@ class ReplyPolicy:
         return any(name and name in ctx.msg.content for name in names)
 
 
+def _mime(raw: bytes) -> str:
+    """ 按魔数判图片格式。以前写死 image/jpeg，小 PNG / GIF 会被标错。 """
+    if raw.startswith(b'\x89PNG'):
+        return 'image/png'
+    if raw.startswith(b'GIF8'):
+        return 'image/gif'
+    if raw[:4] == b'RIFF' and raw[8:12] == b'WEBP':
+        return 'image/webp'
+    if raw[:2] == b'BM':
+        return 'image/bmp'
+    return 'image/jpeg'
+
+
 class ChatPlugin(Plugin):
     """ 聊天插件。两段式：Planner 判断说与不说、说什么，Expressor 负责说成人话。
 
@@ -465,7 +479,8 @@ class ChatPlugin(Plugin):
                  timeout: float = 60.0, rng: random.Random | None = None,
                  agent_max_replies: int = 1, personas: PersonaStore | None = None,
                  member_lookup: MemberLookup | None = None,
-                 message_search: MessageSearch | None = None):
+                 message_search: MessageSearch | None = None,
+                 image_store: ImageStore | None = None, image_timeout: float = 8.0):
         """ 聊天插件
 
         :param ai_provider: AI 服务提供者
@@ -490,6 +505,8 @@ class ChatPlugin(Plugin):
         :param personas: 分会话人设覆盖；传了就按会话取人设，没覆盖的回落到 persona
         :param member_lookup: 群昵称 → wxid；不传就 @ 不了人
         :param message_search: 搜更早聊天记录；不传就没 search_messages 工具
+        :param image_store: 窗口里图片的压缩 + 缓存；不传就不内联图片（测试用）
+        :param image_timeout: 单张内联图片的取字节超时（秒）
         """
         self.ai = ai_provider
         self._planner_ai = planner_ai
@@ -510,6 +527,8 @@ class ChatPlugin(Plugin):
         self.revoke = revoke
         self.member_lookup = member_lookup
         self.message_search = message_search
+        self.image_store = image_store
+        self.image_timeout = image_timeout
         self.timeout = timeout
         self.rng = rng
         self.agent_max_replies = agent_max_replies
@@ -561,10 +580,12 @@ class ChatPlugin(Plugin):
         if must_speak:
             blocks['must'] = f'这条点名了 {ctx.self_name}，必须给个回应，不能装没看见。'
         transcript = '以下聊天记录供你参考：\n\n' + str(history)
+        # 窗口里的图一并取回来附给模型（新→旧、按媒体去重）。取不到就少一张，不影响回复
+        images = await self._collect_images(history)
 
         # agent 模式：判断和台词在同一次调用里完成，不走表达者
         if self.reply_mode == 'agent' and self._tools_ready:
-            return await self._agent_round(ctx, blocks, transcript, must_speak, necessity, now)
+            return await self._agent_round(ctx, blocks, transcript, images, must_speak, necessity, now)
 
         started = time.perf_counter()
         plan = ''
@@ -573,9 +594,9 @@ class ChatPlugin(Plugin):
         if self.enable_planner:
             self._emit(ctx, Status.DECIDING, f'{necessity.kind} · 分数 {necessity.score}')
             if self._tools_ready:
-                decided, emoji, at, tool_log = await self._plan_with_tools(ctx, blocks, transcript)
+                decided, emoji, at, tool_log = await self._plan_with_tools(ctx, blocks, transcript, images)
             else:
-                decided, tool_log = await self._plan(ctx, necessity, blocks, transcript), ''
+                decided, tool_log = await self._plan(ctx, necessity, blocks, transcript, images), ''
             # 决策本身没跑通（超时/报错）：不算「不发言」，照走表达者
             if decided is None:
                 self._emit(ctx, Status.PLANNER_FAILED, '决策调用失败，直接表达')
@@ -591,7 +612,7 @@ class ChatPlugin(Plugin):
                 plan = f'{plan}\n【工具】\n{tool_log}' if plan else f'【工具】\n{tool_log}'
 
         self._emit(ctx, Status.EXPRESSING)
-        response = await self._express(ctx, blocks, transcript, plan)
+        response = await self._express(ctx, blocks, transcript, images, plan)
         latency_ms = self._elapsed(started)
         self._trace(ctx, necessity, transcript, response, latency_ms, plan)
         if response is None:
@@ -726,8 +747,9 @@ class ChatPlugin(Plugin):
             tools.append((REVOKE, self._revoke_tool(ctx)))
         return tools
 
-    async def _plan_with_tools(self, ctx: MessageContext, blocks: dict[str, str],
-                               transcript: str) -> tuple[Plan | None, Emoji | None, str, str]:
+    async def _plan_with_tools(self, ctx: MessageContext, blocks: dict[str, str], transcript: str,
+                               images: list[tuple[str, bytes]]) \
+            -> tuple[Plan | None, Emoji | None, str, str]:
         """ 带工具的决策循环（两段式）。返回（决策, 选中的表情, 要 @ 的人, 工具调用记录）。
 
         模型只挑动作（搜表情 / 选一张 / 说要说话），不写台词——台词还是表达者的事。
@@ -744,8 +766,7 @@ class ChatPlugin(Plugin):
         toolbox = Toolbox(self._tools(state, SPEAK, speak, ctx))
         prompt = await self._planner_prompt(ctx, toolbox.names)
         messages = [{'role': 'user',
-                     'content': await self._build_message(ctx, self._compose(ctx, blocks, transcript),
-                                                          ctx.is_image)}]
+                     'content': self._build_message(self._compose(ctx, blocks, transcript), images)}]
         analysis = ''
         for _ in range(max(1, self.planner_rounds)):
             turn = await self._ask_tools(prompt, messages, toolbox.schema(), ctx)
@@ -772,7 +793,8 @@ class ChatPlugin(Plugin):
         return plan, emoji, state['at'], log
 
     async def _reply_agent(self, ctx: MessageContext, blocks: dict[str, str], transcript: str,
-                           must_speak: bool) -> tuple[list[str], Emoji | None, str, str]:
+                           images: list[tuple[str, bytes]], must_speak: bool) \
+            -> tuple[list[str], Emoji | None, str, str]:
         """ 单段式：模型自己判断、自己写台词，回话就是一次 `reply` 调用。
 
         与 _plan_with_tools 只差终点动作：那边调 speak（只说意图），这边调 reply（原话）。
@@ -796,8 +818,7 @@ class ChatPlugin(Plugin):
         toolbox = Toolbox(self._tools(state, REPLY, reply, ctx))
         prompt = await self._agent_prompt(ctx, toolbox.names)
         messages = [{'role': 'user',
-                     'content': await self._build_message(ctx, self._compose(ctx, blocks, transcript),
-                                                          ctx.is_image)}]
+                     'content': self._build_message(self._compose(ctx, blocks, transcript), images)}]
         forced = False
         for _ in range(max(1, self.planner_rounds)):
             turn = await self._ask_tools(prompt, messages, toolbox.schema(), ctx)
@@ -824,11 +845,12 @@ class ChatPlugin(Plugin):
                 state['at'], toolbox.render_calls())
 
     async def _agent_round(self, ctx: MessageContext, blocks: dict[str, str], transcript: str,
-                           must_speak: bool, necessity: NecessityScore, now: float) -> Reply:
+                           images: list[tuple[str, bytes]], must_speak: bool,
+                           necessity: NecessityScore, now: float) -> Reply:
         """ agent 模式的一轮：决策和表达在同一次调用里完成，没有表达者这一步。 """
         self._emit(ctx, Status.DECIDING, f'{necessity.kind} · agent')
         started = time.perf_counter()
-        texts, emoji, at, tool_log = await self._reply_agent(ctx, blocks, transcript, must_speak)
+        texts, emoji, at, tool_log = await self._reply_agent(ctx, blocks, transcript, images, must_speak)
         self._trace(ctx, necessity, transcript, texts or None, self._elapsed(started), tool_log)
         cleaned = self._clean(texts, ctx)
         if not cleaned:
@@ -905,17 +927,17 @@ class ChatPlugin(Plugin):
         return [text for text in (clean_reply(x, names) for x in texts or ()) if text]
 
     async def _plan(self, ctx: MessageContext, necessity: NecessityScore, blocks: dict[str, str],
-                    transcript: str) -> Plan | None:
+                    transcript: str, images: list[tuple[str, bytes]]) -> Plan | None:
         """ 单轮 JSON 决策。后端不支持工具时走这条。 """
         raw = await self._ask(await self._planner_prompt(ctx), self._compose(ctx, blocks, transcript),
-                              ctx, image=ctx.is_image, ai=self.planner_ai)
+                              ctx, images, ai=self.planner_ai)
         if not raw:
             return None
         # ai.chat 返回的是按行切好的列表，决策是一整块 JSON，拼回去再解析
         return Plan.parse('\n'.join(raw))
 
     async def _express(self, ctx: MessageContext, blocks: dict[str, str], transcript: str,
-                       plan: str) -> list[str] | None:
+                       images: list[tuple[str, bytes]], plan: str) -> list[str] | None:
         """ 跑表达者。先把「本轮要回哪条」摆明，再给决策；没决策也不会跑偏到旧话题。 """
         persona = self.persona_for(ctx.contact)
         prompt = await self.replyer_template.render_async(
@@ -924,15 +946,15 @@ class ChatPlugin(Plugin):
             faces=FACE_CATALOG)
         message = self._compose(ctx, blocks, transcript, plan=plan,
                                 alternate=persona.maybe_alternate(self.rng))
-        return await self._ask(prompt, message, ctx, image=ctx.is_image)
+        return await self._ask(prompt, message, ctx, images)
 
-    async def _ask(self, prompt: str, message: str, ctx: MessageContext, image: bool = False,
-                   ai: AiProvider | None = None) -> list[str] | None:
+    async def _ask(self, prompt: str, message: str, ctx: MessageContext,
+                   images: list[tuple[str, bytes]], ai: AiProvider | None = None) -> list[str] | None:
         """ 调模型。超时或报错只当这次没结果——不能让一次 API 抽风拖死消息处理链。 """
         provider = ai or self.ai
         try:
             return await asyncio.wait_for(
-                provider.chat(prompt.strip(), await self._build_message(ctx, message, image)), self.timeout)
+                provider.chat(prompt.strip(), self._build_message(message, images)), self.timeout)
         except Exception as e:
             logger.warning(f'调用模型失败（{ctx.contact}）: {e}')
             return None
@@ -993,31 +1015,52 @@ class ChatPlugin(Plugin):
             latency_ms=latency_ms, plan=plan, mode=self.reply_mode,
             msg_id=str(getattr(msg, 'msg_id', ''))))
 
-    @staticmethod
-    async def _build_message(ctx: MessageContext, transcript: str, image: bool = False) -> str | list:
-        """ 文本消息直接发送；图片消息把真实图片作为 content block 附在文本后（DeepSeek 原生识图）。
+    async def _collect_images(self, history: ChatWindow) -> list[tuple[str, bytes]]:
+        """ 把窗口里能拿到的图片都取回来（新→旧、按媒体 svrid 去重）。
 
-        图片拉不下来就退回纯文本：附件取不到是常事（这套 daemon 下的图片 XML 里
-        根本没有可下载的 cdnurl，只有加密 fileid），它不该把整轮回复带崩——
-        更不该让用户看到一条和真实原因无关的报错。历史里本来就有 `[图片]` 占位符。
+        每条记录自己知道字节从哪来（自己发的图 / 引用的图），这里只负责并发取、压缩、
+        缓存。取不到 / 超时的那张直接跳过——少一张图顶多少点信息，不能让一轮回复卡住。
         """
-        if not image:
-            return transcript
+        if self.image_store is None:
+            return []
+        pending: list = []
+        seen: set[int] = set()
+        for record in reversed(list(history)):
+            if not record.media_id or record.media_id in seen or record.download is None:
+                continue
+            seen.add(record.media_id)
+            pending.append(record)
 
-        if ctx.download is None:
-            # 拿不到可下载的地址（图片的 XML 里只有加密 fileid）。不去试：
-            # 每次尝试都是一次注定失败的 RPC，历史里本来就有 `[图片]` 占位符
-            return transcript
-        try:
-            raw = await ctx.download()
-        except Exception as e:
-            logger.warning(f'取图片失败，这一轮只发文字（{ctx.contact}）: {e}')
-            return transcript
-        if not raw:
-            return transcript
+        async def fetch(record) -> tuple[str, bytes] | None:
+            try:
+                raw = await asyncio.wait_for(record.download(), self.image_timeout)
+            except Exception as e:  # noqa: BLE001 —— 一张图取不到不该影响这一轮
+                logger.debug(f'内联图片失败 media_id={record.media_id}: {e}')
+                return None
+            if not raw:
+                return None
+            # 压缩是 CPU 活，丢到线程里，别把消息循环堵住
+            return record.handle, await asyncio.to_thread(
+                self.image_store.prepare, record.media_id, raw)
 
-        encoded = base64.b64encode(raw).decode()
-        return [
-            {'type': 'text', 'text': transcript},
-            {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{encoded}'}},
-        ]
+        # 并发取：串行的话 N 张图 × 单张超时会把这一轮拖到没法看
+        results = await asyncio.gather(*(fetch(record) for record in pending))
+        return [item for item in results if item is not None]
+
+    @staticmethod
+    def _build_message(message: str, images: list[tuple[str, bytes]]) -> str | list:
+        """ 文本消息直接发；窗口里的图片作为 content block 附在文本后（原生识图）。
+
+        images 是 (handle, 字节)；handle 就是聊天记录里那行 `[图片 #abcd]` 的标签，
+        每张图前面配一行同样的标签，多图时模型才知道哪张对应哪句话。
+        没有图片（或全取不到）就退回纯文本：拿不到图是常事，不该把整轮回复带崩。
+        """
+        if not images:
+            return message
+        blocks: list[dict] = [{'type': 'text', 'text': message}]
+        for handle, raw in images:
+            blocks.append({'type': 'text', 'text': f'[图片 {handle}]'})
+            encoded = base64.b64encode(raw).decode()
+            blocks.append({'type': 'image_url',
+                           'image_url': {'url': f'data:{_mime(raw)};base64,{encoded}'}})
+        return blocks

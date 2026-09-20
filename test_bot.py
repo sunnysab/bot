@@ -10,7 +10,7 @@ from weixin_bot import WeChatBotError
 
 import events
 from bot import EMOJI_LOCAL_ENOUGH, Bot
-from context import ChatWindow
+from context import ChatWindow, message_handle
 from emojis import Emoji, EmojiLibrary
 from media import Media, render
 from plugin import EndProcessing, Plugin, RepeatPlugin, Reply
@@ -678,6 +678,39 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(quote_record.media_id, 555)          # 引用图落到同一张
         self.assertEqual(quote_record.handle, image_record.handle)
         self.assertIn(f'[图片 {image_record.handle}]', quote_record.text)
+
+    async def test_the_model_gets_the_quoted_image(self):
+        """ 端到端：入站图片 → 引用它并 @ 机器人 → 这一轮模型拿到的是真图，不是 `[图片]`。 """
+        import tempfile
+
+        from images import ImageStore
+        from plugin import ChatPlugin
+
+        seen: list = []
+
+        class Ai:
+            async def chat(self, prompt, message):
+                seen.append(message)
+                return ['不赖']
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.bot.set_default_plugin(ChatPlugin(Ai(), context_length=10, enable_planner=False,
+                                                   image_store=ImageStore(tmp)))
+            self.bot._wechat.image = b'\xff\xd8fake'
+            md5 = '87e65490da9b4228f45a167205caf5eb'
+            await self.bot.on_message(make_msg(
+                text=f'<msg><img md5="{md5}" /></msg>', msg_type=3, msg_id=555))
+            quote = ('<msg><appmsg><title>@雨墨蝉烟 这个咋样</title><type>57</type>'
+                     '<refermsg><type>3</type><svrid>555</svrid><chatusr>wxid_alice</chatusr>'
+                     f'<content>&lt;msg&gt;&lt;img md5="{md5}" /&gt;&lt;/msg&gt;</content>'
+                     '</refermsg></appmsg><fromusername>wxid_bob</fromusername></msg>')
+            await self.bot.on_message(make_msg(text=quote, msg_type=49, msg_id=556, ref_svrid=555))
+            await asyncio.sleep(0.2)
+        self.assertTrue(seen)
+        content = seen[-1]
+        self.assertIsInstance(content, list)
+        self.assertIn({'type': 'text', 'text': f'[图片 {message_handle(555)}]'}, content)
+        self.assertEqual(content[-1]['type'], 'image_url')
 
     async def test_quoted_message_is_answered(self):
         """ 引用消息的正文就是一句话，不能因为 msg_type=49 就被当成「不支持的类型」。 """

@@ -75,6 +75,14 @@ class Config:
     # 给不思考的模型给大了也没代价（上限不是目标值），所以直接定 1024
     describe_max_tokens: int = 1024
     describe_history_limit: int = 3
+    # 内联给模型的图片：窗口里的图按需取字节、附在请求里。这是本轮最费 token 的一块，
+    # 留个开关能随时关掉
+    image_inline: bool = True
+    # 超过这么大才压；压到目标体积以下。优先保分辨率（先降 JPEG 质量，实在不行才缩边）
+    image_shrink_threshold: int = 2 * 1024 * 1024
+    image_shrink_target: int = 1024 * 1024
+    image_fetch_timeout: float = 8.0    # 单张图取字节的超时（秒），超时就少附这一张
+    image_cache_dir: str = 'media_cache/blobs'   # 压过的图按消息 svrid 落盘，下一轮直接读
     # 群聊参与：必要性打分阈值（越高越沉默）与活跃度统计窗口
     reply_necessity_threshold: int = 60
     reply_activity_window: float = 180.0
@@ -185,6 +193,7 @@ if __name__ == '__main__':
     tuned = Config.from_env()
     assert tuned.backoff_start_after == 3 and tuned.backoff_max_seconds == 60.0, tuned
     assert base.describe_max_tokens == 1024, base     # thinking 模型的推理也算进生成预算
+    assert base.image_inline is True and base.image_shrink_target == 1024 * 1024, base
     assert base.reply_mode == 'agent', base           # 默认单段式；two_stage 留作对照
     assert base.quote_replies is True, base            # 真机验过，引用回复默认开
     # 回复行为也能从环境变量调（面板上要能改）

@@ -255,9 +255,6 @@ class MessageContext:
     history: ChatWindow
     self_name: str
     contact: str
-    # 附件下载入口。由 Bot 注入：插件不该直接碰传输层，而且 SDK 的
-    # `msg.get_media_bytes()` 走的那条分块流是坏的（见 Wechat.media_bytes）
-    download: Callable[[], Awaitable[bytes]] | None = None
 
     @property
     def kind(self) -> MessageKind:

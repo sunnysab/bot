@@ -12,6 +12,8 @@ from context import ChatWindow, MessageContext
 from emojis import Emoji
 from focus import FocusMode
 from habits import Habit, HabitStore
+from images import ImageStore
+from media import Media
 from moments import Moment, MomentStore
 from necessity import NECESSITY_THRESHOLD, SpeechLimiter
 from persona import Persona
@@ -96,17 +98,11 @@ class FakeEmojiSearch:
         return list(self.table.get(keyword, []))
 
 
-def make_msg(msg_type=1, is_chatroom=False, is_at_me=False, media=b'', content=''):
-    msg = types.SimpleNamespace(msg_type=msg_type, is_chatroom=is_chatroom, is_at_me=is_at_me,
-                                # 19 位雪花号，比 JS 安全整数还大
-                                msg_id=7100000000000000123,
-                                content=content, sender_name='Alice', reply_target='456@chatroom')
-
-    async def get_media_bytes():
-        return media
-
-    msg.get_media_bytes = get_media_bytes
-    return msg
+def make_msg(msg_type=1, is_chatroom=False, is_at_me=False, content=''):
+    return types.SimpleNamespace(msg_type=msg_type, is_chatroom=is_chatroom, is_at_me=is_at_me,
+                                 # 19 位雪花号，比 JS 安全整数还大
+                                 msg_id=7100000000000000123,
+                                 content=content, sender_name='Alice', reply_target='456@chatroom')
 
 
 def sample_history():
@@ -117,9 +113,7 @@ def sample_history():
 
 def make_ctx(msg, history=None):
     history = history if history is not None else sample_history()
-    # 注入下载入口，跟 Bot 生产路径一致（插件不直接碰传输层）
-    return MessageContext(msg=msg, history=history, self_name='Bot', contact='测试群',
-                          download=getattr(msg, 'get_media_bytes', None))
+    return MessageContext(msg=msg, history=history, self_name='Bot', contact='测试群')
 
 
 def history_with(others: int, now: float) -> ChatWindow:
@@ -243,14 +237,25 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
 
     async def test_image_is_sent_as_content_block(self):
         image = b'\xff\xd8fake-jpeg'
-        reply = await self.plugin.handle(make_ctx(make_msg(msg_type=3, is_chatroom=False, media=image)))
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = ChatPlugin(self.ai, context_length=10, image_store=ImageStore(tmp))
+            window = ChatWindow()
+            window.append('Alice', '在吗', 1)
+
+            async def ok():
+                return image
+
+            window.append('Alice', '[图片 #4k2p]', 2, media=Media('image', 'm'),
+                          download=ok, media_id=999, handle='#4k2p')
+            reply = await plugin.handle(make_ctx(make_msg(is_chatroom=False), history=window))
         self.assertEqual(reply.texts, ['收到'])
         content = self.ai.reply_calls[0][1]
         self.assertIsInstance(content, list)
         self.assertEqual(content[0]['type'], 'text')
-        self.assertEqual(content[1]['type'], 'image_url')
+        self.assertEqual(content[1], {'type': 'text', 'text': '[图片 #4k2p]'})
+        self.assertEqual(content[2]['type'], 'image_url')
         expected = 'data:image/jpeg;base64,' + base64.b64encode(image).decode()
-        self.assertEqual(content[1]['image_url']['url'], expected)
+        self.assertEqual(content[2]['image_url']['url'], expected)
 
     async def test_profiles_are_injected_into_request(self):
         store = ProfileStore(people={'wxid_x': Profile('wxid_x', names=('Alice',), phrases=('蛙趣',))})
@@ -334,40 +339,64 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.texts, [])
         self.assertTrue(reply.stop)
 
+    def _window(self, download, handle='#4k2p', media_id=123):
+        window = ChatWindow()
+        window.append('Alice', f'[图片 {handle}]', 1, media=Media('image', 'm'),
+                      download=download, media_id=media_id, handle=handle)
+        return window
+
     async def test_image_fetch_failure_degrades_to_text(self):
-        """ 图片拉不下来不能把整轮回复带崩。
+        """ 图片拉不下来不能把整轮回复带崩：取不到就不附，正文照发。 """
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = ChatPlugin(self.ai, context_length=10, image_store=ImageStore(tmp))
 
-        真实场景：这套 daemon 下的图片 XML 里只有加密 fileid、没有 cdnurl，
-        下载永远失败。以前这个异常会一路冒到 SDK 的 dispatch，那一轮就没人回了。
-        """
-        ctx = make_ctx(make_msg(msg_type=3))
+            async def boom():
+                raise RuntimeError('下载附件失败: 消息 123 无 cdnurl')
 
-        async def boom():
-            raise RuntimeError('下载附件失败: 消息 123 无 cdnurl')
-
-        ctx.download = boom
-        self.assertEqual(await ChatPlugin._build_message(ctx, '记录', image=True), '记录')
+            images = await plugin._collect_images(self._window(boom))
+            self.assertEqual(images, [])
+            self.assertEqual(plugin._build_message('记录', images), '记录')
 
     async def test_image_is_attached_when_download_works(self):
-        ctx = make_ctx(make_msg(msg_type=3))
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = ChatPlugin(self.ai, context_length=10, image_store=ImageStore(tmp))
 
-        async def ok():
-            return b'\xff\xd8\xff\xe0'
+            async def ok():
+                return b'\xff\xd8\xff\xe0'
 
-        ctx.download = ok
-        out = await ChatPlugin._build_message(ctx, '记录', image=True)
-        self.assertIsInstance(out, list)
-        self.assertEqual(out[0], {'type': 'text', 'text': '记录'})
-        self.assertTrue(out[1]['image_url']['url'].startswith('data:image/jpeg;base64,'))
+            images = await plugin._collect_images(self._window(ok))
+            self.assertEqual([handle for handle, _ in images], ['#4k2p'])
+            out = plugin._build_message('记录', images)
+            self.assertIsInstance(out, list)
+            self.assertEqual(out[0], {'type': 'text', 'text': '记录'})
+            # 每张图前面配一行同样的标签，模型才能把图和记录对上
+            self.assertEqual(out[1], {'type': 'text', 'text': '[图片 #4k2p]'})
+            self.assertTrue(out[2]['image_url']['url'].startswith('data:image/jpeg;base64,'))
 
-    async def test_text_message_never_touches_the_downloader(self):
-        ctx = make_ctx(make_msg())
+    async def test_same_image_is_attached_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = ChatPlugin(self.ai, context_length=10, image_store=ImageStore(tmp))
+            window = ChatWindow()
+            calls = []
 
-        async def boom():
-            raise AssertionError('文本消息不该去下载附件')
+            async def ok():
+                calls.append(1)
+                return b'\xff\xd8\xff\xe0'
 
-        ctx.download = boom
-        self.assertEqual(await ChatPlugin._build_message(ctx, '记录'), '记录')
+            window.append('Alice', '[图片 #4k2p]', 1, media=Media('image', 'm'),
+                          download=ok, media_id=123, handle='#4k2p')
+            # 引用同一条（media_id 相同）不能重复附
+            window.append('Bob', '这个（引用前文的消息：[图片 #4k2p]）', 2,
+                          download=ok, media_id=123, handle='#4k2p')
+            self.assertEqual(len(await plugin._collect_images(window)), 1)
+            self.assertEqual(len(calls), 1)
+
+    async def test_window_without_media_never_touches_the_downloader(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = ChatPlugin(self.ai, context_length=10, image_store=ImageStore(tmp))
+            window = ChatWindow()
+            window.append('Alice', '在吗', 1)
+            self.assertEqual(await plugin._collect_images(window), [])
 
     async def test_tracer_records_the_round(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -486,8 +486,7 @@ class Bot:
     async def _run_plugins(self, msg: Message, self_name: str, source: str) -> Reply:
         """ 把当前消息交给该会话的插件链，收集要回复的文本和表情。 """
         ctx = MessageContext(msg=msg, history=self._history.get_context(msg.reply_target),
-                             self_name=self_name, contact=source,
-                             download=lambda: self._wechat.media_bytes(msg))
+                             self_name=self_name, contact=source)
         texts: list[str] = []
         emoji = None
         verbatim = False
