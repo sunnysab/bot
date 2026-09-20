@@ -25,11 +25,6 @@ STALE_MESSAGE_SECONDS = 300.0  # 比这更旧的消息只当上下文：daemon �
 REVOKE_WINDOW_SECONDS = 120.0  # daemon 只认 2 分钟内的撤回，超了不必白跑一次 RPC
 SENT_KEEP = 10                 # 每个会话最多记这么多条自己的出站，只用来撤回
 
-FILTERED_KINDS = {
-    MessageKind.VOICE: '语音', MessageKind.EMOJI: '表情', MessageKind.LOCATION: '位置',
-    MessageKind.VIDEO: '视频', MessageKind.APPMSG: '链接/引用/文件',
-}
-
 T = TypeVar('T')
 
 
@@ -520,12 +515,10 @@ class Bot:
             # 补一条，否则面板上这条消息会永远停在「已接收」
             latest = bus.status_of(msg.msg_id)
             if latest is not None and latest.status == Status.RECEIVED:
-                kind = MessageKind.of(msg.msg_type)
-                handled = kind in (MessageKind.TEXT, MessageKind.IMAGE)
-                label = FILTERED_KINDS.get(kind, kind.name)
-                bus.publish(Status.MUTED if handled else Status.UNSUPPORTED,
-                            chat_id=msg.reply_target, chat_name=source, msg_id=msg.msg_id,
-                            detail='该会话已静音' if handled else f'{label}消息不回复')
+                # 走到这里只剩一种正常情况：该会话被 EndProcessing 静音。
+                # 其余路径（门控/决策/表达）都会自己发一条状态。
+                bus.publish(Status.MUTED, chat_id=msg.reply_target, chat_name=source,
+                            msg_id=msg.msg_id, detail='该会话已静音')
             return  # 没有回复内容
 
         # 交给全局发送队列统一限流和拟人延迟，避免阻塞消息接收循环

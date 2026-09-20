@@ -105,6 +105,13 @@ async def _fake_image():
     return b'png'
 
 
+# 一条入站引用（appmsg type=57）。它的 msg_type 是 49，但正文就是一句话。
+QUOTE_XML = ('<msg><appmsg><title>这个我也想去</title><type>57</type>'
+             '<refermsg><type>1</type><chatusr>wxid_bob</chatusr>'
+             '<content>周末去爬山不</content></refermsg></appmsg>'
+             '<fromusername>wxid_alice</fromusername></msg>')
+
+
 def make_sticker(md5='a' * 32, cdnurl='http://cdn/x', aeskey='key'):
     """ 一条表情消息的 XML。微信的表情载荷自带下载信息，所以能原样发回去。 """
     return (f'<msg><emoji fromusername="wxid_alice" md5="{md5}" len="348401" '
@@ -535,6 +542,36 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
         self.assertEqual(self.bot._wechat.sent, [])
         self.assertEqual(self.bot._wechat.emojis_sent, [('456@chatroom', 'a' * 32)])
+
+
+    async def test_quoted_message_is_answered(self):
+        """ 引用消息的正文就是一句话，不能因为 msg_type=49 就被当成「不支持的类型」。 """
+        self.bot.set_default_plugin(FakePlugin(texts=['周末去啊']))
+        await self.bot.on_message(make_msg(text=QUOTE_XML, msg_type=49))
+        await asyncio.sleep(0.1)
+        self.assertEqual([text for _, text in self.bot._wechat.sent], ['周末去啊'])
+        # 历史里存的是渲染后的人话（带被引内容），不是原始 XML
+        self.assertIn('这个我也想去（引用前文的消息：周末去爬山不）', [r.text for r in self._window()])
+
+    async def test_quoting_a_link_is_answered_too(self):
+        """ 分享链接 + @ 机器人：@ 必须能到模型手里，不能被类型门闷掉。 """
+        self.bot.set_default_plugin(FakePlugin(texts=['看了，挺有意思']))
+        link = '<msg><appmsg><title>一篇文章</title><type>5</type><url>http://x</url></appmsg></msg>'
+        await self.bot.on_message(make_msg(text=link, msg_type=49))
+        await asyncio.sleep(0.1)
+        self.assertEqual([text for _, text in self.bot._wechat.sent], ['看了，挺有意思'])
+
+    async def test_silent_chain_is_reported_as_muted(self):
+        """ 插件链什么都没说、也没自己发状态时，面板要有个交代。
+
+        现在只剩「静音」这一种：其余路径（门控/决策/表达）都会自己发一条状态。
+        """
+        self.bot.mute('456@chatroom')
+        msg = make_msg()
+        await self.bot.on_message(msg)
+        await asyncio.sleep(0.1)
+        self.assertEqual(self.bot._wechat.sent, [])
+        self.assertEqual(events.bus.status_of(msg.msg_id).status, events.Status.MUTED)
 
 
 class TestRevoke(unittest.IsolatedAsyncioTestCase):

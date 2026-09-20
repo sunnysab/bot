@@ -495,9 +495,10 @@ class ChatPlugin(Plugin):
 
     @override
     async def handle(self, ctx: MessageContext) -> Reply | None:
-        if not (ctx.is_text or ctx.is_image or ctx.is_emoji or ctx.is_voice):  # 文本 / 图片 / 表情 / 语音
-            return None
-
+        # 这里**不按 msg_type 筛消息**。系统/未知类型在 `Wechat._dispatch` 就丢了，
+        # 剩下的每一种 `media.render` 都能渲染成可读文本。以前这里又列一遍
+        # 「文本/图片/表情/语音」，结果是引用（type=49）被当成「不支持的类型」没人回——
+        # 而它的正文就是一句话；@ 上一篇文章也一样被吞。
         now = time.time()
         decision = self.policy.evaluate_detailed(ctx, now)
         if not decision.allowed:
