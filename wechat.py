@@ -1,4 +1,6 @@
+import asyncio
 import base64
+from collections import OrderedDict
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -8,6 +10,11 @@ from weixin_bot import Message, WeChatBot
 from context import SYSTEM_KINDS, ChatWindow, MessageKind
 from emojis import Emoji
 from media import render
+
+# 内存里最多留这么多附件字节 / 这么多条：识图只在「刚取到」和「马上要用」之间复用，
+# 留多了只是白占内存（附件的长期保管是 daemon 的事）
+MEDIA_MEMO_BYTES = 8 * 1024 * 1024
+MEDIA_MEMO_ITEMS = 16
 
 
 class Wechat:
@@ -24,6 +31,10 @@ class Wechat:
         self.all_contacts: dict[str, str] = {}
         # 按需查到的名字（群名、群里的人）；只记成功的结果，查不到就下次再查
         self._names: dict[str, str] = {}
+        # 取过的附件（msg_id -> 字节/扩展名）+ 还在路上的合并请求，见 media_bytes_by_id
+        self._media_memo: OrderedDict[int, tuple[bytes, str]] = OrderedDict()
+        self._media_inflight: dict[int, asyncio.Task] = {}
+        self._media_memo_bytes = 0
         self._message_callback = callback or self._on_message
 
         self._bot.on_message(self._dispatch)
@@ -152,17 +163,47 @@ class Wechat:
         return await self._bot.get_status()
 
     async def media_bytes_by_id(self, msg_id: int) -> tuple[bytes, str]:
-        """ 取一条消息的附件字节，返回 (data, ext)。
+        """ 取一条消息的附件字节，返回 (data, ext)。**同一个 msg_id 只问 daemon 一次**。
 
-        **附件由 daemon 下载并保管**（它认得 CDN blob，也有自己的磁盘缓存），bot 只按
+        附件由 daemon 下载并保管（它认得 CDN blob，也有自己的磁盘缓存），bot 只按
         msg_id 要字节——不关心它缓存在哪个目录、叫什么名字，更不该去扒它的文件。
+
+        自己去重的原因：同一张图会被两条路各要一次——当前轮把它内联给模型看，
+        后台给它补一条写进历史的描述——两边几乎同时发生，而 daemon 的 CDN 回退
+        **不持锁**（它自己标了 ponytail），并发过去就是两次 CDN 下载。
+
+        失败不进缓存：网络抖动、daemon 刚重启都会失败，下次再试一次就好。
         """
+        hit = self._media_memo.get(msg_id)
+        if hit is not None:
+            self._media_memo.move_to_end(msg_id)
+            return hit
+        task = self._media_inflight.get(msg_id)
+        if task is None:
+            task = asyncio.ensure_future(self._fetch_media(msg_id))
+            self._media_inflight[msg_id] = task
+            task.add_done_callback(lambda done, key=msg_id: self._finish_media(key, done))
+        return await task
+
+    async def _fetch_media(self, msg_id: int) -> tuple[bytes, str]:
+        """ 真正问 daemon 要一次字节。 """
         data = await self._bot.call('get_media_bytes', {'msg_id': msg_id})
         payload = data if isinstance(data, dict) else {}
         encoded = payload.get('data_base64')
         if not encoded:
             raise ValueError(f'daemon 没返回附件内容（msg_id={msg_id}）')
         return base64.b64decode(encoded), str(payload.get('ext') or '')
+
+    def _finish_media(self, msg_id: int, task: asyncio.Task) -> None:
+        """ 下载结束：成功就留在内存里（有上限），失败什么都不记。 """
+        self._media_inflight.pop(msg_id, None)
+        if task.cancelled() or task.exception() is not None:
+            return
+        self._media_memo[msg_id] = task.result()
+        self._media_memo_bytes += len(task.result()[0])
+        while len(self._media_memo) > MEDIA_MEMO_ITEMS or self._media_memo_bytes > MEDIA_MEMO_BYTES:
+            _, (dropped, _) = self._media_memo.popitem(last=False)
+            self._media_memo_bytes -= len(dropped)
 
     async def media_bytes(self, msg: Message) -> bytes:
         """ 取一条消息附件的原始字节（识图用）。

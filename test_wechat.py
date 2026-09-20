@@ -1,5 +1,6 @@
 """ Wechat 适配层自检：不连 daemon，用 stub 替换 SDK 客户端。 """
 
+import asyncio
 import types
 import unittest
 
@@ -182,6 +183,42 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
         self.reply = {'ext': 'gif', 'data_base64': base64.b64encode(b'GIF89a').decode()}
         data, ext = await self.wechat.media_bytes_by_id(999)
         self.assertEqual((data, ext), (b'GIF89a', 'gif'))
+
+    async def test_same_msg_id_is_fetched_once(self):
+        """ 同一张图只问 daemon 一次：当前轮内联给模型、后台补描述，是两条路各要一次。 """
+        import base64
+
+        self.wechat._bot.call = self._call
+        self.calls: list[tuple[str, dict]] = []
+        self.reply = {'ext': 'jpg', 'data_base64': base64.b64encode(b'jpeg').decode()}
+        first = await self.wechat.media_bytes_by_id(7)
+        second = await self.wechat.media_bytes_by_id(7)
+        self.assertEqual(first, second)
+        self.assertEqual(len(self.calls), 1)
+        # 不同消息各拉各的
+        await self.wechat.media_bytes_by_id(8)
+        self.assertEqual(len(self.calls), 2)
+
+    async def test_concurrent_requests_for_one_image_are_merged(self):
+        """ 两边几乎同时要：单飞，合流成一次 RPC（daemon 的 CDN 回退不持锁）。 """
+        import base64
+
+        self.wechat._bot.call = self._call
+        self.calls: list[tuple[str, dict]] = []
+        self.reply = {'ext': 'jpg', 'data_base64': base64.b64encode(b'jpeg').decode()}
+        results = await asyncio.gather(*(self.wechat.media_bytes_by_id(7) for _ in range(5)))
+        self.assertTrue(all(item == results[0] for item in results))
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_a_failed_fetch_is_not_cached(self):
+        """ 失败不进内存缓存：网络抖动、daemon 刚重启都会失败，下次要还能再试。 """
+        self.wechat._bot.call = self._call
+        self.calls: list[tuple[str, dict]] = []
+        self.reply = {'filename': 'x', 'size': 0}      # 没有 data_base64
+        for _ in range(2):
+            with self.assertRaises(ValueError):
+                await self.wechat.media_bytes_by_id(7)
+        self.assertEqual(len(self.calls), 2)
 
     async def test_message_pagination_cursors_are_passed_through(self):
         """ 面板翻页要用 daemon 的 messages.id 游标，不能拿 64 位 msg_id 比大小。 """
