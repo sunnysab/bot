@@ -36,7 +36,6 @@ export function Trace({ msgId, picked, tick }: Props) {
 
   return (
     <>
-      <h3>这条消息</h3>
       <div className="kv">
         <span>内容</span><span>{picked}</span>
         <span>msg_id</span><span>{view.msg_id}</span>

@@ -7,12 +7,17 @@ interface Props {
   down: boolean;
   seq: number;
   asideOff: boolean;
+  /** 右侧「状态」抽屉开着没有 */
+  statusOpen: boolean;
   onAside: () => void;
   onDry: () => void;
   onScope: (mode: string) => void;
+  onStatus: () => void;
 }
 
-export function Header({ state, daemon, down, seq, asideOff, onAside, onDry, onScope }: Props) {
+export function Header({
+  state, daemon, down, seq, asideOff, statusOpen, onAside, onDry, onScope, onStatus,
+}: Props) {
   const s = state ?? ({} as StateRes);
   const d = daemon ?? { ok: false };
   // daemon 的三态：正常 / 未登录 / 取不到状态
@@ -39,6 +44,7 @@ export function Header({ state, daemon, down, seq, asideOff, onAside, onDry, onS
         <option value="allow">只回勾选的</option>
       </select>
       <span style={{ marginLeft: 'auto', color: 'var(--dim)' }}>事件 #{seq}</span>
+      <button className={statusOpen ? 'on' : ''} onClick={onStatus}>状态</button>
     </header>
   );
 }

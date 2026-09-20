@@ -9,7 +9,7 @@ import { Stream } from './components/Stream';
 import type { ScrollHint } from './components/Stream';
 import { Toolbar } from './components/Toolbar';
 import { Drawer } from './components/drawer/Drawer';
-import type { Tab } from './components/drawer/Drawer';
+import type { Panel, Tab } from './components/drawer/Drawer';
 import { cursorsOf } from './format';
 import { local, usePoll } from './hooks';
 
@@ -28,9 +28,10 @@ export default function App() {
   const [own, setOwn] = useState<Record<string, StatusEvent>>({});
   const [reply, setReply] = useState<Record<string, StatusEvent>>({});
   const [selected, setSelected] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>('trace');
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  /** 事件说「选中的这条有新动静」时 +1，抽屉里的「这条消息」靠它重取 */
+  const [tab, setTab] = useState<Tab>('health');
+  /** 右侧抽屉。null = 关着；'message' = 点气泡进来的那条消息；'status' = 表头「状态」 */
+  const [panel, setPanel] = useState<Panel | null>(null);
+  /** 事件说「选中的这条有新动静」时 +1，消息详情靠它重取 */
   const [traceTick, setTraceTick] = useState(0);
   const [zoom, setZoom] = useState('');
   const [seq, setSeq] = useState(0);
@@ -48,8 +49,8 @@ export default function App() {
   /** 整页重拉进行中：这期间不做增量，免得和它抢 cursor */
   const busy = useRef(false);
   // 轮询回调要读最新的会话/选中，但不想因此重建定时器
-  const live = useRef({ chatId, selected, tab });
-  live.current = { chatId, selected, tab };
+  const live = useRef({ chatId, selected, panel });
+  live.current = { chatId, selected, panel };
 
   const chat = chats.find(c => c.chat_id === chatId) ?? null;
   const chatName = chat?.name ?? '';
@@ -139,16 +140,16 @@ export default function App() {
   const onEvents = useCallback((events: StatusEvent[]) => {
     setOwn(prev => merge(prev, events, 'msg_id'));
     setReply(prev => merge(prev, events, 'reply_to'));
-    const { chatId: id, selected: picked, tab: current } = live.current;
+    const { chatId: id, selected: picked, panel: current } = live.current;
     let stale = false;
     let touched = false;
     for (const e of events) {
       if (e.chat_id && e.chat_id === id && (e.status === 'received' || e.status === 'phone')) stale = true;
-      // 抽屉里画的「这条消息」只会被它自己的事件改，别的消息刷屏不必重画
+      // 消息详情只会被它自己的事件改，别的消息刷屏不必重画
       if (picked && (e.msg_id === picked || e.reply_to === picked)) touched = true;
     }
     if (stale && !busy.current) void loadNew();
-    if (touched && current === 'trace') setTraceTick(t => t + 1);
+    if (touched && current === 'message') setTraceTick(t => t + 1);
   }, [loadNew]);
 
   useEffect(() => {
@@ -173,7 +174,11 @@ export default function App() {
 
   // ---------- 动作 ----------
 
-  const onPick = useCallback((msgId: string) => setSelected(msgId), []);
+  /** 点气泡 = 直接看这条的详情，不看别的 */
+  const onPick = useCallback((msgId: string) => {
+    setSelected(msgId);
+    setPanel('message');
+  }, []);
   const onZoom = useCallback((url: string) => setZoom(url), []);
 
   const allow = useCallback(async (name: string, on: boolean) => {
@@ -221,8 +226,9 @@ export default function App() {
     <>
       <Header
         state={state.data} daemon={health.data?.daemon} down={down} seq={seq}
-        asideOff={aside.off} onAside={() => toggleAside(!aside.off)}
-        onDry={dryRun} onScope={scope}
+        asideOff={aside.off} statusOpen={panel === 'status'}
+        onAside={() => toggleAside(!aside.off)} onDry={dryRun} onScope={scope}
+        onStatus={() => setPanel(p => p === 'status' ? null : 'status')}
       />
       <main className={aside.off ? 'aside-off' : ''}>
         <ChatList
@@ -233,11 +239,10 @@ export default function App() {
         />
         <div className="center">
           <Toolbar
-            chatName={chatName} allowed={!!chat?.allowed} focus={!!chat?.focus} drawerOpen={drawerOpen}
+            chatName={chatName} allowed={!!chat?.allowed} focus={!!chat?.focus}
             onAllow={() => void allow(chatName, !chat?.allowed)}
             onFocus={() => void focus(chatName, !chat?.focus)}
             onEarlier={() => void loadEarlier(box.current)}
-            onDrawer={() => setDrawerOpen(o => !o)}
             onSend={send}
           />
           <Stream
@@ -246,7 +251,7 @@ export default function App() {
           />
         </div>
         <Drawer
-          open={drawerOpen} tab={tab} onTab={setTab} onClose={() => setDrawerOpen(false)}
+          panel={panel} tab={tab} onTab={setTab} onClose={() => setPanel(null)}
           msgId={selected} picked={picked} traceTick={traceTick}
           health={health.data} onRefresh={refresh} chatName={chatName}
         />

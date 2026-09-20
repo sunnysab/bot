@@ -4,17 +4,15 @@ interface Props {
   chatName: string;
   allowed: boolean;
   focus: boolean;
-  drawerOpen: boolean;
   onAllow: () => void;
   onFocus: () => void;
   onEarlier: () => void;
-  onDrawer: () => void;
   /** 发一条。返回输入框的新 placeholder（成功是「已排队」，失败是错误） */
   onSend: (text: string) => Promise<string>;
 }
 
 export function Toolbar({
-  chatName, allowed, focus, drawerOpen, onAllow, onFocus, onEarlier, onDrawer, onSend,
+  chatName, allowed, focus, onAllow, onFocus, onEarlier, onSend,
 }: Props) {
   const [say, setSay] = useState('');
   const [hint, setHint] = useState('手动发一条…');
@@ -41,7 +39,6 @@ export function Toolbar({
       />
       <button disabled={idle} onClick={send}>发送</button>
       <button disabled={idle} onClick={onEarlier} title="往上加载更早的消息">更早</button>
-      <button className={drawerOpen ? 'on' : ''} onClick={onDrawer}>详情</button>
     </div>
   );
 }
