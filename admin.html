@@ -101,6 +101,15 @@
   .mem{border-bottom:1px solid #f0f2f4;padding:4px 0;font-size:12.5px}
   .mem .detail{font-size:11px}
   .drawer textarea{min-height:170px}
+  /* 图片查看器：就地看原图（src 就是 /api/media 的原始字节），不去开新标签页 */
+  #lightbox{position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.88);
+            display:flex;align-items:center;justify-content:center;overflow:hidden}
+  #lightbox.hide{display:none}
+  #lightbox img{max-width:92vw;max-height:92vh;cursor:grab;user-select:none;
+                transform-origin:center center;will-change:transform}
+  #lightbox img.dragging{cursor:grabbing}
+  #lightbox .hint{position:absolute;bottom:12px;left:0;right:0;text-align:center;
+                  color:#c9ced6;font-size:12px;pointer-events:none}
 </style>
 </head>
 <body>
@@ -154,6 +163,8 @@
     <div id="panel-config" style="display:none"></div>
   </div>
 </main>
+<div id="lightbox" class="hide"><img id="lightbox-img" alt="">
+  <span class="hint">滚轮缩放 · 拖动平移 · 双击还原 · Esc 关闭</span></div>
 <script src="/admin.js"></script>
 <script>
 // 失败要显眼：以前一份缓存的 404（旧的“所有响应都 max-age=3600”）会让这个脚本在
@@ -167,7 +178,7 @@ if (!window.AdminUI) {
 // 纯渲染函数（LABEL/GROUP/esc/chip/mediaBody/row/cursorsOf）在 admin.js：
 // 它们不碰 DOM、不读全局状态，所以能单独用 `node --test test_admin_ui.js` 跑断言。
 // 这里只留状态、请求和 DOM 操作。
-const { esc, chip, row, cursorsOf, LABEL } = window.AdminUI;
+const { esc, chip, row, cursorsOf, LABEL, zoomAt } = window.AdminUI;
 const $ = s => document.querySelector(s);
 // 贯穿面板的一条约定：**会话的键是显示名**（群名 / 备注），不是 peer id。
 // 「允许回复」名单、分会话人设都按显示名存，插件链也按显示名分发；
@@ -223,6 +234,46 @@ $('#splitter').addEventListener('mousedown', e => {
 $('#splitter').addEventListener('dblclick', () => toggleAside(!main.classList.contains('aside-off')));
 setAsideWidth(parseInt(store.get('aside.w', '230'), 10) || 230);
 if(store.get('aside.off', '')) toggleAside(true);
+
+// ---------- 图片查看器 ----------
+
+// 就地看原图：src 就是 /api/media 的原始字节，面板只把浏览器的缩放权交回来
+let lb = { s: 1, x: 0, y: 0 };
+const lbBox = $('#lightbox'), lbImg = $('#lightbox-img');
+
+function lbApply(){ lbImg.style.transform = `translate(${lb.x}px,${lb.y}px) scale(${lb.s})`; }
+
+window.openLightbox = (el, e) => {
+  if(e) e.stopPropagation();          // 别顺带把右侧抽屉切到别的消息上
+  lb = { s: 1, x: 0, y: 0 };
+  lbApply();
+  lbImg.src = el.currentSrc || el.src;   // lazy 图还没加载时，这里现拉一次
+  lbBox.classList.remove('hide');
+};
+window.closeLightbox = () => { lbBox.classList.add('hide'); lbImg.removeAttribute('src'); };
+
+// 点背景关（点到图上是平移，不算）
+lbBox.addEventListener('click', e => { if(e.target === lbBox) closeLightbox(); });
+// 滚轮缩放，以光标为锚点：wheel 要 preventDefault，所以不能让它被动监听
+lbImg.addEventListener('wheel', e => {
+  e.preventDefault();
+  const box = lbBox.getBoundingClientRect();
+  lb = zoomAt(lb, e.deltaY < 0 ? 1.2 : 1/1.2, e.clientX, e.clientY,
+              box.left + box.width/2, box.top + box.height/2);
+  lbApply();
+}, {passive: false});
+lbImg.addEventListener('dblclick', () => { lb = { s: 1, x: 0, y: 0 }; lbApply(); });
+lbImg.addEventListener('mousedown', e => {
+  e.preventDefault();
+  const from = {x: e.clientX, y: e.clientY, ox: lb.x, oy: lb.y};
+  lbImg.classList.add('dragging');
+  dragging = {move: ev => { lb.x = from.ox + ev.clientX - from.x;
+                           lb.y = from.oy + ev.clientY - from.y; lbApply(); },
+              up: () => lbImg.classList.remove('dragging')};
+});
+window.onkeydown = e => {
+  if(e.key === 'Escape' && !lbBox.classList.contains('hide')) closeLightbox();
+};
 
 async function loadChats(){
   const data = await get('/api/chats');

@@ -90,6 +90,35 @@ test('出站消息带 out 类，演习回复单独一行', () => {
              /dry-text/);
 });
 
+test('图片就地打开查看器，不再把预览图甩到新标签页', () => {
+  const html = ui.row({ msg_id: '7', ts: 1, sender: 'A', text: '[图片]',
+                        media: { kind: 'image', description: '' } });
+  assert.match(html, /onclick="openLightbox\(this,event\)"/);
+  assert.ok(!html.includes('window.open'), '不该再开新标签页');
+});
+
+test('zoomAt 让光标底下那一点在缩放前后不动', () => {
+  const near = (a, b) => assert.ok(Math.abs(a - b) < 1e-9, `${a} != ${b}`);
+  // 光标在屏幕 (mx,my)，容器中心 (cx,cy)。这条函数的全部意义就是：缩放后，
+  // 原来在光标底下的那个图像点还在光标底下
+  const [cx, cy, mx, my] = [400, 300, 520, 260];
+  const before = { s: 1.6, x: -30, y: 12 };
+  const dx = (mx - cx - before.x) / before.s;      // 光标处的图像点（相对图心）
+  const dy = (my - cy - before.y) / before.s;
+  for (const k of [1.2, 1 / 1.2, 3, 0.01]) {
+    const v = ui.zoomAt(before, k, mx, my, cx, cy);
+    near(v.s, Math.min(20, Math.max(1, before.s * k)));
+    near(cx + v.x + dx * v.s, mx);
+    near(cy + v.y + dy * v.s, my);
+  }
+  // 下限 1 = 适应窗口；上限 20，免得一把滚没了
+  assert.equal(ui.zoomAt({ s: 1, x: 0, y: 0 }, 0.5, mx, my, cx, cy).s, 1);
+  assert.equal(ui.zoomAt({ s: 20, x: 0, y: 0 }, 1.2, mx, my, cx, cy).s, 20);
+  // 在中心缩放就只变倍数，不位移
+  const c = ui.zoomAt({ s: 1, x: 0, y: 0 }, 2, cx, cy, cx, cy);
+  near(c.x, 0); near(c.y, 0); near(c.s, 2);
+});
+
 // 回归：admin.js 曾经是普通脚本里的顶层 `const esc`，内联脚本再解构一次
 // `const { esc } = window.AdminUI` 就是重复声明 → SyntaxError，整页脚本停住。
 // 分文件跑、各自 new Function 都测不出来，必须在同一个 context 里依次执行。
@@ -120,5 +149,5 @@ test('会话列表为空时说清楚是哪种空，不猜', () => {
 test('admin.js 与 admin.html 的内联脚本能共存于同一个全局作用域', () => {
   const context = panelContext();
   assert.equal(vm.runInContext('Object.keys(window.AdminUI).sort().join(",")', context),
-               'GROUP,LABEL,SPIN,chip,cursorsOf,esc,mediaBody,row');
+               'GROUP,LABEL,SPIN,chip,cursorsOf,esc,mediaBody,row,zoomAt');
 });

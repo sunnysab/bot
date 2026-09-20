@@ -49,7 +49,7 @@
     if (m.kind === 'image' || m.kind === 'emoji') {
       const cap = m.description ? `<div class="detail">${esc(m.description)}</div>` : '';
       return `<img class="media ${m.kind}" loading="lazy" src="${url}" ${fb}
-                   onclick="window.open(this.src)">${cap}`;
+                   onclick="openLightbox(this,event)">${cap}`;
     }
     if (m.kind === 'voice') {
       // preload=none：不点开就不去 daemon 要字节（语音要现下+转码，慢）
@@ -79,13 +79,24 @@
       </div></div>`;
   }
 
+  // 以光标为中心缩放：鼠标底下那一点在缩放前后必须落在同一个屏幕位置。
+  // view = {s,x,y}（对应 translate(x,y) scale(s)），(mx,my) 光标，(cx,cy) 容器中心。
+  // 下限 1 = 适应窗口——再缩下去只是把图变小，没意义
+  function zoomAt(view, k, mx, my, cx, cy) {
+    const s = Math.min(20, Math.max(1, view.s * k));
+    const r = s / view.s;
+    const u = mx - cx - view.x;     // 光标相对「图片中心」的偏移
+    const v = my - cy - view.y;
+    return { s, x: view.x - u * (r - 1), y: view.y - v * (r - 1) };
+  }
+
   // 一页消息里的游标范围。心跳事件只给 msg_id（64 位），不能拿来比大小，所以只用 cursor
   function cursorsOf(rows) {
     const cs = rows.map(m => m.cursor).filter(c => typeof c === 'number' && c);
     return { oldest: cs.length ? Math.min(...cs) : 0, newest: cs.length ? Math.max(...cs) : 0 };
   }
 
-  const AdminUI = { LABEL, GROUP, SPIN, esc, chip, mediaBody, row, cursorsOf };
+  const AdminUI = { LABEL, GROUP, SPIN, esc, chip, mediaBody, row, cursorsOf, zoomAt };
   if (typeof module !== 'undefined' && module.exports) module.exports = AdminUI;
   if (typeof window !== 'undefined') window.AdminUI = AdminUI;
 })();
