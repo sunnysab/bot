@@ -247,7 +247,7 @@ def render_referred(parsed: dict, handle: str = '') -> str:
 
 
 def parse_appmsg(content: str, quoted_handle: str = '') -> str:
-    """ appmsg（msg_type=49）→ 引用 / 链接 / 文件 / 小程序 的可读文本。
+    """ appmsg（msg_type=49）→ 引用 / 链接 / 文件 / 小程序 / 合并转发的可读文本。
 
     历史上这里只处理引用(type=57)，遇到链接会把原始 XML 漏进历史，故统一收敛到此处。
     """
@@ -265,6 +265,11 @@ def parse_appmsg(content: str, quoted_handle: str = '') -> str:
         note = f'（引用前文的消息：{quoted}）' if quoted else '（引用了前文的消息）'
         # 只引了个图、自己一个字没说：那这条记录就是那句注解
         return f'{parsed["content"]}{note}' if parsed['content'] else note
+    if appmsg_type == '19':
+        # 合并转发（聊天记录）：正文是 <des> 里的逐条摘要（`Y: …`）——title 只有
+        # 「群聊的聊天记录」这种壳，不读 des 模型就只能看到一条莫名其妙的链接。
+        des = tag(xml, 'des')
+        return f'[合并转发] {des}' if des else '[合并转发]'
     if appmsg_type == '6':
         return f'[文件] {title}' if title else '[文件]'
     if appmsg_type in ('33', '36'):
@@ -359,6 +364,12 @@ if __name__ == '__main__':
     assert parse_appmsg('<msg><appmsg><title>一篇文章</title><type>5</type><appname>某公众号</appname></appmsg></msg>') \
         == '[某公众号] 一篇文章'
     assert parse_appmsg('<msg><appmsg><title>报告.pdf</title><type>6</type></appmsg></msg>') == '[文件] 报告.pdf'
+    # 合并转发：内容在 des 里，标题只有「群聊的聊天记录」
+    record = ('<msg><appmsg><title>群聊的聊天记录</title>'
+              '<des>Y: 你怎么天天@雨墨\nY: 你是不是想吸引她的注意力</des>'
+              '<type>19</type></appmsg></msg>')
+    assert parse_appmsg(record) == '[合并转发] Y: 你怎么天天@雨墨\nY: 你是不是想吸引她的注意力', parse_appmsg(record)
+    assert parse_appmsg('<msg><appmsg><title>聊天记录</title><type>19</type></appmsg></msg>') == '[合并转发]'
     assert parse_appmsg('<msg><appmsg><title>小程序名</title><type>33</type></appmsg></msg>') == '[小程序] 小程序名'
     quote = ('<msg><appmsg><title>回复内容</title><type>57</type><fromusername>wxid_me</fromusername>'
              '<refermsg><type>49</type><chatusr>wxid_alice</chatusr>'
