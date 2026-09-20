@@ -80,13 +80,16 @@
            border-bottom:1px solid #f0f2f4;padding:3px 0;word-break:break-all}
   .logline.warn{background:#fffaf0} .logline.err{background:#fdf2f2}
   .tabs{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}
-  .cfg .cfg-row{display:flex;gap:8px;align-items:center;margin-bottom:5px;font-size:12px}
-  .cfg .cfg-row span{width:190px;color:var(--dim);flex:none;text-align:right}
+  /* 配置行：标签列固定但窄。原来 190px 把 420px 的抽屉吃了一大半，输入框只剩不到 200px。
+     长字段名换行，不去挤输入框 */
+  .cfg .cfg-row{display:grid;grid-template-columns:110px minmax(0,1fr);gap:4px 8px;align-items:center;margin-bottom:5px;font-size:12px}
+  .cfg .cfg-row span{color:var(--dim);text-align:right;overflow-wrap:anywhere;line-height:1.35}
   .cfg .cfg-row input[type=text],.cfg .cfg-row input[type=number],.cfg .cfg-row input[type=password]{
-    flex:1;min-width:0;padding:3px 7px;border:1px solid var(--line);border-radius:6px}
-  .cfg .cfg-row input[type=checkbox]{width:16px;height:16px}
+    min-width:0;padding:3px 7px;border:1px solid var(--line);border-radius:6px}
+  .cfg .cfg-row input[type=checkbox]{width:16px;height:16px;justify-self:start}
   .cfg-actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
-  .cfg textarea{width:100%;min-height:60px;padding:6px;border:1px solid var(--line);border-radius:6px;font:inherit}
+  /* 长文本字段独占整行：标签一行，文本框下一行铺满 */
+  .cfg .cfg-row textarea{grid-column:1/-1;width:100%;min-height:60px;padding:6px;border:1px solid var(--line);border-radius:6px;font:inherit}
   .bar{display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:3px}
   .bar span{width:112px;flex:none;color:var(--dim)}
   .bar i{height:10px;background:var(--accent);border-radius:3px;min-width:2px}
