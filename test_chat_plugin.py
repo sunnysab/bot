@@ -13,7 +13,7 @@ from emojis import Emoji
 from focus import FocusMode
 from habits import Habit, HabitStore
 from moments import Moment, MomentStore
-from necessity import NECESSITY_THRESHOLD
+from necessity import NECESSITY_THRESHOLD, SpeechLimiter
 from persona import Persona
 from personas import PersonaStore
 from plugin import REVOKE_PER_TURN, ChatPlugin, RepeatPlugin, ReplyPolicy, clean_reply
@@ -468,6 +468,17 @@ class TestReplyPolicy(unittest.TestCase):
         policy = ReplyPolicy(aliases=('全局名',), aliases_for=lambda contact: ('本群名',))
         self.assertEqual(policy.evaluate(self.ctx(content='本群名 在吗'), now=1000.0).kind, 'mention')
         self.assertIsNone(policy.evaluate(self.ctx(content='全局名 在吗'), now=1000.0))
+
+    def test_rate_limit_blocks_proactive_but_not_being_called(self):
+        """ 频率闸只拦主动参与；被点名必须回。 """
+        speech = SpeechLimiter(window=300.0, maximum=1, min_gap=0.0)
+        policy = ReplyPolicy(threshold=NECESSITY_THRESHOLD, speech=speech)
+        ctx = self.ctx(content='这个怎么弄啊', history=history_with(12, now=1000.0))
+        self.assertIsNotNone(policy.evaluate(ctx, now=1000.0))
+        policy.record(ctx, spoke=True, now=1000.0)
+        self.assertIsNone(policy.evaluate(ctx, now=1001.0))
+        called = self.ctx(is_at_me=True, content='在吗', history=history_with(12, now=1000.0))
+        self.assertIsNotNone(policy.evaluate(called, now=1001.0))
 
 
 class TestRepeatPlugin(unittest.IsolatedAsyncioTestCase):

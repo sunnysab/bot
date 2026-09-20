@@ -34,7 +34,7 @@ from emojis import EmojiLibrary, EmojiPolicy
 from focus import FocusMode
 from habits import HabitStore
 from moments import MomentKeeper, MomentStore
-from necessity import IdleBackoff
+from necessity import IdleBackoff, SpeechLimiter
 from persona import Persona
 from personas import PersonaStore
 from planner import PLAN_RESPONSE_FORMAT
@@ -110,6 +110,7 @@ HOT_FIELDS = frozenset({
     'reply_necessity_threshold', 'reply_activity_window',
     'reply_context_length', 'agent_max_replies', 'focus_score_bonus',
     'quote_min_activity', 'quote_window_seconds',
+    'reply_min_gap', 'reply_rate_window', 'reply_rate_max',
     'enable_focus', 'focus_enter_activity', 'focus_idle_seconds', 'focus_max_seconds',
     'backoff_start_after', 'backoff_base_seconds', 'backoff_max_seconds', 'backoff_bypass_messages',
     'typo_rate', 'dry_run', 'quote_replies',
@@ -139,6 +140,7 @@ class Runtime:
                                idle=config.focus_idle_seconds,
                                maximum=config.focus_max_seconds)
         self.backoff = IdleBackoff()
+        self.speech = SpeechLimiter()
         self.emoji_policy = EmojiPolicy()
         # 允许回复名单：面板上改、落盘、热重载不重建
         self.reply_scope = ReplyScope(config.scope_path, seed=DEFAULT_MUTED)
@@ -205,7 +207,7 @@ class Runtime:
                            activity_window=config.reply_activity_window,
                            aliases=self._make_persona().aliases,
                            focus_score_bonus=config.focus_score_bonus,
-                           backoff=self.backoff, focus=self.focus,
+                           backoff=self.backoff, focus=self.focus, speech=self.speech,
                            aliases_for=lambda contact: self._make_persona(contact).aliases)
 
     def _make_persona(self, contact: str = '') -> Persona:
@@ -279,6 +281,9 @@ class Runtime:
         self.backoff.base = config.backoff_base_seconds
         self.backoff.maximum = config.backoff_max_seconds
         self.backoff.bypass = config.backoff_bypass_messages
+        self.speech.min_gap = config.reply_min_gap
+        self.speech.window = config.reply_rate_window
+        self.speech.maximum = config.reply_rate_max
 
         self.ai, self.planner_ai = _providers(config)
         self.chat_plugin = self._make_chat_plugin()

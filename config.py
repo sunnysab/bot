@@ -85,6 +85,10 @@ class Config:
                                          # 再加就成了「热群必回」（见 necessity.PRESSURE_MAX）
     quote_min_activity: int = 8          # 窗口内别人至少说这么多条，引用才不突兀
     quote_window_seconds: float = 180.0  # 判断「群里乱不乱」的时间窗口
+    # 发言频率闸：阈值过了也可能说得太密，这是最后一道闸（只拦主动参与）
+    reply_min_gap: float = 45.0          # 同一会话两条之间至少隔多久（秒）
+    reply_rate_window: float = 300.0     # 滑动窗口（秒）
+    reply_rate_max: int = 5              # 窗口内最多主动说几条
     # 专注模式（HFC）：群里热起来就盯一会儿，期间不看门控
     enable_focus: bool = True
     focus_enter_activity: int = 15      # 活动窗口内别人的消息数够多就进
@@ -186,6 +190,7 @@ if __name__ == '__main__':
     # 回复行为也能从环境变量调（面板上要能改）
     assert base.reply_context_length == 30 and base.agent_max_replies == 1, base
     assert base.focus_score_bonus == 0 and base.quote_min_activity == 8, base
+    assert base.reply_min_gap == 45.0 and base.reply_rate_max == 5, base
     os.environ.update(AGENT_MAX_REPLIES='2', QUOTE_MIN_ACTIVITY='12')
     behavior = Config.from_env()
     assert behavior.agent_max_replies == 2 and behavior.quote_min_activity == 12, behavior

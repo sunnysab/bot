@@ -2,7 +2,7 @@
 
 import unittest
 
-from necessity import NECESSITY_THRESHOLD, NecessityInput, score_necessity
+from necessity import NECESSITY_THRESHOLD, NecessityInput, SpeechLimiter, score_necessity
 
 
 def score(text, **kwargs):
@@ -45,6 +45,25 @@ class TestNecessity(unittest.TestCase):
 
     def test_score_never_negative(self):
         self.assertGreaterEqual(score('哈哈哈哈', activity=0, self_replies=9, recent_messages=10).score, 0)
+
+
+class TestSpeechLimiter(unittest.TestCase):
+    def test_min_gap_then_window(self):
+        lim = SpeechLimiter(window=300.0, maximum=3, min_gap=45.0)
+        self.assertEqual(lim.refusal('g', 0.0), '')           # 没说过
+        lim.note('g', 0.0)
+        self.assertIn('刚说过', lim.refusal('g', 10.0))
+        self.assertEqual(lim.refusal('g', 45.0), '')          # 过了 min_gap
+        lim.note('g', 45.0)
+        lim.note('g', 100.0)
+        self.assertIn('3 条', lim.refusal('g', 150.0))        # 窗口里说满了
+        self.assertEqual(lim.refusal('g', 301.0), '')         # 第一条滑出窗口
+
+    def test_each_contact_has_its_own_budget(self):
+        lim = SpeechLimiter(window=300.0, maximum=1, min_gap=0.0)
+        lim.note('a', 0.0)
+        self.assertIn('已说', lim.refusal('a', 1.0))
+        self.assertEqual(lim.refusal('b', 1.0), '')
 
 
 if __name__ == '__main__':

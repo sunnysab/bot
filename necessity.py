@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import re
+from collections import deque
 from dataclasses import dataclass
 from typing import Literal
 
@@ -44,6 +45,12 @@ IDLE_START_AFTER = 2       # 连着几轮没开口才开始退避
 IDLE_BASE_SECONDS = 15.0   # 第一档冷却
 IDLE_MAX_SECONDS = 300.0   # 冷却上限
 IDLE_BYPASS_MESSAGES = 6   # 中间又来了这么多条消息，就当话题翻篇了，立刻放行
+
+# 发言频率闸：阈值 + 内容分能过门，但人不会一分钟说五句。这是最后一道闸，
+# 也是「话密」的直接解。只拦主动参与，被点名 / 私聊不走这里。
+SPEECH_WINDOW_SECONDS = 300.0   # 滑动窗口
+SPEECH_MAX_IN_WINDOW = 5        # 窗口内最多主动说几条
+SPEECH_MIN_GAP_SECONDS = 45.0   # 同一会话两条之间至少隔多久
 
 TriggerKind = Literal['at', 'mention', 'private', 'proactive']
 
@@ -217,6 +224,44 @@ class IdleBackoff:
                 for contact, state in self._states.items() if state.until > now}
 
 
+class SpeechLimiter:
+    """ 每个会话的发言频率闸。
+
+    记的是**自己真正开口的时刻**（`ReplyPolicy.record(spoke=True)` 时 note），
+    所以窗口内的读数就是「我刚说了几条」，不依赖历史里自己那几条还在不在窗口内。
+    """
+
+    def __init__(self, window: float = SPEECH_WINDOW_SECONDS, maximum: int = SPEECH_MAX_IN_WINDOW,
+                 min_gap: float = SPEECH_MIN_GAP_SECONDS):
+        self.window = window
+        self.maximum = maximum
+        self.min_gap = min_gap
+        self._sent: dict[str, deque[float]] = {}
+
+    def refusal(self, contact: str, now: float) -> str:
+        """ 该闭嘴就返回原因（给面板看），可以开口返回空串。 """
+        times = self._prune(contact, now)
+        if times and now - times[-1] < self.min_gap:
+            return f'刚说过（{int(now - times[-1])}s 前）'
+        if len(times) >= self.maximum:
+            return f'{int(self.window // 60)} 分钟内已说 {len(times)} 条'
+        return ''
+
+    def note(self, contact: str, now: float) -> None:
+        self._prune(contact, now).append(now)
+
+    def counts(self, now: float) -> dict[str, int]:
+        """ 各会话窗口内已说几条。健康卡要显示。 """
+        return {contact: len(self._prune(contact, now)) for contact in list(self._sent)
+                if self._prune(contact, now)}
+
+    def _prune(self, contact: str, now: float) -> deque[float]:
+        times = self._sent.setdefault(contact, deque())
+        while times and now - times[0] > self.window:
+            times.popleft()
+        return times
+
+
 def _self_check() -> None:
     def score(text, **kwargs) -> NecessityScore:
         return score_necessity(NecessityInput(text=text, is_group=True, has_at=False, has_mention=False, **kwargs))
@@ -289,6 +334,20 @@ def _self_check() -> None:
     # 开口就清零
     capped.record('g', spoke=True, now=100.0, history=[])
     assert capped.allows('g', 100.0, []) and capped._states['g'].silences == 0
+
+    # 发言频率闸：刚说完要等 min_gap；窗口里说满要等滑出去
+    speech = SpeechLimiter(window=300.0, maximum=3, min_gap=45.0)
+    assert speech.refusal('g', 1000.0) == ''            # 没说过，放行
+    speech.note('g', 1000.0)
+    assert '刚说过' in speech.refusal('g', 1010.0)
+    assert speech.refusal('g', 1045.0) == ''            # 过了 min_gap
+    speech.note('g', 1046.0)
+    speech.note('g', 1100.0)
+    assert '3 条' in speech.refusal('g', 1200.0)        # 窗口里已 3 条
+    assert speech.refusal('g', 1310.0) == ''            # 第 1 条滑出窗口（1000 + 300 < 1310）
+    # 会话之间互不影响
+    assert speech.refusal('另一个群', 1200.0) == ''
+    assert speech.counts(1310.0) == {'g': 2}
 
     print('necessity self-check ok')
 

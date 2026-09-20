@@ -37,6 +37,7 @@ class Status:
     UNSUPPORTED = 'unsupported'            # 不是文本/图片
     GATED = 'gated'                        # 必要性打分没过线
     BACKOFF = 'backoff'                    # 连续沉默退避中
+    RATE_LIMITED = 'rate_limited'          # 发言频率闸：最近说得太频繁
     DECIDING = 'deciding'                  # 决策者跑着
     PLANNER_SILENT = 'planner_silent'      # 决策者选择不发言
     PLANNER_FAILED = 'planner_failed'      # 决策调用失败，直接交给表达者
@@ -57,7 +58,7 @@ class Status:
         QUEUED: 'pending', TYPING: 'pending',
         SENT: 'replied', PHONE: 'phone',
         STALE: 'skipped', MUTED: 'skipped', UNSUPPORTED: 'skipped',
-        GATED: 'skipped', BACKOFF: 'skipped', PLANNER_SILENT: 'skipped',
+        GATED: 'skipped', BACKOFF: 'skipped', RATE_LIMITED: 'skipped', PLANNER_SILENT: 'skipped',
         EMPTY_REPLY: 'skipped', PLACEHOLDER_BLOCKED: 'skipped',
         PLANNER_FAILED: 'warn', EXPRESS_FAILED: 'failed', FAILED: 'failed',
         DRY_RUN: 'dry_run',
@@ -251,7 +252,7 @@ def _self_check() -> None:
     assert Status.group('没这个状态') == 'unknown'
     for name in ('RECEIVED', 'DECIDING', 'EXPRESSING', 'QUEUED', 'TYPING', 'SENT',
                  'PHONE', 'STALE', 'MUTED', 'UNSUPPORTED', 'GATED', 'BACKOFF',
-                 'PLANNER_SILENT', 'EMPTY_REPLY', 'PLACEHOLDER_BLOCKED',
+                 'RATE_LIMITED', 'PLANNER_SILENT', 'EMPTY_REPLY', 'PLACEHOLDER_BLOCKED',
                  'PLANNER_FAILED', 'EXPRESS_FAILED', 'FAILED', 'DRY_RUN'):
         assert Status.group(getattr(Status, name)) != 'unknown', name
 

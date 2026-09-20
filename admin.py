@@ -80,7 +80,8 @@ CONFIG_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         'backoff_bypass_messages')),
     ('专注模式', ('enable_focus', 'focus_enter_activity', 'focus_idle_seconds', 'focus_max_seconds')),
     ('回复行为', ('reply_context_length', 'agent_max_replies', 'focus_score_bonus',
-                'quote_replies', 'quote_min_activity', 'quote_window_seconds')),
+                'quote_replies', 'quote_min_activity', 'quote_window_seconds',
+                'reply_min_gap', 'reply_rate_window', 'reply_rate_max')),
     ('人格与表达', ('personality', 'reply_style', 'behavior_style', 'reply_styles', 'style_probability')),
     ('决策者', ('reply_mode', 'enable_planner', 'planner_url', 'planner_key', 'planner_model', 'planner_temperature',
                 'planner_max_tokens', 'planner_thinking', 'planner_json_schema', 'enable_tools',
@@ -99,6 +100,9 @@ RANGES: dict[str, tuple[float, float]] = {
     'focus_score_bonus': (0, 100),
     'quote_min_activity': (0, 50),
     'quote_window_seconds': (10, 3600),
+    'reply_min_gap': (0.0, 600.0),
+    'reply_rate_window': (10.0, 3600.0),
+    'reply_rate_max': (1, 50),
     'reply_context_length': (1, 200),
     'reply_necessity_threshold': (0, 200),
     'reply_activity_window': (10, 3600),
@@ -363,6 +367,7 @@ class Admin:
             'focus': focus,
             'focus_counts': {'entered': runtime.focus.entered, 'exited': runtime.focus.exited},
             'backoff': {chat: round(left, 1) for chat, left in runtime.backoff.pending(now).items()},
+            'speech': runtime.speech.counts(now),
             'outbox': bot.outbox.depth(),
             'window': bot.history.sizes(),
             'emojis': {'total': len(runtime.emojis), 'sendable': runtime.emojis.sendable_count,
@@ -885,6 +890,10 @@ def _self_check() -> None:
         def pending(self, _now):
             return {'测试群': 12.0}
 
+    class FakeSpeech:
+        def counts(self, _now):
+            return {'测试群': 2}
+
     class FakeEmojis:
         def __len__(self): return 10
         sendable_count, scene_count = 4, 2
@@ -908,7 +917,7 @@ def _self_check() -> None:
         personas=PersonaStore(Path(tempfile.gettempdir()) / 'bot-admin-selfcheck-personas.json'),
         reply_scope=ReplyScope(Path(tempfile.gettempdir()) / 'bot-admin-selfcheck-scope.json',
                                seed=('研究生摆烂群',)),
-        focus=FakeFocus(), backoff=FakeBackoff(), emojis=FakeEmojis(), memories=FakeMemories(),
+        focus=FakeFocus(), backoff=FakeBackoff(), speech=FakeSpeech(), emojis=FakeEmojis(), memories=FakeMemories(),
         bot=types.SimpleNamespace(
             dry_run=False, typo_rate=0.08, reply_count=3, emoji_count=1, typo_count=0,
             outbox=FakeOutbox(), history=FakeHistory(),

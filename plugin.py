@@ -24,6 +24,7 @@ from necessity import (
     IdleBackoff,
     NecessityInput,
     NecessityScore,
+    SpeechLimiter,
     score_necessity,
 )
 from persona import Persona
@@ -281,15 +282,18 @@ class GateDecision:
     score: int = 0
     kind: str = ''
     reasons: tuple[str, ...] = ()
-    blocked_by: str = ''            # 'score' | 'backoff' | ''
+    blocked_by: str = ''            # 'score' | 'backoff' | 'rate' | ''
     score_obj: NecessityScore | None = None
     threshold: int = 0
     remaining: float = 0.0          # 退避里还剩多少秒
+    rate_detail: str = ''           # 频率闸拦下时的原因
 
     @property
     def detail(self) -> str:
         if self.blocked_by == 'backoff':
             return f'沉默退避中，剩 {int(self.remaining)}s'
+        if self.blocked_by == 'rate':
+            return f'说得太频繁：{self.rate_detail}'
         if self.blocked_by == 'score':
             return f'门控 {self.score}/{self.threshold} · {"+".join(self.reasons) or "无"}'
         return ''
@@ -306,7 +310,8 @@ class ReplyPolicy:
     def __init__(self, threshold: int = NECESSITY_THRESHOLD, activity_window: float = 180.0,
                  aliases: tuple[str, ...] = (), backoff: IdleBackoff | None = None,
                  focus: FocusMode | None = None, focus_score_bonus: int = 0,
-                 aliases_for: Callable[[str], tuple[str, ...]] | None = None):
+                 aliases_for: Callable[[str], tuple[str, ...]] | None = None,
+                 speech: SpeechLimiter | None = None):
         """ :param threshold: 必要性分数阈值，越高越沉默
         :param activity_window: 统计群活跃度的时间窗口（秒）
         :param aliases: 机器人自己的其他叫法，命中就当被叫到名字
@@ -315,6 +320,7 @@ class ReplyPolicy:
         :param focus_score_bonus: 专注期的加分。默认 0——专注本身只意味着「不省那次模型调用」，
             而热群的压力分已经封顶送它过线；再加分就是热群必回（实测 82% 的轮次在专注期）
         :param aliases_for: 按会话取别名（分会话人设改了别名也要能叫应）；不传用上面的 aliases
+        :param speech: 发言频率闸；不传就不限频（测试用）
         """
         self.threshold = threshold
         self.activity_window = activity_window
@@ -323,6 +329,7 @@ class ReplyPolicy:
         self.backoff = backoff if backoff is not None else IdleBackoff()
         self.focus = focus
         self.focus_score_bonus = focus_score_bonus
+        self.speech = speech
 
     def evaluate_detailed(self, ctx: MessageContext, now: float) -> GateDecision:
         """ 门控 + 理由。面板要显示「跳过的原因」，所以不能再只给 None。 """
@@ -337,8 +344,8 @@ class ReplyPolicy:
             self_replies=self._self_replies(ctx, now),
             recent_messages=self._recent_messages(ctx, now),
         ))
-        # 专注模式：聊得正热就盯一会儿，只是**加分**——阈值和存在感惩罚照常生效，
-        # 免得群里只剩它一个人在说话
+        # 专注模式：聊得正热就盯一会儿。**不再动分数**（focused 只用于跳过沉默退避
+        # 和往 prompt 里加一句「可更主动」）——热群本来就有压力分，再加就成了热群必回
         if result.kind == 'proactive' and self.focus:
             if self.focus.tick(ctx.contact, now, activity):
                 result = replace(result, focused=True, reasons=(*result.reasons, '专注'),
@@ -354,6 +361,13 @@ class ReplyPolicy:
                                 reasons=result.reasons, blocked_by='backoff',
                                 threshold=self.threshold,
                                 remaining=self.backoff.remaining(ctx.contact, now))
+        # 频率闸：分数和退避都过了，也要看「我最近是不是说太多了」
+        if result.kind == 'proactive' and self.speech is not None:
+            refusal = self.speech.refusal(ctx.contact, now)
+            if refusal:
+                return GateDecision(allowed=False, score=result.score, kind=result.kind,
+                                    reasons=result.reasons, blocked_by='rate',
+                                    threshold=self.threshold, rate_detail=refusal)
         return GateDecision(allowed=True, score=result.score, kind=result.kind,
                             reasons=result.reasons, score_obj=result,
                             threshold=self.threshold)
@@ -367,8 +381,10 @@ class ReplyPolicy:
         return decision.score_obj if decision.allowed else None
 
     def record(self, ctx: MessageContext, spoke: bool, now: float) -> None:
-        """ 记下这一轮最后说没说，给连续沉默退避用。 """
+        """ 记下这一轮最后说没说：退避靠它清零，频率闸靠它计时。 """
         self.backoff.record(ctx.contact, spoke, now, ctx.history)
+        if spoke and self.speech is not None:
+            self.speech.note(ctx.contact, now)
 
     def _activity(self, ctx: MessageContext, now: float) -> int:
         """ 活动窗口内别人的消息数。 """
@@ -485,8 +501,9 @@ class ChatPlugin(Plugin):
         now = time.time()
         decision = self.policy.evaluate_detailed(ctx, now)
         if not decision.allowed:
-            self._emit(ctx, Status.GATED if decision.blocked_by == 'score' else Status.BACKOFF,
-                       decision.detail, score=decision.score)
+            blocked = {'score': Status.GATED, 'rate': Status.RATE_LIMITED}.get(
+                decision.blocked_by, Status.BACKOFF)
+            self._emit(ctx, blocked, decision.detail, score=decision.score)
             return None
         necessity = decision.score_obj
 
