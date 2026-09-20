@@ -56,12 +56,15 @@ Revoke = Callable[[str, int, str], Awaitable[str]]
 # 模型看得到每个工具自己的说明书，比在系统提示里堆一大段更不容易漏。
 SEARCH_EMOJI = ToolSpec(
     name='search_emoji',
-    description='按关键词搜表情包，返回带序号的候选。关键词用一个短的情绪或动作词'
-                '（如「无语」「狗头」「点赞」「撑不住了」），不要写一整句话。'
+    description='按关键词搜表情包，返回带序号的候选。关键词用一个短的情绪或动作词，'
+                '两个字以内（如「无语」「狗头」「麻了」「点赞」），不要写一整句话。'
                 '一次只搜一个词；没合适的就换个词再搜一次，别反复搜同一个。',
     parameters={'type': 'object',
                 'properties': {'keyword': {'type': 'string', 'description': '短的情绪或动作词'}},
                 'required': ['keyword']})
+# 搜索关键词的上限：daemon 是按字面匹配的，词越长命中越少，
+# 实测两个字的情绪词（无语 / 狗头 / 麻了）最好使，超出的直接截掉。
+MAX_EMOJI_KEYWORD = 2
 SEND_EMOJI = ToolSpec(
     name='send_emoji',
     description='发出上一次 search_emoji 结果里的第 index 张表情。必须先搜再发。'
@@ -586,7 +589,7 @@ class ChatPlugin(Plugin):
         send_emoji 的序号是上一次搜索的结果，所以状态得跨轮留着。
         """
         async def search(arguments: dict) -> ToolResult:
-            keyword = arg_str(arguments, 'keyword')
+            keyword = arg_str(arguments, 'keyword')[:MAX_EMOJI_KEYWORD]
             if not keyword:
                 return ToolResult('没给关键词，什么也没搜到。')
             if self.emoji_search is None:

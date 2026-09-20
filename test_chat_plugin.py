@@ -655,6 +655,13 @@ class TestToolLoop(unittest.IsolatedAsyncioTestCase):
         # 越界也不能整轮算废：模型还有一轮机会改
         self.assertEqual(len(self.ai.rounds), 3)
 
+    async def test_long_keyword_is_cut_to_two_chars(self):
+        """ 表情是按字面匹配的，词越长命中越差；模型写长了就只取前两个字。 """
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('search_emoji', keyword='无语到说不出话'),)),
+                              AssistantTurn()], search={'无语': [_emoji()]})
+        await plugin.handle(proactive_ctx())
+        self.assertEqual(self.search.queries, ['无语'])
+
     async def test_empty_search_tells_the_model_to_try_another_word(self):
         plugin = self.plugin([AssistantTurn(tool_calls=(_call('search_emoji', keyword='不存在的词'),)),
                               AssistantTurn()])
