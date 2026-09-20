@@ -37,6 +37,11 @@ class TestNecessity(unittest.TestCase):
                          score('一句平平无奇的话', activity=20).score)
         self.assertLess(score('[图片：一只橘猫]', activity=20).score, NECESSITY_THRESHOLD)
 
+    def test_sticker_worth_a_reply_in_a_hot_group(self):
+        # 表情自带语义（微信 desc 解出来的），算一点内容分；冷群里仍不够格
+        self.assertGreaterEqual(score('[表情：摊倒]', activity=10).score, NECESSITY_THRESHOLD)
+        self.assertLess(score('[表情：摊倒]', activity=1).score, NECESSITY_THRESHOLD)
+
     def test_active_group_plain_chatter_stays_below_threshold(self):
         # 封顶 40 < 阈值 60：群热本身不再够格，闲话要说过线得有内容分
         self.assertLess(score('今天真冷', activity=10).score, NECESSITY_THRESHOLD)

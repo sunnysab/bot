@@ -495,7 +495,7 @@ class ChatPlugin(Plugin):
 
     @override
     async def handle(self, ctx: MessageContext) -> Reply | None:
-        if not (ctx.is_text or ctx.is_image):  # 只处理文本和图片消息
+        if not (ctx.is_text or ctx.is_image or ctx.is_emoji):  # 文本 / 图片 / 表情
             return None
 
         now = time.time()

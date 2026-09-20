@@ -99,6 +99,9 @@ def _score_content(text: str) -> tuple[int, list[str]]:
     cleaned = (text or '').strip()
     if not cleaned:
         return 0, []
+    if cleaned.startswith('[表情'):
+        # 表情是有人在表达情绪，接一下比假装没看见自然；图片/语音那种还得自己去看才有意义
+        return 20, ['表情']
     if cleaned.startswith(MEDIA_PREFIXES):
         return 0, ['媒体占位']
     if _is_short_reaction(cleaned):

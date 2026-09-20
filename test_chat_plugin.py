@@ -789,6 +789,20 @@ class TestAgentMode(unittest.IsolatedAsyncioTestCase):
         reply = await plugin.handle(proactive_ctx())
         self.assertEqual(reply.texts, ['第一条'])
 
+    async def test_sticker_reaches_the_model_in_a_hot_group(self):
+        """ 表情消息不再被入口挡掉（历史里的 `[表情：…]` 自带语义）。 """
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('reply', text='哈哈哈哈'),))])
+        ctx = make_ctx(make_msg(is_chatroom=True, msg_type=47, content='[表情：摊倒]'),
+                       history=history_with(12, now=time.time()))
+        reply = await plugin.handle(ctx)
+        self.assertEqual(reply.texts, ['哈哈哈哈'])
+
+    async def test_sticker_in_a_quiet_group_stays_silent(self):
+        plugin = self.plugin([])
+        ctx = make_ctx(make_msg(is_chatroom=True, msg_type=47, content='[表情：摊倒]'),
+                       history=history_with(1, now=time.time()))
+        self.assertIsNone(await plugin.handle(ctx))
+
     async def test_per_conversation_persona_reaches_the_prompt(self):
         """ 分会话人设只盖这个会话，且真的进了 system prompt。 """
         store = PersonaStore(Path(tempfile.mkdtemp()) / 'personas.json')
