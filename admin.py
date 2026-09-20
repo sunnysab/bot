@@ -455,22 +455,31 @@ class Admin:
         """
         if not chat:
             return {'messages': [], 'has_more': False}
-        raw = self.call(self._wechat.messages(chat, limit=limit, before_id=before, after_id=after))
+        raw = self.call(self._wechat.messages(chat, limit=limit, before_id=before, after_id=after,
+                                              exclude_system=False))
         # daemon 的 sender_display_name 查不到时会拿 wxid 当名字，那不是名字。
         # 只对真正拿不到的那几个查（查到的会缓存），不是每条都查
         unknown = [m.sender for m in raw
                    if not m.is_self and m.sender and m.sender_display_name == m.sender]
-        names = self.call(self._wechat.sender_names(chat, unknown)) if unknown else {}
+        # 拍一拍也走 10002，被拍的那一方同样只有一个 wxid，面板要显示名字
+        patted = [p.patted_user for p in (getattr(m, 'pat', None) for m in raw)
+                  if p is not None and p.patted_user]
+        names = self.call(self._wechat.sender_names(chat, [*unknown, *patted])) \
+            if unknown or patted else {}
         rows = [row for row in (self._row(msg, names) for msg in raw) if row]
         return {'messages': rows, 'has_more': len(raw) >= limit}
 
     def _row(self, msg, names: dict[str, str] | None = None) -> dict | None:
         kind = MessageKind.of(msg.msg_type)
-        # 设备同步(51)/系统消息不该进聊天记录，而 daemon 的 exclude_system 只排
-        # 10000/10002——实测 51 有 34 条挂在群里，必须自己滤掉
-        if kind in SYSTEM_KINDS or kind is MessageKind.OTHER:
+        pat = getattr(msg, 'pat', None)
+        # 设备同步(51)/系统消息不该进聊天记录。daemon 的 exclude_system 只排 10000/10002，
+        # 所以取的时候不排、在这里自己滤；拍一拍虽然也是 10002，但那是社交信号，留下
+        if (kind in SYSTEM_KINDS and pat is None) or kind is MessageKind.OTHER:
             return None
-        text, media = render(msg.msg_type, msg.content, msg.text)
+        if pat is not None:
+            text, media = self._render_pat(msg, names), None
+        else:
+            text, media = render(msg.msg_type, msg.content, msg.text)
         if not text:
             return None
         if media is not None and not media.description and media.md5 and self.runtime.media_cache:
@@ -508,6 +517,15 @@ class Admin:
                 'duration': media.duration, 'size': media.size},
             'quote': quote,
         }
+
+    def _render_pat(self, msg, names: dict[str, str] | None) -> str:
+        """ 拍一拍 → 面板里的一行（与 `Bot._render_pat` 同一口径）。 """
+        pat = msg.pat
+        if pat.patted_user == self.runtime.bot.wxid:
+            patted = '你'
+        else:
+            patted = (names or {}).get(pat.patted_user) or pat.patted_user
+        return f'拍了拍 {patted}{pat.suffix or ""}'
 
     def media(self, msg_id: str) -> tuple[bytes, str]:
         """ 取一条消息的附件字节，返回 (data, content-type)。
@@ -1001,6 +1019,7 @@ def _self_check() -> None:
         focus=FakeFocus(), backoff=FakeBackoff(), speech=FakeSpeech(), emojis=FakeEmojis(), memories=FakeMemories(),
         bot=types.SimpleNamespace(
             dry_run=False, typo_rate=0.08, reply_count=3, emoji_count=1, typo_count=0,
+            wxid='wxid_bot',
             outbox=FakeOutbox(), history=FakeHistory(),
             is_muted=lambda name: name == '测试群',
             wechat=types.SimpleNamespace(wxid='wxid_bot', nickname='Bot', dry_run=False)))
@@ -1047,6 +1066,14 @@ def _self_check() -> None:
     assert admin._row(msg(51, '<msg><op id="5"/></msg>')) is None
     assert admin._row(msg(10000, '系统消息')) is None
     assert admin._row(msg(34, 'x')) is not None          # 语音有占位符，要显示
+
+    # 拍一拍也是 10002，但是社交信号：要留下，而且把 wxid 渲染成人话
+    patted = msg(10002, '<sysmsg type="pat">')
+    patted.pat = types.SimpleNamespace(patted_user='wxid_other', suffix='的脑袋')
+    assert admin._row(patted, {'wxid_other': '李四'})['text'] == '拍了拍 李四的脑袋'
+    own_pat = msg(10002, '<sysmsg type="pat">', is_self=True)
+    own_pat.pat = types.SimpleNamespace(patted_user='wxid_bot', suffix='')
+    assert admin._row(own_pat, {})['text'] == '拍了拍 你'
 
     # 表情 / 图片走占位符；有缓存描述时要补上
     emoji = admin._row(msg(47, '<msg><emoji md5="m" desc="ChEKB2RlZmF1bHQSBuWVp+WVpw==" /></msg>'))
