@@ -249,6 +249,7 @@ class Runtime:
                           reply_mode=config.reply_mode, revoke=self.bot.revoke,
                           member_lookup=self.bot.lookup_member,
                           message_search=self.bot.search_messages,
+                          pat=self.bot.pat,
                           agent_max_replies=config.agent_max_replies,
                           personas=self.personas,
                           image_store=self.images, image_timeout=config.image_fetch_timeout,

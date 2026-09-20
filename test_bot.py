@@ -38,6 +38,14 @@ class FakeWechat:
         self.revoke_fail = False
         self.voices: list[int] = []                     # 请求过转写的语音 msg_id
         self.transcript = None                          # 非 None = 转写成功，返回这段文本
+        self.pats: list[tuple[str, str]] = []           # (会话, 被拍者 wxid)
+
+    async def send_pat(self, to, target=None):
+        self.pats.append((to, target or to))
+        return {'sent': True}
+
+    async def find_member(self, chatroom, name):
+        return {'Alice': 'wxid_alice'}.get(name, '')
 
     async def revoke(self, to, msg_id):
         self.revoked.append((to, msg_id))
@@ -1038,6 +1046,54 @@ class TestEmojiStealing(unittest.IsolatedAsyncioTestCase):
         for i in range(EMOJI_LOCAL_ENOUGH + 5):
             library.record(Emoji(md5=f'{i:032x}', cdnurl='http://cdn/x'))
         self.assertEqual(library.sendable_count, EMOJI_LOCAL_ENOUGH + 5)
+
+
+class TestPat(unittest.IsolatedAsyncioTestCase):
+    """ 拍一拍：入站要进历史（被拍 = 被点名），出站要真发给 daemon。 """
+
+    async def asyncSetUp(self):
+        self.bot = Bot('127.0.0.1', 9999, x_delay=0, send_interval=0)
+        self.bot._wechat = FakeWechat()
+        await self.bot.outbox.start()
+
+    async def asyncTearDown(self):
+        await self.bot.outbox.stop()
+
+    def _window(self):
+        return self.bot._history.get_context('456@chatroom')
+
+    async def test_a_pat_on_the_bot_is_must_respond(self):
+        msg = make_msg(text='<sysmsg type="pat">', msg_type=10002)
+        msg.pat = types.SimpleNamespace(patted_user='wxid_bot', suffix='的脑袋')
+        await self.bot.on_message(msg)
+        await asyncio.sleep(0.05)
+
+        self.assertTrue(msg.is_at_me)                       # 门控会按「被点名」直接放行
+        self.assertEqual(self._window()[-1].text, '拍了拍 你的脑袋')
+        self.assertEqual(self._window()[-1].sender, 'Alice')
+
+    async def test_a_pat_on_someone_else_is_only_context(self):
+        msg = make_msg(text='<sysmsg type="pat">', msg_type=10002)
+        msg.is_at_me = False
+        msg.pat = types.SimpleNamespace(patted_user='wxid_bob', suffix='')
+        await self.bot.on_message(msg)
+        await asyncio.sleep(0.05)
+
+        self.assertFalse(msg.is_at_me)
+        self.assertEqual(self._window()[-1].text, '拍了拍 wxid_bob')
+
+    async def test_pat_sends_and_records(self):
+        ok, message = await self.bot.pat('456@chatroom', 'Alice')
+        self.assertTrue(ok)
+        self.assertEqual(self.bot._wechat.pats, [('456@chatroom', 'wxid_alice')])
+        self.assertIn('Alice', message)
+        self.assertEqual(self._window()[-1].text, '拍了拍 Alice')
+
+    async def test_pat_unknown_name_does_not_send(self):
+        ok, message = await self.bot.pat('456@chatroom', '查无此人')
+        self.assertFalse(ok)
+        self.assertEqual(self.bot._wechat.pats, [])
+        self.assertIn('没找到', message)
 
 
 if __name__ == '__main__':

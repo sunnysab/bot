@@ -931,6 +931,69 @@ class TestAtTool(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.texts, ['收到'])
 
 
+class TestPatTool(unittest.IsolatedAsyncioTestCase):
+    """ 拍一拍：模型主动拍人。私聊不用名字，群聊按群昵称，拍成了才能算「回应过」。 """
+
+    def setUp(self):
+        self.patted = []
+
+    async def pat_action(self, chat, name):
+        self.patted.append((chat, name))
+        if name == '查无此人':
+            return False, '群里没找到叫「查无此人」的人，没拍成。'
+        return True, f'拍好了：你拍了拍{name or "对方"}。'
+
+    def plugin(self, turns, **kwargs):
+        self.ai = ToolAi(turns)
+        return ChatPlugin(self.ai, context_length=10, pat=self.pat_action,
+                          reply_mode='agent', **kwargs)
+
+    async def test_pat_is_called_and_reported_back(self):
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('pat', target='张三'),)),
+                              AssistantTurn(tool_calls=(_call('reply', text='拍你一下'),))])
+        reply = await plugin.handle(proactive_ctx())
+
+        self.assertIn('pat', self.ai.tools_seen[0])
+        self.assertEqual(self.patted, [('456@chatroom', '张三')])
+        self.assertIn('拍了拍张三', json.dumps(self.ai.rounds[1], ensure_ascii=False))
+        self.assertEqual(reply.texts, ['拍你一下'])
+
+    async def test_a_successful_pat_counts_as_a_response(self):
+        """ 被拍了只拍回去也算回应，别再逼它额外说一句。 """
+        msg = make_msg(is_chatroom=True, is_at_me=True, content='拍了拍 你')
+        ctx = make_ctx(msg, history=history_with(12, now=time.time()))
+        ai = ToolAi([AssistantTurn(tool_calls=(_call('pat', target='张三'),))])
+        plugin = ChatPlugin(ai, context_length=10, pat=self.pat_action, reply_mode='agent')
+        reply = await plugin.handle(ctx)
+        # 没有补一轪「必须回应」：拍了就算回应过
+        self.assertNotIn('你还没给回应', json.dumps(ai.rounds, ensure_ascii=False))
+        self.assertEqual(reply.texts, [])
+
+    async def test_a_failed_pat_does_not_count_as_a_response(self):
+        msg = make_msg(is_chatroom=True, is_at_me=True, content='拍了拍 你')
+        ctx = make_ctx(msg, history=history_with(12, now=time.time()))
+        ai = ToolAi([AssistantTurn(tool_calls=(_call('pat', target='查无此人'),)),
+                     AssistantTurn(),
+                     AssistantTurn(tool_calls=(_call('reply', text='在'),))])
+        plugin = ChatPlugin(ai, context_length=10, pat=self.pat_action, reply_mode='agent')
+        reply = await plugin.handle(ctx)
+        # 没拍成就不算回应，下一轮会被推到「必须回应」再补一句
+        self.assertIn('你还没给回应', json.dumps(ai.rounds[2], ensure_ascii=False))
+        self.assertEqual(reply.texts, ['在'])
+
+    async def test_private_chat_pats_without_a_name(self):
+        ctx = proactive_ctx()
+        ctx.msg.is_chatroom = False
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('pat'),)), AssistantTurn()])
+        await plugin.handle(ctx)
+        self.assertEqual(self.patted, [('456@chatroom', '')])
+
+    async def test_tool_is_hidden_without_a_backend(self):
+        ai = ToolAi([AssistantTurn()])
+        await ChatPlugin(ai, context_length=10).handle(proactive_ctx())
+        self.assertNotIn('pat', ai.tools_seen[0])
+
+
 class TestAgentMode(unittest.IsolatedAsyncioTestCase):
     """ 单段式：判断和台词一次做完，回话就是 reply 工具调用，不再叫表达者。 """
 

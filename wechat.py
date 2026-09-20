@@ -105,7 +105,9 @@ class Wechat:
         logger.debug(msg)
 
         kind = MessageKind.of(msg.msg_type)
-        if kind in SYSTEM_KINDS:  # 好友请求 / 设备同步 / 系统消息
+        # 好友请求 / 设备同步 / 系统消息丢掉；但拍一拍也走 10002（`<sysmsg type="pat">`），
+        # 它是社交信号，得让它进历史——否则模型永远不知道自己被谁拍了
+        if kind in SYSTEM_KINDS and msg.pat is None:
             return
         if kind is MessageKind.OTHER:
             logger.warning(f'Unknown message type: {msg.msg_type}')
@@ -165,6 +167,14 @@ class Wechat:
             return {'sent': False, 'dry_run': True}
         logger.info(f'To {receiver}: 表情「{emoji.desc or emoji.md5}」')
         return await self._bot.send_emoji(to=receiver, emoji=emoji.to_daemon())
+
+    async def send_pat(self, receiver: str, target: str = '') -> dict:
+        """ 拍一拍。群聊要 `target`（被拍成员 wxid）；私聊留空即拍对方。 """
+        if self.dry_run:
+            logger.info(f'[DRY RUN] To {receiver}: 拍了拍 {target or receiver}')
+            return {'sent': False, 'dry_run': True}
+        logger.info(f'To {receiver}: 拍了拍 {target or receiver}')
+        return await self._bot.send_pat(receiver, target or None)
 
     async def revoke(self, to: str, msg_id: int) -> dict:
         """ 撤回自己发出的一条消息。

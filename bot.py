@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import TypeVar
 
 from loguru import logger
-from weixin_bot import WeChatBotError
+from weixin_bot import PatContent, WeChatBotError
 
 from context import ChatWindow, ContextManager, MessageContext, MessageKind, SingleRecord, message_handle
 from describer import MediaDescriber
@@ -168,6 +168,31 @@ class Bot:
     async def lookup_member(self, chat: str, name: str) -> str:
         """ 群昵称 → wxid。@ 人用：模型看到的是名字，daemon 要的是 wxid。 """
         return await self._wechat.find_member(chat, name)
+
+    async def pat(self, chat: str, name: str) -> tuple[bool, str]:
+        """ 拍一拍某人（模型发起的动作）。返回 (是否拍成, 给模型看的回执)。
+
+        群聊按群昵称找 wxid，名字对不上不硬拍；私聊直接拍对方。拍完写一条 is_self
+        记录进窗口，模型下一轮看得到自己拍过谁（daemon 的频控只是第二道闸）。
+        """
+        target = chat
+        if chat.endswith('@chatroom'):
+            if not name:
+                return False, '群聊里要拍谁？给一个群昵称。'
+            target = await self.lookup_member(chat, name)
+            if not target:
+                return False, f'群里没找到叫「{name}」的人，没拍成。'
+        else:
+            name = await self._wechat.get_display_name(chat)
+        try:
+            await self._wechat.send_pat(chat, target)
+        except Exception as e:  # noqa: BLE001 —— daemon 的频控（429）要原样转给模型
+            logger.warning(f'拍一拍失败（{chat} -> {target}）: {e}')
+            return False, f'没拍成：{e}'
+        if not self.dry_run:
+            self._history.push_message(chat, await self._wechat.get_display_name(self.wxid),
+                                       f'拍了拍 {name}', int(time.time()), is_self=True)
+        return True, f'拍好了：你拍了拍{name}。'
 
     async def search_messages(self, chat: str, keyword: str, count: int = 40) -> str:
         """ 给模型查更早的聊天记录。命中就返回 transcript 形状的几行，没命中返回空串。
@@ -575,6 +600,18 @@ class Bot:
                          chat_name=source, emoji=response.emoji)
         logger.debug(f'{len(texts)} responses queued.')
 
+    async def _render_pat(self, msg: Message, pat: PatContent) -> str:
+        """ 拍一拍 → 历史里的一行（前缀的发送者由记录本身带上）。
+
+        被拍的是自己时等同于「被点名」（置 `is_at_me`）：门控直接放行、模型必须回应。
+        拍别人的只是群里的一条动态，看得见就行。
+        """
+        if pat.patted_user == self.wxid:
+            msg.is_at_me = True
+            return f'拍了拍 你{pat.suffix or ""}'
+        patted = await self._wechat.get_display_name(pat.patted_user, msg.reply_target)
+        return f'拍了拍 {patted}{pat.suffix or ""}'
+
     async def on_message(self, msg: Message) -> None:
         """ 消息处理函数 """
 
@@ -597,8 +634,14 @@ class Bot:
         # 这样原文那行和引用注解里会落在同一个标签上
         handle = message_handle(msg.msg_id)
         quoted_handle = message_handle(msg.ref_svrid) if msg.ref_svrid else ''
-        text, media = render(msg.msg_type, msg.content, msg.text,
-                             handle=handle, quoted_handle=quoted_handle)
+        # 拍一拍走 10002（`<sysmsg type="pat">`），不是一种 msg_type，得单独看 parsed 内容。
+        # 假消息（测试 / 离线工具）没有 `pat`，所以用 getattr
+        pat = getattr(msg, 'pat', None)
+        if pat is not None:
+            text, media = await self._render_pat(msg, pat), None
+        else:
+            text, media = render(msg.msg_type, msg.content, msg.text,
+                                 handle=handle, quoted_handle=quoted_handle)
         # 要内联给模型的图从哪来：自己有图就是它自己，引用图就跟到 ref_svrid 上。
         # **必须在下面改写 msg.content 之前调**——link_media 要读引用消息里的原始 XML
         media_id, download = self._wechat.link_media(msg, media)

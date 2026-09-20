@@ -34,6 +34,7 @@ def make_message(**kwargs) -> Message:
 class FakeBot:
     def __init__(self):
         self.sent: list[dict] = []
+        self.pats: list[tuple[str, str | None]] = []
         self.contact_calls: list[str] = []
         self.wxid = 'wxid_me'
         self.nickname = 'Bot'
@@ -79,6 +80,10 @@ class FakeBot:
                           'ref_svrid': ref_svrid})
         return {'sent': True}
 
+    async def send_pat(self, to, target=None):
+        self.pats.append((to, target))
+        return {'sent': True}
+
 
 class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
     async def _call(self, action, params):
@@ -100,6 +105,26 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
     async def test_dispatch_ignores_unknown_type(self):
         await self.wechat._dispatch(make_message(msg_type=10000))
         self.assertEqual(self.dispatched, [])
+
+    async def test_dispatch_forwards_pat(self):
+        """ 拍一拍也走 10002，但它不是系统噪声，得进历史（否则模型永不知自己被拍了）。 """
+        msg = make_message(msg_type=10002, content='<sysmsg type="pat">', clean_text='',
+                           parsed_raw={'type': 'pat', 'patted_user': 'wxid_me', 'suffix': ''})
+        await self.wechat._dispatch(msg)
+        self.assertEqual(self.dispatched, [msg])
+
+    async def test_dispatch_drops_other_sysmsg(self):
+        msg = make_message(msg_type=10002, content='<sysmsg type="revokemsg">', clean_text='',
+                           parsed_raw={'type': 'revoke'})
+        await self.wechat._dispatch(msg)
+        self.assertEqual(self.dispatched, [])
+
+    async def test_send_pat_delegates_to_daemon(self):
+        await self.wechat.send_pat('456@chatroom', 'wxid_alice')
+        self.assertEqual(self.wechat._bot.pats, [('456@chatroom', 'wxid_alice')])
+        # 私聊不给 target：daemon 自己回落到 `to`
+        await self.wechat.send_pat('wxid_bob')
+        self.assertEqual(self.wechat._bot.pats[-1], ('wxid_bob', None))
 
     async def test_fetch_history_maps_and_filters(self):
         window = await self.wechat.fetch_history('456@chatroom', count=10)

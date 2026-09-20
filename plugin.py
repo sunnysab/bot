@@ -61,6 +61,10 @@ MemberLookup = Callable[[str, str], Awaitable[str]]
 # 入参 (会话, 关键词)，返回拼好的几行记录；没命中返回空串。
 MessageSearch = Callable[[str, str], Awaitable[str]]
 
+# 拍一拍：模型主动拍某人（打招呼 / 催人 / 拍回去）。入参 (会话, 群昵称，私聊可空)，
+# 返回 (是否拍成, 给模型看的回执)。由 Bot 提供——发送是传输层的事。
+PatAction = Callable[[str, str], Awaitable[tuple[bool, str]]]
+
 # 决策者的工具。规则的细节写在这里，planner.txt 里只列一行——
 # 模型看得到每个工具自己的说明书，比在系统提示里堆一大段更不容易漏。
 SEARCH_EMOJI = ToolSpec(
@@ -110,6 +114,13 @@ REVOKE = ToolSpec(
     parameters={'type': 'object',
                 'properties': {'index': {'type': 'integer', 'description': '1 = 最近一条'},
                                'text': {'type': 'string', 'description': '原话里的一小段'}}})
+PAT = ToolSpec(
+    name='pat',
+    description='拍一拍某个人（微信的「拍了拍」）。私聊不用给名字，就是拍对方；群聊要给对方的群昵称，'
+                '名字对不上就拍不成。被拍的人会收到提示，群里也会多一条「X 拍了拍 Y」——'
+                '这是打招呼、催人或拍回去，不是说话。同一个人 12 秒内只能拍一次，别连着拍。',
+    parameters={'type': 'object',
+                'properties': {'target': {'type': 'string', 'description': '群聊里要拍的人的群昵称；私聊不用填'}}})
 SEARCH_MESSAGES = ToolSpec(
     name='search_messages',
     description='在**更早的**聊天记录里按关键词找回原话，返回带时间和说话人的几条。'
@@ -480,7 +491,8 @@ class ChatPlugin(Plugin):
                  agent_max_replies: int = 1, personas: PersonaStore | None = None,
                  member_lookup: MemberLookup | None = None,
                  message_search: MessageSearch | None = None,
-                 image_store: ImageStore | None = None, image_timeout: float = 8.0):
+                 image_store: ImageStore | None = None, image_timeout: float = 8.0,
+                 pat: PatAction | None = None):
         """ 聊天插件
 
         :param ai_provider: AI 服务提供者
@@ -507,6 +519,7 @@ class ChatPlugin(Plugin):
         :param message_search: 搜更早聊天记录；不传就没 search_messages 工具
         :param image_store: 窗口里图片的压缩 + 缓存；不传就不内联图片（测试用）
         :param image_timeout: 单张内联图片的取字节超时（秒）
+        :param pat: 拍一拍入口（Bot 提供）；不传就没 pat 工具
         """
         self.ai = ai_provider
         self._planner_ai = planner_ai
@@ -527,6 +540,7 @@ class ChatPlugin(Plugin):
         self.revoke = revoke
         self.member_lookup = member_lookup
         self.message_search = message_search
+        self.pat = pat
         self.image_store = image_store
         self.image_timeout = image_timeout
         self.timeout = timeout
@@ -701,6 +715,22 @@ class ChatPlugin(Plugin):
 
         return revoke
 
+    def _pat_tool(self, ctx: MessageContext, state: dict) -> list:
+        """ 拍一拍。私聊不填名字就是拍对方；群聊按群昵称找 wxid。 """
+        if self.pat is None:
+            return []
+
+        async def pat(arguments: dict) -> ToolResult:
+            if state.get('pat'):
+                return ToolResult('这一轮已经拍过了，先做别的。')
+            target = arg_str(arguments, 'target')
+            ok, message = await self.pat(ctx.msg.reply_target, target)
+            if ok:
+                state['pat'] = message
+            return ToolResult(message)
+
+        return [(PAT, pat)]
+
     def _message_tools(self, ctx: MessageContext) -> list:
         """ 查更早的聊天记录。当前窗口里搜不到的东西，模型自己发起去搜。 """
         if self.message_search is None:
@@ -743,6 +773,7 @@ class ChatPlugin(Plugin):
         tools = self._emoji_tools(state)
         tools.append((terminal, handler))
         tools.extend(self._message_tools(ctx))
+        tools.extend(self._pat_tool(ctx, state))
         if self.revoke is not None:
             tools.append((REVOKE, self._revoke_tool(ctx)))
         return tools
@@ -755,7 +786,7 @@ class ChatPlugin(Plugin):
         模型只挑动作（搜表情 / 选一张 / 说要说话），不写台词——台词还是表达者的事。
         一个工具都不调 = 本轮不发言；调了动作类工具本轮就结束。
         """
-        state: dict = {'candidates': [], 'picked': [], 'at': ''}
+        state: dict = {'candidates': [], 'picked': [], 'at': '', 'pat': ''}
         said = {'intent': '', 'emotion': ''}
 
         async def speak(arguments: dict) -> ToolResult:
@@ -800,7 +831,7 @@ class ChatPlugin(Plugin):
         与 _plan_with_tools 只差终点动作：那边调 speak（只说意图），这边调 reply（原话）。
         表情工具、查历史工具、撤回工具、循环骨架完全一致。
         """
-        state: dict = {'candidates': [], 'picked': [], 'at': ''}
+        state: dict = {'candidates': [], 'picked': [], 'at': '', 'pat': ''}
         replies: list[str] = []
 
         async def reply(arguments: dict) -> ToolResult:
@@ -826,7 +857,8 @@ class ChatPlugin(Plugin):
                 break
             if not turn.tool_calls:
                 # 点了名却什么都没做：只补一轮提醒，之后不再纠缠
-                if must_speak and not replies and not forced:
+                # 拍了别人也算回应过——别把「拍回去」当成什么都没做
+                if must_speak and not replies and not state.get('pat') and not forced:
                     forced = True
                     messages.append({'role': 'user',
                                      'content': '【必须回应】你还没给回应。至少调一次 reply，'
