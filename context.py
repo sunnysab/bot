@@ -51,19 +51,41 @@ def _format_time(t: int) -> str:
     return datetime.fromtimestamp(t).strftime('%m-%d %H:%M')
 
 
+_HANDLE_DIGITS = '0123456789abcdefghijklmnopqrstuvwxyz'
+
+
+def message_handle(svrid: int) -> str:
+    """ 一条消息给模型看的短标签，如 `#4k2p`。
+
+    只用来把附带的图片和聊天记录里的那一行对上，**不做查找键**——查找一律用完整
+    svrid。4 位 base36，同一窗口里撞了也不致命（顶多两条媒体共用标签）。
+    """
+    if not svrid:
+        return ''
+    n, out = int(svrid), ''
+    while n:
+        n, rest = divmod(n, 36)
+        out = _HANDLE_DIGITS[rest] + out
+    return '#' + out[-4:].rjust(4, '0')
+
+
 class SingleRecord:
     """ 单条记录 """
 
     def __init__(self, sender: str, text: str, t: int, media: Media | None = None,
-                 download: Callable[[], Awaitable[bytes]] | None = None, is_self: bool = False):
+                 download: Callable[[], Awaitable[bytes]] | None = None, is_self: bool = False,
+                 msg_id: int = 0, media_id: int = 0, handle: str = ''):
         """ 维护单个会话中的记录.
 
         :param sender: 发送者的群昵称或者联系人昵称
         :param text: 消息内容（纯文本或针对特殊消息的描述）
         :param t: 时间戳（精确到秒，来源于微信消息中的 CreateTime 参数以及 WxMsg 的 ts 字段）
         :param media: 媒体描述（图片/表情），可为 None
-        :param download: 媒体下载入口，供 describer 后台识图；描述就绪后原地回写 text
+        :param download: 媒体下载入口，供 describer 后台识图、以及内联给模型；描述就绪后原地回写 text
         :param is_self: 是否为机器人自己发的消息，transcript 里标记为「我」
+        :param msg_id: 这条消息在 daemon 里的 64 位 svrid
+        :param media_id: 要内联给模型的媒体的 svrid（自己有图=msg_id，引用图=ref_svrid），0=没有
+        :param handle: 媒体在 transcript 里的短标签（`#4k2p`），没有可内联媒体时为空
         """
         self.sender = sender
         self.text = text
@@ -71,6 +93,9 @@ class SingleRecord:
         self.media = media
         self.download = download
         self.is_self = is_self
+        self.msg_id = msg_id
+        self.media_id = media_id
+        self.handle = handle
 
     def __str__(self):
         text = self.text.replace('\n', ' ')
@@ -103,7 +128,8 @@ class ChatWindow:
         self._history = history[:max_history]
 
     def append(self, sender: str, text: str, t: int = 0, media: Media | None = None,
-               download: Callable[[], Awaitable[bytes]] | None = None, is_self: bool = False) -> SingleRecord:
+               download: Callable[[], Awaitable[bytes]] | None = None, is_self: bool = False,
+               msg_id: int = 0, media_id: int = 0, handle: str = '') -> SingleRecord:
         """ 添加消息
 
         :param sender: 发送者的昵称
@@ -112,12 +138,15 @@ class ChatWindow:
         :param media: 图片/表情描述
         :param download: 媒体下载入口
         :param is_self: 是否为机器人自己发的消息
+        :param msg_id: 这条消息的 daemon svrid
+        :param media_id: 要内联给模型的媒体的 svrid（见 SingleRecord）
+        :param handle: 媒体在 transcript 里的短标签
         """
         if len(self._history) >= self.max_history:
             evicted = self._history.pop(0)
             if self._on_evict:
                 self._on_evict(evicted)  # 滑出窗口，交给中期记忆压缩
-        record = SingleRecord(sender, text, t, media, download, is_self)
+        record = SingleRecord(sender, text, t, media, download, is_self, msg_id, media_id, handle)
         self._history.append(record)
         return record
 
@@ -191,7 +220,8 @@ class ContextManager:
 
     def push_message(self, contact: str, sender: str, text: str, t: int, media: Media | None = None,
                      download: Callable[[], Awaitable[bytes]] | None = None,
-                     is_self: bool = False) -> SingleRecord:
+                     is_self: bool = False, msg_id: int = 0, media_id: int = 0,
+                     handle: str = '') -> SingleRecord:
         """ 存储消息
 
         :param contact: 联系人或群聊的 wxid
@@ -201,9 +231,13 @@ class ContextManager:
         :param media: 图片/表情描述
         :param download: 媒体下载入口
         :param is_self: 是否为机器人自己发的消息
+        :param msg_id: 这条消息的 daemon svrid
+        :param media_id: 要内联给模型的媒体的 svrid（见 SingleRecord）
+        :param handle: 媒体在 transcript 里的短标签
         :return: 新插入的记录对象，可后续原地更新（如媒体描述就绪后回写）
         """
-        return self.get_context(contact).append(sender, text, t, media, download, is_self)
+        return self.get_context(contact).append(sender, text, t, media, download, is_self,
+                                                msg_id, media_id, handle)
 
     def sizes(self) -> dict[str, int]:
         """ 每个会话当前窗口里有多少条。面板要显示「模型此刻能看到多少」。 """
@@ -233,19 +267,6 @@ class MessageContext:
     def is_text(self) -> bool:
         return self.kind is MessageKind.TEXT
 
-    @property
-    def is_image(self) -> bool:
-        return self.kind is MessageKind.IMAGE
-
-    @property
-    def is_emoji(self) -> bool:
-        """ 表情包（sticker）。占位符 `[表情：摊倒]` 自带语义，不用识图。 """
-        return self.kind is MessageKind.EMOJI
-
-    @property
-    def is_voice(self) -> bool:
-        return self.kind is MessageKind.VOICE
-
 
 if __name__ == '__main__':
     # 自检：已知类型映射到语义，未知类型落到 OTHER
@@ -270,6 +291,12 @@ if __name__ == '__main__':
     assert lines[0].endswith('张三: 在吗'), lines
     assert lines[1].endswith('我: 在'), lines
     assert all(re.match(r'\[\d\d-\d\d \d\d:\d\d\] ', line) for line in lines), lines
+
+    # 短标签：4 位、稳定、0 是「没有」
+    assert message_handle(0) == '' and message_handle(5677413158710008087).startswith('#')
+    assert len(message_handle(5677413158710008087)) == 5
+    assert message_handle(1) != message_handle(2)
+    assert message_handle(5677413158710008087) == message_handle(5677413158710008087)
 
     # 撤回：按对象身份删，删完 transcript 里就没有了
     kept = window[len(window) - 1]

@@ -197,7 +197,34 @@ def strip_sender(text: str) -> str:
     return re.sub(r'^wxid_\w+:\s*', '', text or '')
 
 
-def render_referred(parsed: dict) -> str:
+def add_handle(text: str, handle: str) -> str:
+    """ 把短标签塞进媒体占位符：`[图片]` → `[图片 #4k2p]`。
+
+    只认图片/表情——只有这两种会被内联给模型，别的占位符没标签可对。
+    """
+    if not handle:
+        return text
+    return re.sub(r'^(\[(?:图片|表情))', rf'\1 {handle}', text, count=1)
+
+
+def parse_reference_media(content: str) -> Media | None:
+    """ 引用消息里被引的那条是不是图片/表情？是就返回它的 Media。
+
+    `render_referred` 已经把被引内容降级成 `[图片]`，md5 丢了；要「把引用的图也内联给
+    模型」就得单独把 md5 捞回来。解析失败就当没有——引用退化成文字，不影响别的。
+    """
+    from message import parse_reference_message
+    try:
+        parsed = parse_reference_message(strip_prefix(content))
+    except Exception:  # noqa: BLE001 —— XML 不规整是常事
+        return None
+    if (parsed.get('referred_message_type') or 0) not in (3, 47):  # 图片 / 表情
+        return None
+    raw = strip_sender(parsed.get('referred_message') or '')
+    return parse_media(raw) if raw else None
+
+
+def render_referred(parsed: dict, handle: str = '') -> str:
     """ 把被引的那条渲染成人话（供 `parse_appmsg` 和后台的引用块共用）。
 
     被引的那条**不一定是文字**：多数时候是图片、表情、链接，甚至又一串引用。
@@ -214,11 +241,12 @@ def render_referred(parsed: dict) -> str:
     # type 1（文本）的正文就是它自己；有的样本连 type 都没有，也当文本读
     if (parsed.get('referred_message_type') or 1) <= 1:
         return raw
-    text, _ = render(parsed['referred_message_type'], raw, '')
-    return text
+    text, media = render(parsed['referred_message_type'], raw, '')
+    # 只有「这张图真会被内联」才给标签，否则 聊天记录里会挂一个没有附件的 `#abcd`
+    return add_handle(text, handle) if (handle and media is not None and media.describable) else text
 
 
-def parse_appmsg(content: str) -> str:
+def parse_appmsg(content: str, quoted_handle: str = '') -> str:
     """ appmsg（msg_type=49）→ 引用 / 链接 / 文件 / 小程序 的可读文本。
 
     历史上这里只处理引用(type=57)，遇到链接会把原始 XML 漏进历史，故统一收敛到此处。
@@ -233,7 +261,7 @@ def parse_appmsg(content: str) -> str:
             parsed = parse_reference_message(content)
         except Exception:  # noqa: BLE001 —— XML 不规整时退回占位符，不能让历史里漏 XML
             return '[引用消息]'
-        quoted = render_referred(parsed)
+        quoted = render_referred(parsed, quoted_handle)
         note = f'（引用前文的消息：{quoted}）' if quoted else '（引用了前文的消息）'
         # 只引了个图、自己一个字没说：那这条记录就是那句注解
         return f'{parsed["content"]}{note}' if parsed['content'] else note
@@ -245,10 +273,13 @@ def parse_appmsg(content: str) -> str:
     return f'[{label}] {title}' if title else '[分享消息]'
 
 
-def render(msg_type: int, content: str, text: str) -> tuple[str, Media | None]:
+def render(msg_type: int, content: str, text: str, handle: str = '',
+           quoted_handle: str = '') -> tuple[str, Media | None]:
     """ 把一条消息渲染成历史记录文本（+ 可选媒体描述）。
 
     统一 live 与 history 两条路径的载荷处理，避免一边丢弃一边漏 XML。
+    handle / quoted_handle 是内联图片用的短标签：自己的图落在自己的占位符上，
+    引用图落在引用注解里的那个占位符上——两处用同一个 svrid 生成的标签。
     """
     from context import SYSTEM_KINDS, MessageKind
 
@@ -259,11 +290,11 @@ def render(msg_type: int, content: str, text: str) -> tuple[str, Media | None]:
     if kind is MessageKind.TEXT:
         return text, None
     if kind is MessageKind.APPMSG:
-        return parse_appmsg(content), None
+        return parse_appmsg(content, quoted_handle), None
     if kind in (MessageKind.IMAGE, MessageKind.EMOJI):
         media = parse_media(content)
         if media:
-            return media.placeholder, media
+            return add_handle(media.placeholder, handle if media.describable else ''), media
         return ('[图片]' if kind is MessageKind.IMAGE else '[表情]'), None
     if kind is MessageKind.LOCATION:
         return parse_location(content), None
@@ -358,6 +389,26 @@ if __name__ == '__main__':
     # 引用链：被引的又是条链接
     assert parse_appmsg(_quote(49, '<msg><appmsg><title>央视新闻</title><type>5</type></appmsg></msg>')) \
         == '这也太好看了（引用前文的消息：[链接] 央视新闻）'
+
+    # 短标签：媒体行带上 handle，引用注解落在引用里的那个占位符上（同一 svrid → 同一标签）
+    assert add_handle('[图片]', '#4k2p') == '[图片 #4k2p]'
+    assert add_handle('[图片：一只猫]', '#4k2p') == '[图片 #4k2p：一只猫]'
+    assert add_handle('[语音 3″]', '#4k2p') == '[语音 3″]'      # 不能内联的没标签
+    assert add_handle('[图片]', '') == '[图片]'
+    assert render(3, '<msg><img md5="m" /></msg>', '', handle='#4k2p')[0] == '[图片 #4k2p]'
+    # 自带标签的表情不内联 → 不给标签（不然会挂一个没有附件的 `#abcd`）
+    assert render(47, '<msg><emoji md5="m" desc="ChEKB2RlZmF1bHQSBuaRiuWAkg==" /></msg>', '',
+                  handle='#4k2p')[0] == '[表情：摊倒]'
+    assert render(3, '<msg><img /></msg>', '', handle='#4k2p')[0] == '[图片]'   # 没有 md5 就没得内联
+    assert render(49, _quote(3, '<msg><img md5="2f8f1e" /></msg>'), '', quoted_handle='#4k2p')[0] \
+        == '这也太好看了（引用前文的消息：[图片 #4k2p]）'
+    assert parse_appmsg(_quote(3, '<msg><img md5="2f8f1e" /></msg>'), '#4k2p') \
+        == '这也太好看了（引用前文的消息：[图片 #4k2p]）'
+
+    # 引用里被引的是图片 → 捞得到 Media，供内联；文本引用没有
+    assert parse_reference_media(_quote(3, '<msg><img md5="2f8f1e" /></msg>')) == Media('image', '2f8f1e')
+    assert parse_reference_media(_quote(1, 'wxid_bob:\n周末去爬山不')) is None
+    assert parse_reference_media('<msg><appmsg><title>x</title><type>57</type></appmsg></msg>') is None
     # 损坏的引用退占位符，不往历史里漏 XML
     assert parse_appmsg('<msg><appmsg><title>x</title><type>57</type><refermsg></refermsg></appmsg></msg>') \
         == 'x（引用了前文的消息）', parse_appmsg(
