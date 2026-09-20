@@ -46,6 +46,8 @@ from reply_trace import latencies as trace_latencies
 from runtime import HOT_FIELDS, RESTART_FIELDS, ReplyScope
 
 PAGE = Path(__file__).parent / 'admin.html'
+# 面板的纯渲染函数（能在 node 里单独测，见 test_admin_ui.js）
+UI_JS = Path(__file__).parent / 'admin.js'
 SIDECAR = Path(__file__).parent / 'admin.db'
 # 可以在面板上改的提示词。模板都不长，整体替换比行编辑简单也可控
 PROMPTS = {'planner': Path(__file__).parent / 'planner.txt',
@@ -732,6 +734,9 @@ class Admin:
             if route in ('/', '/index.html'):
                 return self._send(handler, PAGE.read_text(encoding='utf-8'),
                                   'text/html; charset=utf-8')
+            if route == '/admin.js':
+                return self._send(handler, UI_JS.read_text(encoding='utf-8'),
+                                  'application/javascript; charset=utf-8')
             if route == '/api/state':
                 return self._json(handler, self.state())
             if route == '/api/health':
@@ -1187,6 +1192,13 @@ def _self_check() -> None:
 
     # 提示词面板要能改 agent 模式那份（默认走的就是它）
     assert set(PROMPTS) == {'planner', 'replyer', 'agent'}, PROMPTS
+
+    # 面板的状态表必须覆盖每一个 Status，否则 chip 会显示裸状态名
+    js = UI_JS.read_text(encoding='utf-8')
+    missing = [s for name, s in vars(Status).items()
+               if name.isupper() and not name.startswith('_') and isinstance(s, str)
+               and f'{s}:' not in js]
+    assert not missing, f'admin.js 的 LABEL/GROUP 没覆盖这些状态: {missing}'
 
     print('admin self-check ok')
 
