@@ -10,61 +10,63 @@
 from xml.etree import ElementTree as et
 
 
-def fix_xml(xml: str) -> str:
-    """修复 XML 格式"""
-    replacement = [('&lt;', '<'), ('&gt;', '>'),
-                   ('<content><?xml version="1.0"?>', '<content><![CDATA[<?xml version="1.0"?>'),
-                   ('</msg>\n</content>', '</msg>]]>\n</content>')]
-    for old, new in replacement:
-        xml = xml.replace(old, new)
-    return xml
+def _body(xml_data: str) -> str:
+    """ 截到第一个 `<`，去掉文档声明，没有 `<msg>` 外壳就自己包一个。
 
+    daemon 有时在 XML 前拼一行 'wxid_xxx:'（`strip_prefix` 干的事），出站的引用
+    还没了 `<msg>` 外壳——直接 et.fromstring 会报 `junk after document element`。
 
-def parse_reference_message(xml_data: str) -> dict:
-    """解析引用消息。daemon 有时会在 XML 前拼一行 'wxid_xxx:'，直接截到第一个 '<'。
-
-    形状不止一种，都要收：
-    - 入站的引用带 `<msg>` 外壳（`<msg><appmsg>…</appmsg><fromusername>…</fromusername></msg>`）；
-    - **出站**（daemon 落到缓存里的）没有外壳，`<appmsg>` 后面直接跟 `</appmsg><fromusername>`——
-      直接 et.fromstring 会报 `junk after document element`，整个引用于是退化成 `[引用消息]`。
+    **不做全文档反转义**。以前这里把 `&lt;` 全部还原成 `<` 再给内嵌的 `<?xml ?>`
+    补 CDATA，理由是「daemon 有时不转义」——实测 69 条引用里 69 条都是转义的，
+    而那次反转义会把**合法**的文档弄坏：被引内容里的声明只要不在 `<content>` 紧后面
+    （比如前面还带个 'wxid_x:' 前缀），就变成「声明不在文档开头」，整条引用退化成
+    `[引用消息]`。
     """
     start = xml_data.find('<')
-    xml_data = fix_xml(xml_data[start:] if start > 0 else xml_data)
-    # 去掉 XML 声明，再确认有 <msg> 外壳；没有就自己包一个，让 appmsg/fromusername
-    # 都变成它的子节点
-    body = xml_data
+    body = xml_data[start:] if start > 0 else xml_data
     if body.startswith('<?xml'):
         body = body[body.find('?>') + 2:]
     if not body.lstrip().startswith('<msg'):
         body = f'<msg>{body}</msg>'
-    root = et.fromstring(body)
+    return body
 
-    message_sub_type = root.find('.//type').text
+
+def _text(root: et.Element, path: str) -> str:
+    """ 取一个节点的文本，没有就返回空串（引用里的字段本来就常有缺的）。 """
+    node = root.find(path)
+    return (node.text or '').strip() if node is not None else ''
+
+
+def parse_reference_message(xml_data: str) -> dict:
+    """ 解析引用消息，返回 `{content, sender, referred_message, referred_message_sender,
+    referred_message_type}`。
+
+    `referred_message` 是**原文**：被引的那条可能是图片 / 表情 / 链接 / 又一串引用，
+    这时它是那段消息的 XML。渲染成人话是 `media.render_referred` 的事（解析器不碰
+    `media`，两边不互相依赖）。
+    """
+    root = et.fromstring(_body(xml_data))
+
+    sub_type = _text(root, './/type')
     # 拿到的 XML 不是引用：这是 daemon 给的输入不对，不是内部不变式被破坏，
-    # 所以抛 ValueError（调用方 `parse_appmsg` 捕 Exception 退回「[引用消息]」）。
-    # 用 assert 的话，`python -O` 下这层校验直接消失，接着 `find(...).text` 会以
-    # 「NoneType 没有 text」的名义报一个和真实原因无关的错。
-    if message_sub_type != '57':
-        raise ValueError(f'不是引用消息（appmsg type={message_sub_type}）')
-
-    content = root.find('.//title').text
-    sender = root.find('.//fromusername').text
-    referred_message_sender = root.find('.//refermsg/chatusr').text
-    referred_message = root.find('.//refermsg/content').text or root.find('.//refermsg//title').text or ''
-    if referred_message.startswith('<'):
-        referred_content_root = et.fromstring(referred_message)
-        referred_message = referred_content_root.find('.//title').text
+    # 所以抛 ValueError（`media.parse_appmsg` 捕 Exception 退回 `[引用消息]`）。
+    # 用 assert 的话 `python -O` 下这层校验直接消失，接着读 `refermsg/chatusr`
+    # 会以「NoneType 没有 text」的名义报一个和真实原因无关的错。
+    if sub_type != '57':
+        raise ValueError(f'不是引用消息（appmsg type={sub_type or "?"}）')
 
     return {
-        'content': content,
-        'sender': sender,
-        'referred_message': referred_message,
-        'referred_message_sender': referred_message_sender
+        'content': _text(root, './/title'),
+        'sender': _text(root, './/fromusername'),
+        # 被引的那条：优先级 = refermsg 的正文 > 它的 title（链接/文件才只有 title）
+        'referred_message': _text(root, './/refermsg/content') or _text(root, './/refermsg//title'),
+        'referred_message_sender': _text(root, './/refermsg/chatusr'),
+        # 被引那条的 msg_type：图片 3 / 表情 47 / 链接 49 / 文本 1 …… 渲染时要它
+        'referred_message_type': int(_text(root, './/refermsg/type') or 0),
     }
 
 
 if __name__ == '__main__':
-    # 自检：真实引用消息里 <content> 是二次转义的，需要先解一层再取内层 <title>
     sample = ('<msg><appmsg><title>直接用这个点进去对比</title><type>57</type>'
               '<fromusername>wxid_sender</fromusername><refermsg><type>49</type>'
               '<svrid>3159424424184903022</svrid><fromusr>46086622803@chatroom</fromusr>'
@@ -75,7 +77,8 @@ if __name__ == '__main__':
     assert parsed['content'] == '直接用这个点进去对比', parsed
     assert parsed['sender'] == 'wxid_sender', parsed
     assert parsed['referred_message_sender'] == 'wxid_kf7zbyjjxs8r22', parsed
-    assert parsed['referred_message'] == '和我一起测测', parsed
+    assert parsed['referred_message'].startswith('<msg><appmsg><title>和我一起测测'), parsed
+    assert parsed['referred_message_type'] == 49, parsed
 
     # daemon 在正文前拼了 sender 前缀的场景
     assert parse_reference_message('wxid_abc:\n' + sample)['content'] == '直接用这个点进去对比'
@@ -94,4 +97,41 @@ if __name__ == '__main__':
     assert parsed['referred_message_sender'] == 'wxid_kf7zbyjjxs8r22', parsed
     # 带 XML 声明的也要能解析
     assert parse_reference_message('<?xml version="1.0"?>' + outbound)['content'] == '在呢，看你们聊呢'
+
+    # 被引的是图片 / 表情：refermsg 的正文是它的 XML，没有 <title>。
+    # 以前这里 `root.find('.//title').text` 直接 AttributeError，整条引用变 `[引用消息]`
+    image_quote = ('<msg><appmsg><title>这也太好看了</title><type>57</type>'
+                   '<refermsg><type>3</type><chatusr>wxid_bob</chatusr>'
+                   '<content>&lt;?xml version="1.0"?&gt;&lt;msg&gt;&lt;img aeskey="0bda33" '
+                   'md5="2f8f1e" /&gt;&lt;/msg&gt;</content></refermsg></appmsg>'
+                   '<fromusername>wxid_alice</fromusername></msg>')
+    parsed = parse_reference_message(image_quote)
+    assert parsed['content'] == '这也太好看了', parsed
+    assert parsed['referred_message_type'] == 3, parsed
+    assert parsed['referred_message'].startswith('<?xml'), parsed
+
+    # 被引内容里带 'wxid_x:' 前缀 + XML 声明（真实样本）：外层文档是合法的，
+    # 只要别去整体反转义就不会炸
+    article_quote = ('<msg><appmsg><title>但是光到机场就要两小时了</title><type>57</type>'
+                     '<refermsg><type>49</type><chatusr>wxid_bob</chatusr><content>wxid_bob:\n'
+                     '&lt;?xml version="1.0"?&gt;\n&lt;msg&gt;&lt;appmsg&gt;'
+                     '&lt;title&gt;北京飞上海仅需半小时&lt;/title&gt;&lt;type&gt;5&lt;/type&gt;'
+                     '&lt;/appmsg&gt;&lt;/msg&gt;</content></refermsg></appmsg>'
+                     '<fromusername>wxid_alice</fromusername></msg>')
+    parsed = parse_reference_message(article_quote)
+    assert parsed['referred_message_type'] == 49, parsed
+    assert parsed['referred_message'].startswith('wxid_bob:'), parsed
+    assert '北京飞上海仅需半小时' in parsed['referred_message'], parsed
+
+    # 缺字段的引用不能把整条消息带崩：字段取空串就行
+    bare = parse_reference_message('<msg><appmsg><title>嗯</title><type>57</type></appmsg></msg>')
+    assert bare['referred_message'] == '' and bare['referred_message_type'] == 0, bare
+
+    # 不是引用：抛 ValueError（不是 AssertionError——`python -O` 下 assert 会消失）
+    try:
+        parse_reference_message('<msg><appmsg><title>文章</title><type>5</type></appmsg></msg>')
+    except ValueError as e:
+        assert 'type=5' in str(e), e
+    else:
+        raise AssertionError('非引用消息应该抛 ValueError')
     print('ok')

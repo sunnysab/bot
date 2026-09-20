@@ -201,6 +201,36 @@ def parse_location(content: str) -> str:
     return f'[位置：{label}]' if label else '[位置]'
 
 
+def strip_sender(text: str) -> str:
+    """ 去掉 daemon 在正文前拼的那行发送者 wxid（`wxid_xxx:`）。
+
+    只认 `wxid_` 开头：引用里的正文可能是任何一句话，不能按「冒号前」一刀切
+    （「12:30 开会」这种会被误伤）。
+    """
+    return re.sub(r'^wxid_\w+:\s*', '', text or '')
+
+
+def render_referred(parsed: dict) -> str:
+    """ 把被引的那条渲染成人话（供 `parse_appmsg` 和后台的引用块共用）。
+
+    被引的那条**不一定是文字**：多数时候是图片、表情、链接，甚至又一串引用。
+    以前直接把它当文本用，于是图片/表情的引用要么报错（没有 `<title>`），
+    要么把一段 XML 原样塞给模型。这里统一走 `render`：图片→`[图片]`、
+    表情→`[表情：摊倒]`、链接→`[链接] 标题`，嵌套引用会再走一层。
+
+    ponytail: 嵌套引用逐层递归，深度就是「引用链」的长度（微信不会自己引用自己）。
+    真要防可以把 `render` 加上 depth。
+    """
+    raw = strip_sender((parsed.get('referred_message') or '').strip())
+    if not raw:
+        return ''
+    # type 1（文本）的正文就是它自己；有的样本连 type 都没有，也当文本读
+    if (parsed.get('referred_message_type') or 1) <= 1:
+        return raw
+    text, _ = render(parsed['referred_message_type'], raw, '')
+    return text
+
+
 def parse_appmsg(content: str) -> str:
     """ appmsg（msg_type=49）→ 引用 / 链接 / 文件 / 小程序 的可读文本。
 
@@ -214,9 +244,12 @@ def parse_appmsg(content: str) -> str:
     if appmsg_type == '57':
         try:
             parsed = parse_reference_message(content)
-            return parsed['content'] + f'（引用前文的消息：{parsed["referred_message"]}）'
-        except Exception:
+        except Exception:  # noqa: BLE001 —— XML 不规整时退回占位符，不能让历史里漏 XML
             return '[引用消息]'
+        quoted = render_referred(parsed)
+        note = f'（引用前文的消息：{quoted}）' if quoted else '（引用了前文的消息）'
+        # 只引了个图、自己一个字没说：那这条记录就是那句注解
+        return f'{parsed["content"]}{note}' if parsed['content'] else note
     if appmsg_type == '6':
         return f'[文件] {title}' if title else '[文件]'
     if appmsg_type in ('33', '36'):
@@ -322,7 +355,35 @@ if __name__ == '__main__':
              '<refermsg><type>49</type><chatusr>wxid_alice</chatusr>'
              '<content>&lt;msg&gt;&lt;appmsg&gt;&lt;title&gt;被引用的内容&lt;/title&gt;'
              '&lt;/appmsg&gt;&lt;/msg&gt;</content></refermsg></appmsg></msg>')
-    assert parse_appmsg(quote) == '回复内容（引用前文的消息：被引用的内容）', parse_appmsg(quote)
+    assert parse_appmsg(quote) == '回复内容（引用前文的消息：[链接] 被引用的内容）', parse_appmsg(quote)
+
+    # 被引的是图片 / 表情：refermsg 正文是它们的 XML（没有 title）。
+    # 以前这两种是 AttributeError → 整条引用变成 `[引用消息]`
+    def _quote(ref_type: int, inner: str, content: str = '这也太好看了') -> str:
+        escaped = inner.replace('<', '&lt;').replace('>', '&gt;')
+        return (f'<msg><appmsg><title>{content}</title><type>57</type>'
+                f'<refermsg><type>{ref_type}</type><chatusr>wxid_bob</chatusr>'
+                f'<content>{escaped}</content></refermsg></appmsg>'
+                f'<fromusername>wxid_alice</fromusername></msg>')
+
+    assert parse_appmsg(_quote(3, '<msg><img md5="2f8f1e" /></msg>')) \
+        == '这也太好看了（引用前文的消息：[图片]）'
+    assert parse_appmsg(_quote(47, '<msg><emoji md5="m" desc="ChEKB2RlZmF1bHQSBuaRiuWAkg==" /></msg>')) \
+        == '这也太好看了（引用前文的消息：[表情：摊倒]）'
+    assert parse_appmsg(_quote(34, '<msg><voicemsg voicelength="3000" /></msg>')) \
+        == '这也太好看了（引用前文的消息：[语音 3″]）'
+    # 引用里带的 'wxid_x:' 前缀要去掉（daemon 落库时拼的）
+    assert parse_appmsg(_quote(1, 'wxid_bob:\n周末去爬山不')) == '这也太好看了（引用前文的消息：周末去爬山不）'
+    # 自己一个字没说，只引了张图
+    assert parse_appmsg(_quote(3, '<msg><img md5="2f8f1e" /></msg>', content='')) \
+        == '（引用前文的消息：[图片]）'
+    # 引用链：被引的又是条链接
+    assert parse_appmsg(_quote(49, '<msg><appmsg><title>央视新闻</title><type>5</type></appmsg></msg>')) \
+        == '这也太好看了（引用前文的消息：[链接] 央视新闻）'
+    # 损坏的引用退占位符，不往历史里漏 XML
+    assert parse_appmsg('<msg><appmsg><title>x</title><type>57</type><refermsg></refermsg></appmsg></msg>') \
+        == 'x（引用了前文的消息）', parse_appmsg(
+            '<msg><appmsg><title>x</title><type>57</type><refermsg></refermsg></appmsg></msg>')
     assert render(34, '', '') == ('[语音]', None)
     assert render(43, '', '') == ('[视频]', None)
     assert render(1, 'ignored', '你好') == ('你好', None)

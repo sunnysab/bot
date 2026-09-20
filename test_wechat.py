@@ -98,7 +98,8 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(window[0].sender, 'Alice')
         self.assertEqual(window[0].text, '第一条')
         self.assertEqual(window[1].text, '[图片]')
-        self.assertEqual(window[2].text, '回复内容（引用前文的消息：被引用的内容）')
+        # 被引的那条渲染成人话：这里是条链接（内层 appmsg 没有 type）
+        self.assertEqual(window[2].text, '回复内容（引用前文的消息：[链接] 被引用的内容）')
         self.assertEqual([r.t for r in window], [200, 201, 202])
 
     async def test_get_recent_sessions_filters_non_contacts(self):

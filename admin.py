@@ -38,7 +38,7 @@ from ai import usage
 from config import DOTENV_PATH, Config, update_dotenv
 from context import SYSTEM_KINDS, MessageKind
 from events import Status, bus
-from media import render, tag
+from media import render, render_referred, tag
 from message import parse_reference_message
 from persona import OVERRIDE_FIELDS
 from reply_trace import find as find_trace
@@ -203,7 +203,8 @@ def _quote(content: str, kind) -> dict | None:
     except Exception:  # noqa: BLE001 —— XML 不规整时退回平铺文本就好
         return None
     name = tag(content, 'displayname') or parsed['referred_message_sender']
-    return {'content': parsed['content'], 'name': name, 'text': parsed['referred_message']}
+    # 被引的那条可能是图片 / 表情 / 链接：走同一个渲染，否则面板上会显示一段 XML
+    return {'content': parsed['content'], 'name': name, 'text': render_referred(parsed)}
 
 
 def _silk_to_wav(data: bytes, msg_id: str) -> bytes:
@@ -999,9 +1000,11 @@ def _self_check() -> None:
         '<chatusr>wxid_kf7zbyjjxs8r22</chatusr><displayname>zzq</displayname>'
         '<content>&lt;msg&gt;&lt;appmsg&gt;&lt;title&gt;和我一起测测&lt;/title&gt;'
         '&lt;/appmsg&gt;&lt;/msg&gt;</content></refermsg></appmsg></msg>'))
+    # 被引的那条走同一个渲染：这里是条链接（内层 appmsg 没有 type），
+    # 以前直接把 refermsg 正文当文本，图片/表情的引用就会往面板上押一段 XML
     assert quoted['text'] == '直接用这个点进去对比', quoted
     assert quoted['quote'] == {'content': '直接用这个点进去对比', 'name': 'zzq',
-                               'text': '和我一起测测'}, quoted
+                               'text': '[链接] 和我一起测测'}, quoted
     # 普通链接（type != 57）不走引用块
     link = admin._row(msg(49, '<msg><appmsg><title>一篇文章</title><type>5</type></appmsg></msg>'))
     assert link['quote'] is None, link

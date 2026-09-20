@@ -692,6 +692,29 @@ class TestPayloadRender(unittest.TestCase):
         self.assertEqual(text, '[图片]')
         self.assertEqual(media, Media('image', 'abc'))
 
+    def test_quote_of_an_image_is_not_a_placeholder(self):
+        """ 回归：被引的是图片时，以前整条退化成 `[引用消息]`（日志里 67 条坏 40 条）。
+
+        refermsg 的正文是那张图的 XML（没有 title），旧代码 `find('.//title').text`
+        直接 AttributeError，异常被吞掉。
+        """
+        quote = ('<msg><appmsg><title>这也太好看了</title><type>57</type>'
+                 '<refermsg><type>3</type><chatusr>wxid_bob</chatusr>'
+                 '<content>&lt;?xml version="1.0"?&gt;&lt;msg&gt;&lt;img aeskey="0bda33" '
+                 'md5="2f8f1e" /&gt;&lt;/msg&gt;</content></refermsg></appmsg>'
+                 '<fromusername>wxid_alice</fromusername></msg>')
+        text, _ = render(49, quote, '')
+        self.assertEqual(text, '这也太好看了（引用前文的消息：[图片]）')
+
+    def test_quote_of_a_sticker_keeps_its_label(self):
+        quote = ('<msg><appmsg><title>哈哈</title><type>57</type>'
+                 '<refermsg><type>47</type><chatusr>wxid_bob</chatusr>'
+                 '<content>&lt;msg&gt;&lt;emoji md5="m" '
+                 'desc="ChEKB2RlZmF1bHQSBuaRiuWAkg==" /&gt;&lt;/msg&gt;</content>'
+                 '</refermsg></appmsg><fromusername>wxid_alice</fromusername></msg>')
+        text, _ = render(49, quote, '')
+        self.assertEqual(text, '哈哈（引用前文的消息：[表情：摊倒]）')
+
     def test_emoji_keeps_description(self):
         text, _ = render(47, '<msg><emoji desc="ChEKB2RlZmF1bHQSBuWVp+WVpw==" /></msg>', '')
         self.assertEqual(text, '[表情：啧啧]')
