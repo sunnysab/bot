@@ -878,8 +878,10 @@ class Admin:
         handler.send_header('Content-Type', content_type)
         handler.send_header('Content-Length', str(len(data)))
         # 默认不缓存：页面、JS 和 /api/* 都是「看着会变」的东西，缓存一小时会让面板
-        # 显示旧数据/旧代码。只有附件是例外——它按 msg_id 内容寻址，不会变
-        handler.send_header('Cache-Control', 'private, max-age=3600' if cache else 'no-store')
+        # 显示旧数据/旧代码。附件例外（一模几百 KB，滚回去别重下），但**不能**按
+        # 内容寻址看：同一个 msg_id 给什么字节是会变的——原图被服务端回收后就退回
+        # 缩略图。所以只缓存 5 分钟，让这种切换几分钟内自愈，而不是拖一小时
+        handler.send_header('Cache-Control', 'private, max-age=300' if cache else 'no-store')
         handler.end_headers()
         handler.wfile.write(data)
 
