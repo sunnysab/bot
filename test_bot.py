@@ -561,6 +561,24 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot._wechat.emojis_sent, [('456@chatroom', 'a' * 32)])
 
 
+    async def test_inbound_image_is_scheduled_for_vision(self):
+        """ 回归：入站图片的 XML 里没有明文 cdnurl（只有加密 fileid）。
+
+        以前 `Media.describable` 还要求 XML 里有明文 cdnurl，于是 describer 一次都不排——
+        历史里永远是 `[图片]`，media_cache.db 里 56 条描述全是表情、零图片。
+        """
+        describer = FakeDescriber()
+        self.bot._describer = describer
+        await self.bot.on_message(make_msg(
+            text='wxid_alice:\n<?xml version="1.0"?>\n<msg><img aeskey="0bda33" '
+                 'cdnbigimgurl="305f020100044b" md5="2f8f1e" length="5737" /></msg>',
+            msg_type=3))
+        await asyncio.sleep(0.05)
+        self.assertEqual(len(describer.scheduled), 1)
+        # 有下载入口才轮得到识图：字节归 daemon 按 msg_id 取
+        self.assertIsNotNone(describer.scheduled[0].download)
+        self.assertEqual(describer.scheduled[0].text, '[图片]')
+
     async def test_quoted_message_is_answered(self):
         """ 引用消息的正文就是一句话，不能因为 msg_type=49 就被当成「不支持的类型」。 """
         self.bot.set_default_plugin(FakePlugin(texts=['周末去啊']))

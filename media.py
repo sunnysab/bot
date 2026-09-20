@@ -17,13 +17,6 @@ class Media:
     kind: str  # 'image' | 'emoji' | 'voice' | 'video'
     md5: str
     description: str | None = None
-    # 源 XML 里有没有**明文可下载的 URL**。
-    #
-    # 为什么要先判这个：daemon 的 `download_message` 只认 `cdnurl`/`cdnurlbigimg` 里的
-    # 明文 URL。而入站图片的 XML 里只有 `cdnbigimgurl`/`cdnmidimgurl`
-    # 那种**加密 fileid**（`305f0201...`）——实测 30 张图片 30 张没有 cdnurl。
-    # 拿不到就别去试：每次尝试都是一次注定失败的 RPC + daemon 一条 WARN 日志。
-    downloadable: bool = False
     size: int = 0            # 字节数（图片/语音/视频都能从 XML 里读到）
     duration: int = 0        # 秒（语音/视频）
 
@@ -45,8 +38,16 @@ class Media:
 
     @property
     def describable(self) -> bool:
-        """ 值不值得排一次识图：缺描述、且字节真拿得到。 """
-        return self.needs_description and self.downloadable
+        """ 值不值得排一次识图：缺描述、而且是 vision 看得见的东西。
+
+        这里**不再看 XML 里有没有明文 cdnurl**。以前那是对的：daemon 只下 `cdnurl`
+        里的明文 URL，而入站图片的 XML 里只有加密 fileid（实测 30/30 没有 cdnurl），
+        硬试就是一次注定失败的 RPC。现在 daemon 按 msg_id 走 CDN 帧下载
+        （`download_media_cdn`），加密 fileid 一样下得来——再卡这一条，结果就是
+        **所有图片永远没描述**（media_cache.db 里 56 条全是表情，零图片）。
+        视频/语音不送 vision：它们不是「画面里有什么」的问题。
+        """
+        return self.kind in ('image', 'emoji') and self.needs_description
 
 
 PLACEHOLDER = re.compile(r'^\[(图片|表情|语音|视频|位置|链接|文件|合并转发|小程序)(\s*\d+\u2033)?([：: ][^\]]*)?\]$')
@@ -131,29 +132,15 @@ def parse_emoji_description(content: str) -> str | None:
     return text or None
 
 
-# daemon 的 `cdn::find_attr` 找的是**字面量** `cdnurl="`（等号两边不能有空格），
-# 所以这里必须跟它**一样严格**，否则就是一次次注定失败的 RPC。
-#
-# 实测群里 19 条带 cdnurl 的表情，15 条写的是 `cdnurl = "http...`（另一种客户端的
-# XML 风格），daemon 看不见 → 报「无 cdnurl」。等 daemon 把 find_attr 改成容忍空格之后，
-# 这里也要跟着放宽（见 notes/未完成.md）。
-# 表情/图片 XML 里的明文 http 直链。等号两边允许空白：客户端确实会写成 `cdnurl = "…"`，
-# daemon 的 `cdn::find_attr` 也得认这种写法（两边口径必须一致，否则识图会白排一次必失败的下载）
-PLAIN_URL = re.compile(r'cdnurl\s*=\s*"https?://')
-
-
 def parse_media(content: str) -> Media | None:
-    """ 解析图片 / 表情消息的 XML 载荷。非媒体消息返回 None。 """
+    """ 解析图片 / 表情消息的 XML 载荷（含 md5 / 描述 / 大小），非媒体消息返回 None。 """
     if '<emoji' in content:
         xml = strip_prefix(content)
         return Media('emoji', attr(xml, 'md5'), parse_emoji_description(content),
-                     downloadable=bool(PLAIN_URL.search(content)),
                      size=_int(attr(xml, 'length')))
     if '<img' in content:
         xml = strip_prefix(content)
-        return Media('image', attr(xml, 'md5'),
-                     downloadable=bool(PLAIN_URL.search(content)),
-                     size=_int(attr(xml, 'length')))
+        return Media('image', attr(xml, 'md5'), size=_int(attr(xml, 'length')))
     return None
 
 
@@ -308,26 +295,17 @@ if __name__ == '__main__':
     assert not emoji.needs_description
     blank = parse_media('<msg><emoji md5="m" desc="" /></msg>')
     assert blank.placeholder == '[表情]' and blank.needs_description, blank
+    tagged = parse_media('<msg><emoji md5="m" desc="ChEKB2RlZmF1bHQSBuWVp+WVpw==" cdnurl="http://x" /></msg>')
     assert parse_media('hello world') is None
     assert parse_media('<msg><img /></msg>').needs_description is False
 
-    # 「拿得到字节吗」得从 XML 就判出来：入站图片的 XML 里只有加密 fileid，
-    # 没有明文 http cdnurl，硬试只会上演一次注定失败的 RPC
-    assert image.downloadable is False and image.describable is False
+    # 「值不值得识图」只看两件事：是 image/emoji、而且缺描述。**不看 XML 里有没有
+    # 明文 cdnurl**——daemon 现在按 msg_id 走 CDN 帧下载，入站图片的加密 fileid
+    # 一样下得来；卡着这一条的结果是所有图片永远没有描述。
     enc = parse_media('<msg><img md5="m" aeskey="k" cdnbigimgurl="305f020100044b" /></msg>')
-    assert enc.downloadable is False, enc
-    plain = parse_media('<msg><img md5="m" cdnurl="http://wxapp.tc.qq.com/x" /></msg>')
-    assert plain.downloadable is True and plain.describable is True, plain
-    # 带空格的写法 daemon 现在也认，所以这里要认为能下（见 PLAIN_URL）
-    spaced_dl = parse_media('<msg><img md5="m" cdnurl = "http://x" /></msg>')
-    assert spaced_dl.downloadable is True, spaced_dl
-    # 表情：有 cdnurl 的才值得排识图；带 desc 的本来就不用描述
-    sticker = parse_media('<msg><emoji md5="m" cdnurl="http://x" /></msg>')
-    assert sticker.downloadable is True and sticker.describable is True
-    # 带空格的写法和 daemon 的宽容口径对齐——两边不一致会白跑一次必失败的 RPC
-    spaced = parse_media('<msg><emoji md5="m" cdnurl = "http://x" /></msg>')
-    assert spaced.downloadable is True, spaced
-    tagged = parse_media('<msg><emoji md5="m" desc="ChEKB2RlZmF1bHQSBuWVp+WVpw==" cdnurl="http://x" /></msg>')
+    assert enc.needs_description and enc.describable, enc
+    assert image.describable and blank.describable, (image, blank)
+    # 带 desc 的表情不用识图；语音/视频不看画面，也不排
     assert tagged.describable is False, '带标签的表情不需要识图'
 
     # 语音 / 视频：字节拿不到，但时长和大小在 XML 里；占位符要带上时长

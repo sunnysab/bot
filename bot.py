@@ -10,7 +10,7 @@ from context import ChatWindow, ContextManager, MessageContext, MessageKind, Sin
 from describer import MediaDescriber
 from emojis import Emoji, EmojiLibrary, parse_emoji_xml
 from events import Status, bus
-from media import PLAIN_URL, is_placeholder, render
+from media import is_placeholder, render
 from moments import MomentKeeper
 from outbound import Outbound, OutboundQueue
 from plugin import EndProcessing, Plugin, PluginManager, Reply
@@ -195,13 +195,10 @@ class Bot:
             # 落盘不用每条都做，攒一会儿再写；stop() 里还会再存一次
             if time.time() - self._emoji_saved_at >= EMOJI_SAVE_INTERVAL:
                 self.save_emojis()
-        if self.emoji_describer and PLAIN_URL.search(msg.content or ''):
-            # 附件走 Wechat.media_bytes（普通 RPC），不用 SDK 的 msg.get_media_bytes——
-            # 那条分块流是坏的，所以「表情使用场景」一直没补上过（scene_count 永远是 0）。
-            #
-            # 能不能下载得看 daemon 能不能在 XML 里找到**字面量** `cdnurl="`（它的
-            # find_attr 不容空格）——实测群里 19 条带 cdnurl 的表情里 15 条写的是
-            # `cdnurl = "…`，下了也白下。所以条件跟 media.PLAIN_URL 同标准
+        if self.emoji_describer:
+            # 不再先看 XML 里有没有明文 cdnurl：daemon 的 `cdn::find_attr` 现在容忍
+            # `cdnurl = "…` 这种写法，没有明文链接时还能按 msg_id 回退 CDN 帧下载。
+            # 以前这里卡着这个条件，群里 19 条带 cdnurl 的表情有 15 条永远补不上场景。
             self.emoji_describer.schedule(self.emojis.get(emoji.md5),
                                           lambda m=msg: self._wechat.media_bytes(m))
 
@@ -577,8 +574,9 @@ class Bot:
         text, media = render(msg.msg_type, msg.content, msg.text)
         if text:
             msg.content = msg.clean_text = text
-        # 只在「字节真拿得到」时才排下载：图片的 XML 里没有明文 cdnurl，
-        # 硬试也是一次注定失败的 RPC（见 media.Media.downloadable）
+        # 值不值得排识图由 `media.describable` 说（图片/表情 + 缺描述）。
+        # 以前它还要求 XML 里有明文 cdnurl，那是 daemon 只会直连下载时候的事——
+        # 现在按 msg_id 走 CDN 帧，入站图片也下得来，那条限制只会让图片永远没描述
         download = ((lambda m=msg: self._wechat.media_bytes(m))
                     if (media and media.describable) else None)
         # 语音：先让 daemon 转成文字再进历史，否则模型只看到 `[语音 3″]`，什么也接不上。

@@ -99,8 +99,8 @@ class MediaDescriber:
     def _warn_once(self, key: str, message: str) -> None:
         """ 同一类失败只警告一次。
 
-        图片在这套 daemon 下**永远**下不下来（XML 里只有加密 fileid、没有 cdnurl），
-        每张都刷一条 warning 会把日志冲掉，真正要看的东西反而找不着。
+        刷图时同一类失败会连着来（下载超时 / 接口拒图），每张一条 warning 会把日志
+        冲掉，真正要看的东西反而找不着。
         """
         if key in self._warned:
             logger.debug(message)
