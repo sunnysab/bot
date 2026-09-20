@@ -4,7 +4,7 @@ import asyncio
 import types
 import unittest
 
-from weixin_bot import Message
+from weixin_bot import Message, WeChatBotError
 
 from wechat import Wechat
 
@@ -28,6 +28,7 @@ class FakeBot:
         self.sent: list[dict] = []
         self.contact_calls: list[str] = []
         self.wxid = 'wxid_me'
+        self.nickname = 'Bot'
         # 实测 daemon 查不到群成员时是拿 wxid 当名字返回的；置空模拟这种情况
         self.group_card = 'AliceGroupCard'
         self.contacts = {'wxid_alice': 'Alice', '456@chatroom': '一起哈啤'}
@@ -219,6 +220,33 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await self.wechat.media_bytes_by_id(7)
         self.assertEqual(len(self.calls), 2)
+
+    async def test_login_status_is_the_real_ready_signal(self):
+        """ 会话过期时 on_ready 是白跑的（daemon 让连不让查）。
+
+        启动那一刻会连上但 RPC 一律 401，所以拉联系人 / 加载历史只能挂在
+        daemon 的 login_status 事件上；注销（logged_in=false）不该触发回调。
+        """
+        seen = []
+
+        async def handler():
+            seen.append(1)
+
+        self.wechat.on_login(handler)
+        await self.wechat._on_login_status({'logged_in': False})
+        self.assertEqual(seen, [])
+        await self.wechat._on_login_status({'logged_in': True, 'nickname': 'Bot'})
+        self.assertEqual(seen, [1])
+        self.assertEqual(self.wechat.all_contacts, {'wxid_alice': 'Alice'})
+
+    async def test_refresh_contacts_tolerates_an_expired_session(self):
+        """ 未登录不是故障：daemon 会回 401，跳过就行，不能让 on_ready 报错。 """
+        async def boom(**kwargs):
+            raise WeChatBotError(401, 'session expired（-13）: get_all_contacts 需要重新登录')
+
+        self.wechat._bot.get_all_contacts = boom
+        await self.wechat._refresh_contacts(self.wechat._bot)
+        self.assertEqual(self.wechat.all_contacts, {})
 
     async def test_message_pagination_cursors_are_passed_through(self):
         """ 面板翻页要用 daemon 的 messages.id 游标，不能拿 64 位 msg_id 比大小。 """

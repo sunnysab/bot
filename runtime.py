@@ -169,6 +169,9 @@ class Runtime:
         self.chat_plugin = self._make_chat_plugin()
         self._install_plugins()
         self.bot.register_ready(lambda _bot: self.bot.load_context())
+        # 未登录时 on_ready 撞 401（连得上但查不了），真正拉历史要等 daemon 广播
+        # login_status。两个都注册：启动已登录时走前者，扫码重登走后者
+        self.bot.register_login(self.bot.load_context)
         if config.dry_run:
             logger.warning('演习模式：全链路照跑，但不真的发消息')
 

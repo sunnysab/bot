@@ -6,6 +6,8 @@ import time
 import types
 import unittest
 
+from weixin_bot import WeChatBotError
+
 import events
 from bot import EMOJI_LOCAL_ENOUGH, Bot
 from context import ChatWindow
@@ -29,6 +31,7 @@ class FakeWechat:
         self.emoji_queries: list[str] = []
         self.online: list = []                          # 假线上搜索结果
         self.names = {'wxid_bot': 'Bot'}                # wxid -> 显示名，查不到就回 wxid
+        self.nickname = 'Bot'                           # get_all_contacts 的回盘日志要用它
         self.revoked: list[tuple[str, int]] = []        # (会话, msg_id)
         self.refs: list = []                            # 每条出站的 ref_svrid（引用回复）
         self.ats: list = []                             # 每条出站的 at_list（@ 人）
@@ -133,6 +136,18 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
 
     def _window(self):
         return self.bot._history.get_context('456@chatroom')
+
+    async def test_load_context_tolerates_an_expired_session(self):
+        """ 会话过期时 daemon 让连不让查：on_ready 那一轮得安静跳过，不能报错。
+
+        真正加载历史要等 daemon 广播 login_status（见 register_login）。
+        """
+        async def boom(count=10):
+            raise WeChatBotError(401, 'session expired（-13）: get_conversations 需要重新登录')
+
+        self.bot._wechat.get_recent_sessions = boom
+        await self.bot.load_context()
+        self.assertEqual(self.bot.history.sizes(), {})
 
     async def test_status_events_trace_a_reply(self):
         """ 一条消息从接收到已发送，事件流要串得起来——面板的气泡状态全靠它。 """

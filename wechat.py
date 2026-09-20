@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator, Callable, Coroutine
 from typing import Any
 
 from loguru import logger
-from weixin_bot import Message, WeChatBot
+from weixin_bot import Message, WeChatBot, WeChatBotError
 
 from context import SYSTEM_KINDS, ChatWindow, MessageKind
 from emojis import Emoji
@@ -36,9 +36,12 @@ class Wechat:
         self._media_inflight: dict[int, asyncio.Task] = {}
         self._media_memo_bytes = 0
         self._message_callback = callback or self._on_message
+        # 登录成功（首次 / 扫码重登）后的回调，见 on_login
+        self._login_handlers: list[Callable[[], Coroutine[Any, Any, None]]] = []
 
         self._bot.on_message(self._dispatch)
         self._bot.on_ready(self._refresh_contacts)
+        self._bot.on_event('login_status')(self._on_login_status)
 
     @property
     def wxid(self) -> str:
@@ -52,6 +55,26 @@ class Wechat:
         """ 注册连接就绪（含重连）后的回调 """
         self._bot.on_ready(func)
 
+    def on_login(self, func: Callable[[], Coroutine[Any, Any, None]]) -> None:
+        """ 注册「登录成功」后的回调。
+
+        `on_ready` 在**未登录**时也会触发（daemon 未登录 / 会话过期都能连上，但 RPC 一律
+        401），所以拉联系人和加载历史都不能挂在它下面——daemon 激活会话时会广播
+        `login_status`，那才是数据查得到的时刻。
+        """
+        self._login_handlers.append(func)
+
+    async def _on_login_status(self, data: dict) -> None:
+        if not data.get('logged_in'):
+            logger.warning('daemon 已注销，等重新登录')
+            return
+        await self._refresh_contacts(self._bot)
+        for handler in self._login_handlers:
+            try:
+                await handler()
+            except Exception as e:  # noqa: BLE001 —— 一个回调坏了不能连累后面的
+                logger.error(f'登录后处理失败: {e}', exc_info=True)
+
     async def start(self) -> None:
         """ 连接 daemon 并持续接收消息，断线自动重连 """
         await self._bot.start()
@@ -64,7 +87,16 @@ class Wechat:
         await self._bot.close()
 
     async def _refresh_contacts(self, _bot: WeChatBot) -> None:
-        contacts = await self._bot.get_all_contacts(force_refresh=True)
+        """ 连接就绪 / 登录成功后拉联系人。
+
+        **未登录时 daemon 会拒（401 session expired）**——这在启动时是常态，不是故障，
+        扫码之后 `login_status` 会再走一次这里。
+        """
+        try:
+            contacts = await self._bot.get_all_contacts(force_refresh=True)
+        except WeChatBotError as e:
+            logger.warning(f'daemon 尚未登录，先不拉联系人（{e}）')
+            return
         self.all_contacts = {c.username: c.name for c in contacts}
         logger.info(f'Hello, {self.nickname}! ({len(self.all_contacts)} contacts)')
 

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import TypeVar
 
 from loguru import logger
+from weixin_bot import WeChatBotError
 
 from context import ChatWindow, ContextManager, MessageContext, MessageKind, SingleRecord
 from describer import MediaDescriber
@@ -243,8 +244,16 @@ class Bot:
             self._keeper.schedule(chat, record)
 
     def register_ready(self, func) -> None:
-        """ 注册连接就绪后的回调（如加载历史上下文） """
+        """ 注册连接就绪后的回调（如加载历史上下文）
+
+        注意 daemon「未登录 / 会话过期」时也会就绪（连得上但 RPC 一律 401），所以
+        想拿数据得用 `register_login`。
+        """
         self._wechat.on_ready(func)
+
+    def register_login(self, func) -> None:
+        """ 注册登录成功（首次 / 扫码重登）后的回调。 """
+        self._wechat.on_login(func)
 
     def set_default_plugin(self, plugin: Plugin | list[Plugin]):
         """ 整体替换默认插件链（**不是追加**）——热重载靠它换掉一整套。 """
@@ -275,7 +284,13 @@ class Bot:
         :param window_size: 每个会话加载的消息数量
         """
         count_loaded = 0
-        sessions = await self._wechat.get_recent_sessions(session_count)
+        try:
+            sessions = await self._wechat.get_recent_sessions(session_count)
+        except WeChatBotError as e:
+            # 会话过期时 daemon 让连不让查，on_ready 那一轮只能跳过；等扫码登录后
+            # register_login 会再调一次
+            logger.warning(f'daemon 尚未登录，先不加载历史上下文（{e}）')
+            return
         for contact in sessions:
             window = await self._wechat.fetch_history(contact, window_size)
             count_loaded += len(window)
