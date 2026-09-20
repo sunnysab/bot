@@ -124,7 +124,9 @@ HOT_FIELDS = frozenset({
 RESTART_FIELDS = frozenset({
     'daemon_host', 'daemon_port', 'daemon_unix', 'admin_port', 'log_path', 'log_level',
     'describe_media', 'media_cache_path', 'describe_concurrency', 'describe_timeout',
-    'describe_max_tokens', 'describe_history_limit',
+    'describe_max_tokens', 'describe_image_max_tokens', 'describe_history_limit',
+    'image_inline', 'image_shrink_threshold', 'image_shrink_target', 'image_fetch_timeout',
+    'image_cache_dir',
     'profile_path', 'habit_path', 'moment_path', 'emoji_path', 'scope_path', 'moment_batch',
     'persona_path',
 })

@@ -101,10 +101,13 @@ CONFIG_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
                 'planner_max_tokens', 'planner_thinking', 'planner_json_schema', 'enable_tools',
                 'planner_rounds')),
     ('出站', ('send_interval', 'typo_rate', 'dry_run')),
+    ('图片内联', ('image_inline', 'image_shrink_threshold', 'image_shrink_target',
+                'image_fetch_timeout', 'image_cache_dir')),
     ('观测', ('trace_path',)),
     ('改了要重启进程', ('daemon_host', 'daemon_port', 'daemon_unix', 'admin_port', 'log_path', 'log_level',
                     'describe_media', 'media_cache_path', 'describe_concurrency', 'describe_timeout',
-                    'describe_max_tokens', 'describe_history_limit', 'profile_path', 'habit_path',
+                    'describe_max_tokens', 'describe_image_max_tokens', 'describe_history_limit',
+                    'profile_path', 'habit_path',
                     'moment_path', 'emoji_path', 'scope_path', 'moment_batch', 'persona_path')),
 )
 
