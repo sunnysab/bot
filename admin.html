@@ -25,6 +25,10 @@
   .badge{background:var(--dry);color:#fff;padding:1px 8px;border-radius:10px;font-size:12px}
   main{flex:1;display:flex;min-height:0}
   aside{width:230px;background:var(--panel);border-right:1px solid var(--line);overflow:auto;flex:none}
+  /* 分界线：拖动调宽度，双击折叠。折叠后连同它一起藏起来，靠工具栏的「会话列表」拿回来 */
+  #splitter{flex:none;width:6px;cursor:col-resize}
+  #splitter:hover{background:var(--accent);opacity:.35}
+  main.aside-off #chats,main.aside-off #splitter{display:none}
   .chat{padding:8px 12px;border-bottom:1px solid var(--line);cursor:pointer;position:relative}
   .chat:hover{background:#f0f3f6}
   .chat.on{background:#e8f1fb;box-shadow:inset 3px 0 0 var(--accent)}
@@ -102,6 +106,7 @@
 <body>
 <header>
   <b id="who">…</b>
+  <button id="asidebtn" title="显示 / 隐藏会话列表">会话列表</button>
   <span><span class="dot" id="daemondot"></span><span id="daemon">daemon</span></span>
   <span id="counts" style="color:var(--dim)"></span>
   <span class="badge" id="drybadge" style="display:none">演习模式</span>
@@ -115,6 +120,7 @@
 </header>
 <main>
   <aside id="chats"></aside>
+  <div id="splitter" title="拖动调整宽度，双击折叠"></div>
   <div class="center">
     <div class="toolbar">
       <b id="cur">未选会话</b>
@@ -185,6 +191,38 @@ window.mediaFail = el => {
   d.textContent = el.dataset.fallback || '[附件取不到]';
   el.replaceWith(d);
 };
+
+// ---------- 会话列表的宽度 / 折叠 ----------
+
+// localStorage 在隐私模式和 file:// 下会直接抛，读不到就用默认值，别让它把面板带停
+const store = {
+  get(k, fallback){ try{ return localStorage.getItem(k) ?? fallback; }catch(e){ return fallback; } },
+  set(k, v){ try{ v === '' ? localStorage.removeItem(k) : localStorage.setItem(k, v); }catch(e){} },
+};
+const main = document.querySelector('main');
+
+// 拖拽的全局监听只留一对：分界线拉宽和图片平移共用，谁开始拖谁登记，拖完清掉
+let dragging = null;
+window.onmousemove = e => { if(dragging) dragging.move(e); };
+window.onmouseup = () => { const d = dragging; dragging = null; if(d) d.up(); };
+
+function setAsideWidth(px){
+  $('#chats').style.width = Math.min(600, Math.max(130, Math.round(px))) + 'px';
+}
+function toggleAside(off){
+  main.classList.toggle('aside-off', off);
+  store.set('aside.off', off ? '1' : '');
+}
+$('#asidebtn').onclick = () => toggleAside(!main.classList.contains('aside-off'));
+$('#splitter').addEventListener('mousedown', e => {
+  e.preventDefault();
+  const startX = e.clientX, startW = $('#chats').offsetWidth || 230;
+  dragging = {move: ev => setAsideWidth(startW + ev.clientX - startX),
+              up: () => store.set('aside.w', String($('#chats').offsetWidth))};
+});
+$('#splitter').addEventListener('dblclick', () => toggleAside(!main.classList.contains('aside-off')));
+setAsideWidth(parseInt(store.get('aside.w', '230'), 10) || 230);
+if(store.get('aside.off', '')) toggleAside(true);
 
 async function loadChats(){
   const data = await get('/api/chats');
