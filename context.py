@@ -42,6 +42,15 @@ SYSTEM_KINDS = frozenset({MessageKind.FRIEND_REQUEST, MessageKind.HANDOFF,
                           MessageKind.SYSTEM, MessageKind.SYS_RECOMMEND})
 
 
+def is_system_notice(msg: Message) -> bool:
+    """ 这条是不是系统通知（拍一拍、设备同步、好友请求……）。
+
+    与「能不能回」无关：拍一拍是社交信号，照常回应。它只回答「能不能引用」——
+    微信的引用框会把原话贴出来，引用一条系统通知就成了对着系统提示说话。
+    """
+    return getattr(msg, 'pat', None) is not None or MessageKind.of(msg.msg_type) in SYSTEM_KINDS
+
+
 def _format_time(t: int) -> str:
     """ 绝对时间，如 '09-14 14:32'。
 

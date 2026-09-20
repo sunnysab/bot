@@ -7,7 +7,15 @@ from typing import TypeVar
 from loguru import logger
 from weixin_bot import PatContent, WeChatBotError
 
-from context import ChatWindow, ContextManager, MessageContext, MessageKind, SingleRecord, message_handle
+from context import (
+    ChatWindow,
+    ContextManager,
+    MessageContext,
+    MessageKind,
+    SingleRecord,
+    is_system_notice,
+    message_handle,
+)
 from describer import MediaDescriber
 from emojis import Emoji, EmojiLibrary, parse_emoji_xml
 from events import Status, bus
@@ -589,8 +597,13 @@ class Bot:
             bus.publish(Status.PLACEHOLDER_BLOCKED, chat_id=msg.reply_target, chat_name=source,
                         msg_id=msg.msg_id,
                         detail=f'拦下 {len(response.texts) - len(texts)} 条媒体占位符')
-        # 复读机是跟队形，不引用具体某条：引用了就像专门回那个人，不像凑热闹
-        ref_svrid = 0 if response.verbatim else self._quote_target(msg)
+        # 复读机是跟队形，不引用具体某条：引用了就像专门回那个人，不像凑热闹。
+        # 系统通知（拍一拍）更不能引：引用框会把「拍了拍 你」原样贴出来，
+        # 看着像在回一条系统提示。回复照常，只是不带引用
+        notice = is_system_notice(msg)
+        if notice:
+            logger.info(f'系统通知不引用（msg_id={msg.msg_id}）: {msg.sender_name}: {msg.content[:30]}')
+        ref_svrid = 0 if (response.verbatim or notice) else self._quote_target(msg)
         for text in texts:
             self.enqueue(msg.reply_target, text, sender=self_name,
                          reply_to=msg.msg_id, chat_name=source, verbatim=response.verbatim,

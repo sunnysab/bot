@@ -1082,6 +1082,20 @@ class TestPat(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(msg.is_at_me)
         self.assertEqual(self._window()[-1].text, '拍了拍 wxid_bob')
 
+    async def test_a_pat_is_never_quoted(self):
+        """ 群里再乱也不引用系统通知：引用框会把「拍了拍 你」原样贴出来。 """
+        self.bot.quote_replies = True
+        window = self._window()
+        for i in range(8):          # 把群填「乱」，让 _quote_target 有条件返回 svrid
+            window.append(f'用户{i}', '别人说的', int(time.time()))
+        self.bot.set_default_plugin(FakePlugin(texts=['嗯']))
+        msg = make_msg(text='<sysmsg type="pat">', msg_type=10002)
+        msg.pat = types.SimpleNamespace(patted_user='wxid_bot', suffix='')
+        await self.bot.on_message(msg)
+        await asyncio.sleep(0.1)
+
+        self.assertEqual(self.bot._wechat.refs, [None])
+
     async def test_pat_sends_and_records(self):
         ok, message = await self.bot.pat('456@chatroom', 'Alice')
         self.assertTrue(ok)
