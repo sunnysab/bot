@@ -403,11 +403,19 @@ class Wechat:
         except Exception as e:
             logger.warning(f'取群成员失败（{chatroom}）: {e}')
             return ''
-        exact = [m.wxid for m in members
-                 if name in (m.display_name, m.group_nickname, m.nickname)]
+        # daemon 的成员表里 nickname/group_nickname 实测全是空的（只有 wxid），
+        # 真名得走 get_display_name（get_chatroom_member → get_contact），
+        # 也就是 transcript 里显示名字的那条路——不然模型照着历史 @ 谁都查不到。
+        # ponytail: 首次在某个群 @ 是 O(人数) 次 RPC（174 人的群约两百毫秒），
+        # 解析结果落 _names 缓存，之后查人和渲染历史都免查。要再快得让 daemon
+        # 的 get_chatroom 直接带上 display_name。
+        aliases = [(m.wxid, (m.display_name, await self.get_display_name(m.wxid, chatroom),
+                             m.group_nickname, m.nickname))
+                   for m in members]
+        exact = [wxid for wxid, names in aliases if name in names]
         if exact:
             return exact[0]
-        loose = [m.wxid for m in members if name in m.name]
+        loose = [wxid for wxid, names in aliases if any(name in alias for alias in names)]
         return loose[0] if len(loose) == 1 else ''
 
     async def _resolve_contact(self, wxid: str) -> str:

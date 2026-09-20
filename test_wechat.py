@@ -318,6 +318,12 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.wechat.find_member('456@chatroom', 'Bob'), 'wxid_bob')
         self.assertEqual(await self.wechat.find_member('456@chatroom', 'AliceGroupCard'), 'wxid_alice')
 
+    async def test_find_member_uses_resolved_name_when_daemon_returns_wxid(self):
+        """ 实测 get_chatroom 的 display_name 只是 wxid 兜底；人名得走 get_display_name。 """
+        self.wechat._bot.group_card = ''
+        self.wechat._bot.members = [('wxid_alice', 'wxid_alice', '')]
+        self.assertEqual(await self.wechat.find_member('456@chatroom', 'Alice'), 'wxid_alice')
+
     async def test_find_member_prefers_exact_over_partial(self):
         """ @ 错人比不 @ 更难看：模糊命中不止一个就不猜。 """
         self.wechat._bot.members = [('wxid_a', '小张', ''), ('wxid_b', '张老师', '')]
