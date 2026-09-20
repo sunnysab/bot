@@ -773,7 +773,7 @@ class Admin:
                 return self._json(handler, self.trace(unquote(route[len('/api/trace/'):])))
             if route == '/api/media':
                 data, content_type = self.media((query.get('msg_id') or [''])[0])
-                return self._send_bytes(handler, data, content_type)
+                return self._send_bytes(handler, data, content_type, cache=True)
             if route == '/api/config':
                 return self._json(handler, self.read_config())
             self._json(handler, {'error': 'not found'}, 404)
@@ -834,12 +834,14 @@ class Admin:
         Admin._send_bytes(handler, body.encode('utf-8'), content_type, code)
 
     @staticmethod
-    def _send_bytes(handler, data: bytes, content_type: str, code: int = 200) -> None:
+    def _send_bytes(handler, data: bytes, content_type: str, code: int = 200,
+                    cache: bool = False) -> None:
         handler.send_response(code)
         handler.send_header('Content-Type', content_type)
         handler.send_header('Content-Length', str(len(data)))
-        # 附件按 msg_id 内容寻址，不会变——和实时数据不同，可以放心让浏览器缓存
-        handler.send_header('Cache-Control', 'private, max-age=3600')
+        # 默认不缓存：页面、JS 和 /api/* 都是「看着会变」的东西，缓存一小时会让面板
+        # 显示旧数据/旧代码。只有附件是例外——它按 msg_id 内容寻址，不会变
+        handler.send_header('Cache-Control', 'private, max-age=3600' if cache else 'no-store')
         handler.end_headers()
         handler.wfile.write(data)
 
