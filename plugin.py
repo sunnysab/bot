@@ -90,21 +90,21 @@ SPEAK = ToolSpec(
     name='speak',
     description='让机器人用文字说一句。intent 是你想表达什么，不是台词本身——'
                 '台词由别人负责写。调用这个工具本轮就结束了。'
-                'at 只在群聊里给：填某个群友的昵称，这一句就会 @ 他。',
+                'at 只在群聊里用，**默认别填**：回话多半已经引用了对方那条。',
     parameters={'type': 'object',
                 'properties': {'intent': {'type': 'string', 'description': '想表达什么'},
                                'emotion': {'type': 'string', 'description': '什么情绪'},
-                               'at': {'type': 'string', 'description': '要 @ 的群友昵称，不 @ 就别填'}},
+                               'at': {'type': 'string', 'description': '要 @ 的群友昵称。默认不填——回话多半自带引用，够说明在回谁'}},
                 'required': ['intent']})
 REPLY = ToolSpec(
     name='reply',
     description='用机器人的身份在群里说一句。text 就是要发出去的原话本身（不是意图、不是转述），'
                 '写法像微信打字，一轮只说一条。调完本轮就结束，什么都不调就是这一轮不发言。'
-                'at 只在群聊里给：填某个群友的昵称，这一句就会 @ 他；'
-                '如果对方是在点名问你，@ 回去更清楚。',
+                'at 只在群聊里用，**默认别填**：回话多半已经引用了对方那条；'
+                '只有真要把某人叫出来（提醒他、喊他回话）时才填他的群昵称。',
     parameters={'type': 'object',
                 'properties': {'text': {'type': 'string', 'description': '要发出去的原话'},
-                               'at': {'type': 'string', 'description': '要 @ 的群友昵称，不 @ 就别填'}},
+                               'at': {'type': 'string', 'description': '要 @ 的群友昵称。默认不填——回话多半自带引用，够说明在回谁'}},
                 'required': ['text']})
 REVOKE = ToolSpec(
     name='revoke',
