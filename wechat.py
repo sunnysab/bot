@@ -1,7 +1,7 @@
 import asyncio
 import base64
 from collections import OrderedDict
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine
 from typing import Any
 
 from loguru import logger
@@ -55,6 +55,10 @@ class Wechat:
     async def start(self) -> None:
         """ 连接 daemon 并持续接收消息，断线自动重连 """
         await self._bot.start()
+
+    async def connect(self) -> None:
+        """ 只连上、不跑收消息循环（离线工具用；用完 `stop()`）。 """
+        await self._bot.connect()
 
     async def stop(self) -> None:
         await self._bot.close()
@@ -241,6 +245,15 @@ class Wechat:
         return await self._bot.get_messages(limit=limit, contact=peer, reverse=True,
                                            exclude_system=exclude_system,
                                            before_id=before_id or None, after_id=after_id or None)
+
+    def iter_media(self, peer: str, types: tuple[int, ...] = (3, 47),
+                   since: int | None = None) -> AsyncIterator[Message]:
+        """ 倒着遍历一个会话里的媒体消息（图片 / 表情）。离线补描述用。
+
+        走 daemon 的分页游标，不限制条数；媒体消息本来就不多（这个群一周 1400 条）。
+        """
+        return self._bot.iter_history(page_size=200, contact=peer, msg_type=list(types),
+                                      since=since, exclude_system=True)
 
     async def sender_names(self, chat: str, senders) -> dict[str, str]:
         """ 把 wxid 批量解析成显示名（群昵称 > 备注）。

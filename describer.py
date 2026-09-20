@@ -42,6 +42,12 @@ class MediaCache:
                                (md5, kind, description, model, int(time.time())))
             self._conn.commit()
 
+    def items(self) -> list[tuple[str, str, str, int]]:
+        """ 全部描述：[(md5, 种类, 描述, 写入时间)]。给媒体名录/面板浏览用。 """
+        with self._lock:
+            rows = self._conn.execute('SELECT md5, kind, description, updated_at FROM media').fetchall()
+        return [(r[0], r[1], r[2] or '', r[3] or 0) for r in rows]
+
     def close(self) -> None:
         self._conn.close()
 
