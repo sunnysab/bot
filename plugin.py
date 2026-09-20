@@ -305,15 +305,15 @@ class ReplyPolicy:
 
     def __init__(self, threshold: int = NECESSITY_THRESHOLD, activity_window: float = 180.0,
                  aliases: tuple[str, ...] = (), backoff: IdleBackoff | None = None,
-                 focus: FocusMode | None = None, focus_score_bonus: int = 15,
+                 focus: FocusMode | None = None, focus_score_bonus: int = 0,
                  aliases_for: Callable[[str], tuple[str, ...]] | None = None):
         """ :param threshold: 必要性分数阈值，越高越沉默
         :param activity_window: 统计群活跃度的时间窗口（秒）
         :param aliases: 机器人自己的其他叫法，命中就当被叫到名字
         :param backoff: 连续沉默退避；不传则用默认（连续两轮不开口开始歇 15s）
         :param focus: 专注模式；群聊得热时盯一会儿，期间给必要性打分加分
-        :param focus_score_bonus: 专注期的加分。**只加分，不豁免门控**——豁免会把
-            存在感惩罚一起绕过，群里就成了机器人一个人的独角戏
+        :param focus_score_bonus: 专注期的加分。默认 0——专注本身只意味着「不省那次模型调用」，
+            而热群的压力分已经封顶送它过线；再加分就是热群必回（实测 82% 的轮次在专注期）
         :param aliases_for: 按会话取别名（分会话人设改了别名也要能叫应）；不传用上面的 aliases
         """
         self.threshold = threshold
