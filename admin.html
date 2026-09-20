@@ -148,6 +148,14 @@
 </main>
 <script src="/admin.js"></script>
 <script>
+// 失败要显眼：以前一份缓存的 404（旧的“所有响应都 max-age=3600”）会让这个脚本在
+// 下一行抛 undefined，整个面板静默变白——只看得到一个空壳子。
+if (!window.AdminUI) {
+  document.body.innerHTML = '<div style="padding:24px;font:14px/1.7 system-ui">'
+    + '<b>admin.js 没加载出来</b><br>多半是浏览器缓存了一份旧的 404。'
+    + '强制刷新一下：<b>Ctrl+Shift+R</b>（macOS 是 <b>Cmd+Shift+R</b>）。</div>';
+  throw new Error('admin.js not loaded');
+}
 // 纯渲染函数（LABEL/GROUP/esc/chip/mediaBody/row/cursorsOf）在 admin.js：
 // 它们不碰 DOM、不读全局状态，所以能单独用 `node --test test_admin_ui.js` 跑断言。
 // 这里只留状态、请求和 DOM 操作。

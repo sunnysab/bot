@@ -1197,6 +1197,7 @@ def _self_check() -> None:
 
     # 面板的状态表必须覆盖每一个 Status，否则 chip 会显示裸状态名
     js = UI_JS.read_text(encoding='utf-8')
+    assert '/admin.js' in PAGE.read_text(encoding='utf-8'), 'admin.html 没引用 /admin.js'
     missing = [s for name, s in vars(Status).items()
                if name.isupper() and not name.startswith('_') and isinstance(s, str)
                and f'{s}:' not in js]
