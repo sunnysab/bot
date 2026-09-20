@@ -149,6 +149,27 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         await self.bot.load_context()
         self.assertEqual(self.bot.history.sizes(), {})
 
+    async def test_load_context_is_idempotent(self):
+        """ on_ready 和 login_status 各会拉一次历史，重复加载会把同一批消息
+        塞进窗口两遍，复读机于是把每条都当成队形复读出去。 """
+        calls = []
+
+        async def sessions(count=10):
+            return ['456@chatroom']
+
+        async def fetch(contact, count=30):
+            calls.append(contact)
+            window = ChatWindow()
+            window.append('Alice', '在吗', 1)
+            return window
+
+        self.bot._wechat.get_recent_sessions = sessions
+        self.bot._wechat.fetch_history = fetch
+        await self.bot.load_context()
+        await self.bot.load_context()
+        self.assertEqual(calls, ['456@chatroom'])
+        self.assertEqual(len(self._window()), 1)
+
     async def test_status_events_trace_a_reply(self):
         """ 一条消息从接收到已发送，事件流要串得起来——面板的气泡状态全靠它。 """
         events.bus.reset()

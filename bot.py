@@ -91,6 +91,9 @@ class Bot:
 
         # 聊天上下文记录。消息滑出窗口时交给 keeper 压成中期记忆
         self._history = ContextManager(on_evict=self._on_evicted)
+        # 启动历史只加载一次：on_ready 和 login_status 各会触发一次，重复加载会让
+        # 同一批消息在窗口里出现两遍，复读机会把每条都当成队形
+        self._history_loaded = False
         self._keeper = keeper
         # 消息处理插件
         self._plugins = PluginManager()
@@ -283,6 +286,8 @@ class Bot:
         :param session_count: 加载的最近会话数量
         :param window_size: 每个会话加载的消息数量
         """
+        if self._history_loaded:  # on_ready 与 login_status 都会拉一次，第二次直接跳过
+            return
         count_loaded = 0
         try:
             sessions = await self._wechat.get_recent_sessions(session_count)
@@ -297,6 +302,7 @@ class Bot:
             self._history.get_context(contact).extend(window)
             self._schedule_history_media(window)
 
+        self._history_loaded = True
         logger.info(f'{len(sessions)} sessions, {count_loaded} messages loaded.')
 
     def _schedule_history_media(self, window: ChatWindow) -> None:

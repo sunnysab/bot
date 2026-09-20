@@ -501,6 +501,15 @@ class TestRepeatPlugin(unittest.IsolatedAsyncioTestCase):
         reply = await RepeatPlugin().handle(make_ctx(make_msg(), history=window))
         self.assertEqual(reply.texts, ['牛啊'])
 
+    async def test_quote_annotation_is_not_echoed(self):
+        """ render 给引用消息补的「（引用前文的消息：…）」是给模型看的，
+        不能原样发给群（线上历史重复时就发过这条天书）。 """
+        window = ChatWindow()
+        window.append('Alice', '这啥 官网？（引用前文的消息：[图片]）', 1)
+        window.append('Bob', '这啥 官网？（引用前文的消息：[图片]）', 2)
+        reply = await RepeatPlugin().handle(make_ctx(make_msg(), history=window))
+        self.assertEqual(reply.texts, ['这啥 官网？'])
+
     async def test_repeats_and_stops(self):
         window = ChatWindow()
         window.append('Alice', '牛啊', 1)

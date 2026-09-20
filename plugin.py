@@ -287,7 +287,13 @@ class RepeatPlugin(Plugin):
 
         # 找一条别人说过的队形，跟上
         record: SingleRecord = repeated[-1]
-        text: str = record.text
+        # 复读的是用户看到的那句话。render 给引用消息补的「（引用前文的消息：…）」
+        # 是给模型看的注解，原样发出去就是天书；注解永远缀在末尾且以「（引用」开头，
+        # 砍一刀就够——正文里真写「（引用」的极罕见
+        # ponytail: 只处理这一种注解，别再给渲染文本加会漏给用户的尾巴
+        text: str = record.text.split('（引用', 1)[0].strip()
+        if not text:
+            return None
         # 太长不跟
         if len(text) > self.max_length:
             return None
