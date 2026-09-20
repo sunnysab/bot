@@ -110,7 +110,6 @@ HOT_FIELDS = frozenset({
     'deepseek_key', 'deepseek_model', 'deepseek_url', 'send_interval',
     'reply_necessity_threshold', 'reply_activity_window',
     'reply_context_length', 'agent_max_replies', 'focus_score_bonus',
-    'quote_min_activity', 'quote_window_seconds',
     'reply_min_gap', 'reply_rate_window', 'reply_rate_max',
     'enable_focus', 'focus_enter_activity', 'focus_idle_seconds', 'focus_max_seconds',
     'backoff_start_after', 'backoff_base_seconds', 'backoff_max_seconds', 'backoff_bypass_messages',
@@ -190,8 +189,7 @@ class Runtime:
                    keeper=MomentKeeper(self.ai, self.memories, batch=config.moment_batch),
                    emojis=self.emojis, emoji_path=config.emoji_path,
                    emoji_describer=self.emoji_describer, typo_rate=config.typo_rate,
-                   quote_replies=config.quote_replies, quote_min_activity=config.quote_min_activity,
-                   quote_window=config.quote_window_seconds, dry_run=config.dry_run)
+                   quote_replies=config.quote_replies, dry_run=config.dry_run)
 
     def _make_describer(self) -> MediaDescriber | None:
         if not self.config.describe_media:
@@ -307,8 +305,6 @@ class Runtime:
         self._install_plugins()
         self.bot.typo_rate = config.typo_rate
         self.bot.quote_replies = config.quote_replies
-        self.bot.quote_min_activity = config.quote_min_activity
-        self.bot.quote_window = config.quote_window_seconds
         self.bot.dry_run = config.dry_run
         self.bot.wechat.dry_run = config.dry_run
         self.bot.outbox.set_interval(config.send_interval)

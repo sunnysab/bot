@@ -8,7 +8,7 @@ import types
 import unittest
 from pathlib import Path
 
-from context import ChatWindow, MessageContext
+from context import ChatWindow, MessageContext, message_handle
 from emojis import Emoji
 from focus import FocusMode
 from habits import Habit, HabitStore
@@ -856,6 +856,49 @@ class TestMessageSearchTool(unittest.IsolatedAsyncioTestCase):
         ai = ToolAi([AssistantTurn()])
         await ChatPlugin(ai, context_length=10).handle(proactive_ctx())
         self.assertNotIn('search_messages', ai.tools_seen[0])
+
+
+class TestRefTool(unittest.IsolatedAsyncioTestCase):
+    """ 引用哪条由模型说了算：ref 填聊天记录里的 #标签，解析成那条消息的 svrid。 """
+
+    SVRID = 770559124696026893
+
+    def ctx(self):
+        window = history_with(12, now=time.time())
+        window.append('Alice', '[表情：熊猫]', int(time.time()), msg_id=self.SVRID)
+        return make_ctx(make_msg(is_chatroom=True, content='这个怎么弄啊'), history=window)
+
+    def plugin(self, turns, **kwargs):
+        self.ai = ToolAi(turns)
+        return ChatPlugin(self.ai, context_length=10, reply_mode='agent', **kwargs)
+
+    async def test_ref_handle_becomes_the_svrid(self):
+        handle = message_handle(self.SVRID)
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('reply', text='这熊猫', ref=handle),))])
+        reply = await plugin.handle(self.ctx())
+        self.assertEqual(reply.ref, self.SVRID)
+
+    async def test_ref_is_optional(self):
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('reply', text='在'),))])
+        reply = await plugin.handle(self.ctx())
+        self.assertEqual(reply.ref, 0)
+
+    async def test_unknown_handle_still_sends_the_text(self):
+        """ 标签对不上就不引用，但话照发——引错了比不引更糟，不回更糟。 """
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('reply', text='在', ref='#nope'),))])
+        reply = await plugin.handle(self.ctx())
+        self.assertEqual(reply.ref, 0)
+        self.assertEqual(reply.texts, ['在'])
+        # 回执说清楚为什么没引，模型下轮能看到
+        note = ChatPlugin._resolve_ref({'ref': '#nope'}, {'ref': 0}, self.ctx())
+        self.assertIn('没有「#nope」', note)
+
+    async def test_two_stage_speak_carries_the_ref(self):
+        handle = message_handle(self.SVRID)
+        ai = ToolAi([AssistantTurn(tool_calls=(_call('speak', intent='附和', ref=handle),))])
+        plugin = ChatPlugin(ai, context_length=10)
+        reply = await plugin.handle(self.ctx())
+        self.assertEqual(reply.ref, self.SVRID)
 
 
 class TestAtTool(unittest.IsolatedAsyncioTestCase):

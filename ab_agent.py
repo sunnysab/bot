@@ -84,7 +84,7 @@ async def run_two_stage(plugin: ChatPlugin, ctx: MessageContext, transcript: str
                         must_speak: bool) -> dict:
     started = time.perf_counter()
     before = usage.snapshot()
-    decided, _emoji, _at, _log = await plugin._plan_with_tools(ctx, {}, transcript)
+    decided, _emoji, _at, _ref, _log = await plugin._plan_with_tools(ctx, {}, transcript)
     texts: list[str] = []
     plan = ''
     if decided is not None:
@@ -103,7 +103,7 @@ async def run_agent(plugin: ChatPlugin, ctx: MessageContext, transcript: str,
                     must_speak: bool) -> dict:
     started = time.perf_counter()
     before = usage.snapshot()
-    replies, _emoji, _at, _log = await plugin._reply_agent(ctx, {}, transcript, must_speak)
+    replies, _emoji, _at, _ref, _log = await plugin._reply_agent(ctx, {}, transcript, must_speak)
     texts = clean(replies, plugin, ctx)
     after = usage.snapshot()
     return {'texts': texts, 'latency_ms': int((time.perf_counter() - started) * 1000),

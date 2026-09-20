@@ -12,7 +12,7 @@ from typing import override
 from loguru import logger
 
 from ai import AiProvider
-from context import ChatWindow, MessageContext, SingleRecord
+from context import ChatWindow, MessageContext, SingleRecord, message_handle
 from emojis import FACE_CATALOG, Emoji, EmojiPolicy, filter_faces
 from events import Status, bus
 from focus import FocusMode
@@ -90,21 +90,27 @@ SPEAK = ToolSpec(
     name='speak',
     description='让机器人用文字说一句。intent 是你想表达什么，不是台词本身——'
                 '台词由别人负责写。调用这个工具本轮就结束了。'
-                'at 只在群聊里用，**默认别填**：回话多半已经引用了对方那条。',
+                'ref：这句在回哪一条——填聊天记录里那行的 #标签（如 #4k2p），'
+                '发出的消息会引用那一条；没在回具体某条就别填。',
     parameters={'type': 'object',
                 'properties': {'intent': {'type': 'string', 'description': '想表达什么'},
                                'emotion': {'type': 'string', 'description': '什么情绪'},
-                               'at': {'type': 'string', 'description': '要 @ 的群友昵称。默认不填——回话多半自带引用，够说明在回谁'}},
+                               'at': {'type': 'string', 'description': '要 @ 的群友昵称，不 @ 就别填'},
+                               'ref': {'type': 'string',
+                                       'description': '要引用（回复某条）的 #标签，没在回具体某条就别填'}},
                 'required': ['intent']})
 REPLY = ToolSpec(
     name='reply',
     description='用机器人的身份在群里说一句。text 就是要发出去的原话本身（不是意图、不是转述），'
                 '写法像微信打字，一轮只说一条。调完本轮就结束，什么都不调就是这一轮不发言。'
-                'at 只在群聊里用，**默认别填**：回话多半已经引用了对方那条；'
-                '只有真要把某人叫出来（提醒他、喊他回话）时才填他的群昵称。',
+                'ref：这句在回哪一条——填聊天记录里那行的 #标签（如 #4k2p），'
+                '发出的消息会引用那一条；**答谁就引谁**，没在回具体某条就别填。'
+                'at：要 @ 的群友昵称，默认别填。',
     parameters={'type': 'object',
                 'properties': {'text': {'type': 'string', 'description': '要发出去的原话'},
-                               'at': {'type': 'string', 'description': '要 @ 的群友昵称。默认不填——回话多半自带引用，够说明在回谁'}},
+                               'at': {'type': 'string', 'description': '要 @ 的群友昵称，不 @ 就别填'},
+                               'ref': {'type': 'string',
+                                       'description': '要引用（回复某条）的 #标签，没在回具体某条就别填'}},
                 'required': ['text']})
 REVOKE = ToolSpec(
     name='revoke',
@@ -146,6 +152,7 @@ class Reply:
     stop: bool = False
     emoji: Emoji | None = None      # 本轮要发的表情；发送由 Bot 统一走队列，插件不发
     at: str = ''                    # 要 @ 的群成员 wxid；由 Bot 解析名字后带回
+    ref: int = 0                    # 要引用（微信「回复某条」）的消息 svrid；0 = 不引用
     verbatim: bool = False          # 一字不改发出去（复读机：抖错别字就不叫复读了）
 
 
@@ -605,10 +612,11 @@ class ChatPlugin(Plugin):
         plan = ''
         emoji: Emoji | None = None
         at = ''
+        ref = 0
         if self.enable_planner:
             self._emit(ctx, Status.DECIDING, f'{necessity.kind} · 分数 {necessity.score}')
             if self._tools_ready:
-                decided, emoji, at, tool_log = await self._plan_with_tools(ctx, blocks, transcript, images)
+                decided, emoji, at, ref, tool_log = await self._plan_with_tools(ctx, blocks, transcript, images)
             else:
                 decided, tool_log = await self._plan(ctx, necessity, blocks, transcript, images), ''
             # 决策本身没跑通（超时/报错）：不算「不发言」，照走表达者
@@ -639,7 +647,7 @@ class ChatPlugin(Plugin):
             self._emit(ctx, Status.EMPTY_REPLY)
             return self._silent(ctx, now, emoji=emoji)
         self.policy.record(ctx, spoke=True, now=now)
-        return Reply(texts=texts, emoji=emoji, at=at)
+        return Reply(texts=texts, emoji=emoji, at=at, ref=ref)
 
     def _emit(self, ctx: MessageContext, status: str, detail: str = '', **fields) -> None:
         """ 把这一轮的状态发给管理后台。失败也不影响聊天（bus 自己吞异常）。
@@ -768,6 +776,22 @@ class ChatPlugin(Plugin):
         state['at'] = wxid
         return f'（这条会 @{name}。）'
 
+    @staticmethod
+    def _resolve_ref(arguments: dict, state: dict, ctx: MessageContext) -> str:
+        """ 解析引用目标：聊天记录里的 #标签 → 那条消息的 svrid，存进 state。
+
+        返回一句给模型看的回执；没给 ref 就返回空串。标签对不上（写错 / 已被刷出
+        窗口）就不引用——引用错了比不引用更糟，回执说清楚，让模型自己决定要不要重发。
+        """
+        ref = arg_str(arguments, 'ref')
+        if not ref:
+            return ''
+        record = ctx.history.find_by_handle(ref)
+        if record is None:
+            return f'（聊天记录里没有「{ref}」这条，这条就不引用了。）'
+        state['ref'] = record.msg_id
+        return f'（这条会引用 {message_handle(record.msg_id)}。）'
+
     def _tools(self, state: dict, terminal: ToolSpec, handler, ctx: MessageContext) -> list:
         """ 一轮的完整工具集：表情对 + 终点动作（speak / reply）+ 查历史 +（可选）撤回。 """
         tools = self._emoji_tools(state)
@@ -780,19 +804,21 @@ class ChatPlugin(Plugin):
 
     async def _plan_with_tools(self, ctx: MessageContext, blocks: dict[str, str], transcript: str,
                                images: list[tuple[str, bytes]]) \
-            -> tuple[Plan | None, Emoji | None, str, str]:
-        """ 带工具的决策循环（两段式）。返回（决策, 选中的表情, 要 @ 的人, 工具调用记录）。
+            -> tuple[Plan | None, Emoji | None, str, int, str]:
+        """ 带工具的决策循环（两段式）。返回（决策, 选中的表情, 要 @ 的人, 引用的消息 svrid, 工具记录）。
 
         模型只挑动作（搜表情 / 选一张 / 说要说话），不写台词——台词还是表达者的事。
         一个工具都不调 = 本轮不发言；调了动作类工具本轮就结束。
         """
-        state: dict = {'candidates': [], 'picked': [], 'at': '', 'pat': ''}
+        state: dict = {'candidates': [], 'picked': [], 'at': '', 'ref': 0, 'pat': ''}
         said = {'intent': '', 'emotion': ''}
 
         async def speak(arguments: dict) -> ToolResult:
             said['intent'] = arg_str(arguments, 'intent')
             said['emotion'] = arg_str(arguments, 'emotion')
-            return ToolResult(f'好，交给表达者。{await self._resolve_at(arguments, state, ctx)}', stop=True)
+            note = (await self._resolve_at(arguments, state, ctx)
+                    + self._resolve_ref(arguments, state, ctx))
+            return ToolResult(f'好，交给表达者。{note}', stop=True)
 
         toolbox = Toolbox(self._tools(state, SPEAK, speak, ctx))
         prompt = await self._planner_prompt(ctx, toolbox.names)
@@ -802,7 +828,7 @@ class ChatPlugin(Plugin):
         for _ in range(max(1, self.planner_rounds)):
             turn = await self._ask_tools(prompt, messages, toolbox.schema(), ctx)
             if turn is None:
-                return None, None, toolbox.render_calls()      # 这次没拿到决策
+                return None, None, '', 0, toolbox.render_calls()      # 这次没拿到决策
             analysis = turn.content or turn.reasoning or analysis
             if not turn.tool_calls:                    # 什么都不调 = 不发言
                 break
@@ -818,20 +844,20 @@ class ChatPlugin(Plugin):
         emoji = state['picked'][0] if state['picked'] else None
         log = toolbox.render_calls()
         if emoji is None and not said['intent']:
-            return Plan(speak=False, analysis=analysis), None, '', log
+            return Plan(speak=False, analysis=analysis), None, '', 0, log
         plan = Plan(speak=bool(said['intent']), analysis=analysis, intent=said['intent'],
                     emotion=said['emotion'], emoji=emoji.desc if emoji else '')
-        return plan, emoji, state['at'], log
+        return plan, emoji, state['at'], state['ref'], log
 
     async def _reply_agent(self, ctx: MessageContext, blocks: dict[str, str], transcript: str,
                            images: list[tuple[str, bytes]], must_speak: bool) \
-            -> tuple[list[str], Emoji | None, str, str]:
+            -> tuple[list[str], Emoji | None, str, int, str]:
         """ 单段式：模型自己判断、自己写台词，回话就是一次 `reply` 调用。
 
         与 _plan_with_tools 只差终点动作：那边调 speak（只说意图），这边调 reply（原话）。
         表情工具、查历史工具、撤回工具、循环骨架完全一致。
         """
-        state: dict = {'candidates': [], 'picked': [], 'at': '', 'pat': ''}
+        state: dict = {'candidates': [], 'picked': [], 'at': '', 'ref': 0, 'pat': ''}
         replies: list[str] = []
 
         async def reply(arguments: dict) -> ToolResult:
@@ -841,7 +867,8 @@ class ChatPlugin(Plugin):
             if len(replies) >= self.agent_max_replies:
                 return ToolResult('这一轮说得够多了，剩下的下轮再说。')
             replies.append(text)
-            note = await self._resolve_at(arguments, state, ctx)
+            note = (await self._resolve_at(arguments, state, ctx)
+                    + self._resolve_ref(arguments, state, ctx))
             # stop=True：调完本轮就收，别再多跑一轮去确认。同一轮里的多个 reply
             # 照样全部执行（Toolbox.call 是先把这轮的调用跑完再 break），所以多行不受影响
             return ToolResult(f'好，这条算说完了（第 {len(replies)} 条）。{note}', stop=True)
@@ -874,7 +901,7 @@ class ChatPlugin(Plugin):
             if stopped:
                 break
         return (replies, (state['picked'][0] if state['picked'] else None),
-                state['at'], toolbox.render_calls())
+                state['at'], state['ref'], toolbox.render_calls())
 
     async def _agent_round(self, ctx: MessageContext, blocks: dict[str, str], transcript: str,
                            images: list[tuple[str, bytes]], must_speak: bool,
@@ -882,14 +909,14 @@ class ChatPlugin(Plugin):
         """ agent 模式的一轮：决策和表达在同一次调用里完成，没有表达者这一步。 """
         self._emit(ctx, Status.DECIDING, f'{necessity.kind} · agent')
         started = time.perf_counter()
-        texts, emoji, at, tool_log = await self._reply_agent(ctx, blocks, transcript, images, must_speak)
+        texts, emoji, at, ref, tool_log = await self._reply_agent(ctx, blocks, transcript, images, must_speak)
         self._trace(ctx, necessity, transcript, texts or None, self._elapsed(started), tool_log)
         cleaned = self._clean(texts, ctx)
         if not cleaned:
             self._emit(ctx, Status.PLANNER_SILENT, 'agent 选择不发言')
             return self._silent(ctx, now, emoji=emoji)
         self.policy.record(ctx, spoke=True, now=now)
-        return Reply(texts=cleaned, emoji=emoji, at=at)
+        return Reply(texts=cleaned, emoji=emoji, at=at, ref=ref)
 
     async def _ask_tools(self, prompt: str, messages: list[dict], tools: list[dict],
                          ctx: MessageContext) -> AssistantTurn | None:

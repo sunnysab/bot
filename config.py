@@ -99,8 +99,6 @@ class Config:
     agent_max_replies: int = 1           # agent 模式一轮最多发几条消息
     focus_score_bonus: int = 0           # 专注期加分。默认 0：热群本来就有压力分，
                                          # 再加就成了「热群必回」（见 necessity.PRESSURE_MAX）
-    quote_min_activity: int = 8          # 窗口内别人至少说这么多条，引用才不突兀
-    quote_window_seconds: float = 180.0  # 判断「群里乱不乱」的时间窗口
     # 发言频率闸：阈值过了也可能说得太密，这是最后一道闸（只拦主动参与）
     reply_min_gap: float = 45.0          # 同一会话两条之间至少隔多久（秒）
     reply_rate_window: float = 300.0     # 滑动窗口（秒）
@@ -208,11 +206,11 @@ if __name__ == '__main__':
     assert base.quote_replies is True, base            # 真机验过，引用回复默认开
     # 回复行为也能从环境变量调（面板上要能改）
     assert base.reply_context_length == 60 and base.agent_max_replies == 1, base
-    assert base.focus_score_bonus == 0 and base.quote_min_activity == 8, base
+    assert base.focus_score_bonus == 0, base
     assert base.reply_min_gap == 45.0 and base.reply_rate_max == 5, base
-    os.environ.update(AGENT_MAX_REPLIES='2', QUOTE_MIN_ACTIVITY='12')
+    os.environ.update(AGENT_MAX_REPLIES='2')
     behavior = Config.from_env()
-    assert behavior.agent_max_replies == 2 and behavior.quote_min_activity == 12, behavior
+    assert behavior.agent_max_replies == 2, behavior
     # 管理后台端口和演习开关也能从环境变量调
     assert base.admin_port == 8099 and base.dry_run is False, base
     os.environ.update(ADMIN_PORT='0', DRY_RUN='1')

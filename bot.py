@@ -69,8 +69,7 @@ class Bot:
                  describer: MediaDescriber | None = None, describe_history_limit: int = 3,
                  keeper: MomentKeeper | None = None, emojis: EmojiLibrary | None = None,
                  emoji_path: str = '', emoji_describer=None, typo_rate: float = 0.0,
-                 quote_replies: bool = False, quote_min_activity: int = 8,
-                 quote_window: float = 180.0, rng: random.Random | None = None):
+                 quote_replies: bool = False, rng: random.Random | None = None):
         """ 初始化机器人
 
         @param host: weixin-rs daemon 服务器地址
@@ -86,9 +85,8 @@ class Bot:
         @param emoji_path: 表情库落盘位置；留空则不落盘（重启就没了）
         @param emoji_describer: 给偷来的表情补「使用场景」的后台任务；为 None 则不补
         @param typo_rate: 出站文本抖错别字的概率（0 为关闭）
-        @param quote_replies: 回复时引用被打断的那条消息（微信的「回复某条」）
-        @param quote_min_activity: 引用要求窗口内别人至少说这么多条（群不够热闹就不引）
-        @param quote_window: 判断「群里乱不乱」的时间窗口（秒）
+        @param quote_replies: 允许模型引用（微信的「回复某条」）。关掉就一律不引；
+            模型自己选引哪条（reply / speak 的 ref），没选就不引——它不一定是在回谁
         @param rng: 错别字用的随机源，测试时可注入
         """
         async def callback(msg: Message) -> None:
@@ -114,8 +112,6 @@ class Bot:
         self.emoji_describer = emoji_describer
         self.typo_rate = typo_rate
         self.quote_replies = quote_replies
-        self.quote_min_activity = quote_min_activity
-        self.quote_window = quote_window
         # 运行计数：面板的统计卡要看（拍的那些常数到底撞了多少次）
         self.typo_count = 0
         self.emoji_count = 0
@@ -498,24 +494,6 @@ class Bot:
         preview = sent.text if len(sent.text) <= 20 else sent.text[:20] + '…'
         return f'已撤回：「{preview}」'
 
-    def _quote_target(self, msg: Message) -> int:
-        """ 引用回复的目标：被回复那条的 64 位 svrId；不该引用时返回 0。
-
-        `msg.msg_id` 就是 svrId（daemon 的 server_id），正是 `<refermsg><svrid>` 要的东西。
-        只在**群聊且最近消息比较多**时引用：私聊、冷清群里每条都带引用反而怪。
-        """
-        if not self.quote_replies or not msg.is_chatroom:
-            return 0
-        now = time.time()
-        activity = sum(1 for r in self._history.get_context(msg.reply_target)
-                       if not r.is_self and now - r.t <= self.quote_window)
-        if activity < self.quote_min_activity:
-            return 0
-        try:
-            return int(msg.msg_id)
-        except (TypeError, ValueError):
-            return 0
-
     async def _run_plugins(self, msg: Message, self_name: str, source: str) -> Reply:
         """ 把当前消息交给该会话的插件链，收集要回复的文本和表情。 """
         ctx = MessageContext(msg=msg, history=self._history.get_context(msg.reply_target),
@@ -524,15 +502,17 @@ class Bot:
         emoji = None
         verbatim = False
         at = ''
+        ref = 0
         for plugin in self._plugins.get_plugins_for_contact(source):
             reply = await plugin.handle(ctx) or Reply()
             texts.extend(reply.texts)
             emoji = emoji or reply.emoji
             verbatim = verbatim or reply.verbatim
             at = at or reply.at
+            ref = ref or reply.ref
             if reply.stop:
                 break
-        return Reply(texts=texts, emoji=emoji, verbatim=verbatim, at=at)
+        return Reply(texts=texts, emoji=emoji, verbatim=verbatim, at=at, ref=ref)
 
     def _schedule_turn(self, msg: Message, self_name: str, source: str) -> None:
         """ 把这条消息排进它所在会话的「当前这一块」，交由后台任务回复。
@@ -597,13 +577,13 @@ class Bot:
             bus.publish(Status.PLACEHOLDER_BLOCKED, chat_id=msg.reply_target, chat_name=source,
                         msg_id=msg.msg_id,
                         detail=f'拦下 {len(response.texts) - len(texts)} 条媒体占位符')
-        # 复读机是跟队形，不引用具体某条：引用了就像专门回那个人，不像凑热闹。
-        # 系统通知（拍一拍）更不能引：引用框会把「拍了拍 你」原样贴出来，
-        # 看着像在回一条系统提示。回复照常，只是不带引用
+        # 引用哪条听模型的：reply / speak 的 ref 已经在插件里解成了 svrId；
+        # 没选就不引——它不一定是在回谁。复读机是跟队形，系统通知（拍一拍）
+        # 引用框会贴出「拍了拍 你」，两者都按「不该引」处理
         notice = is_system_notice(msg)
         if notice:
             logger.info(f'系统通知不引用（msg_id={msg.msg_id}）: {msg.sender_name}: {msg.content[:30]}')
-        ref_svrid = 0 if (response.verbatim or notice) else self._quote_target(msg)
+        ref_svrid = 0 if (response.verbatim or notice or not self.quote_replies) else response.ref
         for text in texts:
             self.enqueue(msg.reply_target, text, sender=self_name,
                          reply_to=msg.msg_id, chat_name=source, verbatim=response.verbatim,

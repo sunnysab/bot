@@ -189,16 +189,30 @@ class ChatWindow:
     def __str__(self):
         """ 渲染给模型看的 transcript。
 
-        每条带绝对时间（如 [09-14 14:32]）和「我」标记：模型据此判断消息时间、
-        以及自己说过什么。历史行的文本跨轮不变，保住 KV cache 前缀。
+        每条带绝对时间（如 [09-14 14:32]）、消息短标签（`#4k2p`，回复时用它指定引用哪条）
+        和「我」标记：模型据此判断消息时间、以及自己说过什么。
+        历史行的文本跨轮不变，保住 KV cache 前缀。
         """
         lines = []
         for record in self._history:
             who = '我' if record.is_self else record.sender
             body = record.text.replace('\n', ' ')
             prefix = f'[{_format_time(record.t)}] ' if record.t else ''
-            lines.append(f'{prefix}{who}: {body}')
+            tag = f'{message_handle(record.msg_id)} ' if record.msg_id else ''
+            lines.append(f'{prefix}{tag}{who}: {body}')
         return '\n'.join(lines)
+
+    def find_by_handle(self, handle: str) -> SingleRecord | None:
+        """ 按 transcript 里的短标签（`#4k2p`）找一条记录，用于「引用哪条」。
+
+        找不到、或标签撞了（同一窗口多条命中）都返回 None——引用错了比不引用更糟。
+        """
+        target = handle.strip().lower().lstrip('#')
+        if not target:
+            return None
+        hits = [record for record in self._history
+                if record.msg_id and message_handle(record.msg_id)[1:] == target]
+        return hits[0] if len(hits) == 1 else None
 
     def __len__(self):
         return len(self._history)
@@ -290,13 +304,16 @@ if __name__ == '__main__':
 
     # 自检：transcript 带绝对时间（跨轮稳定）和「我」标记
     window = ChatWindow()
-    window.append('张三', '在吗', 1000)
+    window.append('张三', '在吗', 1000, msg_id=111)
     window.append('Bot', '在', 1060, is_self=True)
     window.append('张三', '帮我看看', 4600)
     lines = str(window).split('\n')
-    assert lines[0].endswith('张三: 在吗'), lines
-    assert lines[1].endswith('我: 在'), lines
+    assert lines[0] == f'[01-01 08:16] {message_handle(111)} 张三: 在吗', lines
+    assert lines[1].endswith('我: 在'), lines                      # 自己那条没有 svrid，不打标签
     assert all(re.match(r'\[\d\d-\d\d \d\d:\d\d\] ', line) for line in lines), lines
+    # 引用哪条：按标签找回原消息；撞了 / 找不到就返回 None
+    assert window.find_by_handle(message_handle(111)).text == '在吗'
+    assert window.find_by_handle('#nope') is None and window.find_by_handle('') is None
 
     # 短标签：4 位、稳定、0 是「没有」
     assert message_handle(0) == '' and message_handle(5677413158710008087).startswith('#')

@@ -94,7 +94,7 @@ CONFIG_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         'backoff_bypass_messages')),
     ('专注模式', ('enable_focus', 'focus_enter_activity', 'focus_idle_seconds', 'focus_max_seconds')),
     ('回复行为', ('reply_context_length', 'agent_max_replies', 'focus_score_bonus',
-                'quote_replies', 'quote_min_activity', 'quote_window_seconds',
+                'quote_replies',
                 'reply_min_gap', 'reply_rate_window', 'reply_rate_max')),
     ('人格与表达', ('personality', 'reply_style', 'behavior_style', 'reply_styles', 'style_probability')),
     ('决策者', ('reply_mode', 'enable_planner', 'planner_url', 'planner_key', 'planner_model', 'planner_temperature',
@@ -115,8 +115,6 @@ CONFIG_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
 RANGES: dict[str, tuple[float, float]] = {
     'agent_max_replies': (1, 10),
     'focus_score_bonus': (0, 100),
-    'quote_min_activity': (0, 50),
-    'quote_window_seconds': (10, 3600),
     'reply_min_gap': (0.0, 600.0),
     'reply_rate_window': (10.0, 3600.0),
     'reply_rate_max': (1, 50),

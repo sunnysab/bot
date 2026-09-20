@@ -117,14 +117,16 @@ class FakeWechat:
 
 
 class FakePlugin(Plugin):
-    def __init__(self, texts=None, stop=False, emoji=None, at=''):
+    def __init__(self, texts=None, stop=False, emoji=None, at='', ref=0):
         self.texts = texts or []
         self._stop = stop
         self.emoji = emoji
         self.at = at
+        self.ref = ref
 
     async def handle(self, ctx):
-        return Reply(texts=list(self.texts), stop=self._stop, emoji=self.emoji, at=self.at)
+        return Reply(texts=list(self.texts), stop=self._stop, emoji=self.emoji, at=self.at,
+                     ref=self.ref)
 
 
 def make_msg(text='hello', is_self=False, msg_type=1, create_time=None, ref_svrid=0, msg_id=None):
@@ -401,45 +403,36 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(1.2)
         self.assertEqual([text for _, text in self.bot._wechat.sent], ['一', '二', '三'])
 
-    async def test_quote_replies_carry_the_trigger_svr_id(self):
-        """ 群聊且消息多（乱）时，文字回复引「这一轮在回的那条」：ref_svrid = 它的 svrId。 """
+    async def test_model_chosen_ref_is_quoted(self):
+        """ 引用哪条听模型的：reply / speak 的 ref 解出的 svrId 原样带到出站。 """
+        self.bot.quote_replies = True
+        self.bot.set_default_plugin(FakePlugin(texts=['收到'], ref=98765))
+        await self.bot.on_message(make_msg())
+        await asyncio.sleep(0.1)
+        self.assertEqual(self.bot._wechat.refs, [98765])
+
+    async def test_no_ref_means_no_quote(self):
+        """ 模型没说在回哪条就不引用——它不一定是在回某一个人。热群也一样。 """
         self.bot.quote_replies = True
         self._seed_busy_group()
         self.bot.set_default_plugin(FakePlugin(texts=['收到']))
-        msg = make_msg()
-        await self.bot.on_message(msg)
-        await asyncio.sleep(0.1)
-        self.assertEqual(self.bot._wechat.refs, [msg.msg_id])
-
-    async def test_quote_replies_skipped_in_quiet_group(self):
-        """ 群里没几个人说话时不引用——每条都带引用反而怪。 """
-        self.bot.quote_replies = True
-        self.bot.set_default_plugin(FakePlugin(texts=['收到']))
-        await self.bot.on_message(make_msg())        # 只有这一条入站消息
-        await asyncio.sleep(0.1)
-        self.assertEqual(self.bot._wechat.refs, [None])
-
-    async def test_quote_replies_skipped_in_private(self):
-        """ 私聊从不引用。 """
-        self.bot.quote_replies = True
-        self.bot.set_default_plugin(FakePlugin(texts=['收到']))
-        msg = make_msg()
-        msg.is_chatroom = False
-        await self.bot.on_message(msg)
+        await self.bot.on_message(make_msg())
         await asyncio.sleep(0.1)
         self.assertEqual(self.bot._wechat.refs, [None])
 
     def _seed_busy_group(self, count: int = 8) -> None:
-        """ 往历史里灌几条别人的消息，把群填「乱」。 """
+        """ 往历史里灌几条别人的消息。 """
         window = self.bot._history.get_context('456@chatroom')
         for i in range(count):
             window.append(f'用户{i}', '别人说的', int(time.time()))
 
-    async def test_quote_replies_off_by_default(self):
-        self.bot.set_default_plugin(FakePlugin(texts=['收到']))
+    async def test_quote_replies_off_is_a_kill_switch(self):
+        """ 关掉引用时，模型给了 ref 也不引。 """
+        self.bot.quote_replies = False
+        self.bot.set_default_plugin(FakePlugin(texts=['收到'], ref=98765))
         await self.bot.on_message(make_msg())
         await asyncio.sleep(0.1)
-        self.assertIn(None, self.bot._wechat.refs)      # 没开引用就不带 ref_svrid
+        self.assertEqual(self.bot._wechat.refs, [None])
 
     async def test_at_reaches_the_transport(self):
         """ 插件层只负责把 wxid 带回来，怎么 @ 是出站那一段的事。 """
@@ -594,9 +587,6 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
     async def test_repeat_does_not_quote(self):
         """ 跟队形就是跟队形，不该引用某一条（引用像专门回那个人）。 """
         self.bot.quote_replies = True
-        window = self.bot._history.get_context('456@chatroom')
-        for i in range(8):  # 把群填「乱」，让 _quote_target 有条件返回 svrid
-            window.append(f'用户{i}', f'别人说的{i}', int(time.time()))
         self.bot.set_default_plugin(RepeatPlugin())
 
         def line(who):
@@ -1083,12 +1073,9 @@ class TestPat(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self._window()[-1].text, '拍了拍 wxid_bob')
 
     async def test_a_pat_is_never_quoted(self):
-        """ 群里再乱也不引用系统通知：引用框会把「拍了拍 你」原样贴出来。 """
+        """ 系统通知不引用：引用框会把「拍了拍 你」原样贴出来，模型给了 ref 也不引。 """
         self.bot.quote_replies = True
-        window = self._window()
-        for i in range(8):          # 把群填「乱」，让 _quote_target 有条件返回 svrid
-            window.append(f'用户{i}', '别人说的', int(time.time()))
-        self.bot.set_default_plugin(FakePlugin(texts=['嗯']))
+        self.bot.set_default_plugin(FakePlugin(texts=['嗯'], ref=98765))
         msg = make_msg(text='<sysmsg type="pat">', msg_type=10002)
         msg.pat = types.SimpleNamespace(patted_user='wxid_bot', suffix='')
         await self.bot.on_message(msg)
