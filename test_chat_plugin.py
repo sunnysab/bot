@@ -260,6 +260,7 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertIn('口头禅：蛙趣', self.ai.planner_calls[0][1])
 
     async def test_habits_injected_only_on_hit(self):
+        self.plugin.policy.threshold = 0      # 这几条测的是 prompt 内容，不关门的门控
         self.plugin.habits = HabitStore(habits=(Habit('蛙趣', 126, ('蛙趣 你的ID和小红书一样的吧',)),))
 
         await self.plugin.handle(self.proactive('蛙趣，真的假的'))
@@ -270,6 +271,7 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('群里的说法', self.ai.planner_calls[1][1])
 
     async def test_memories_injected_on_keyword_hit(self):
+        self.plugin.policy.threshold = 0      # 这几条测的是 prompt 内容，不关门的门控
         with tempfile.TemporaryDirectory() as tmp:
             store = MomentStore(Path(tmp) / 'm.db')
             store.add(Moment('456@chatroom', 1, 10, '上次大家在群里讨论过明天要不要上班请假', ('提到请假时',)))
@@ -290,6 +292,7 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         但 system 只装人设和规则、请求只装本轮数据，职责更清楚，也不会因为
         某个供应商改成「整段 system 才缓存」就失效。
         """
+        self.plugin.policy.threshold = 0      # 这几条测的是 prompt 内容，不关门的门控
         self.plugin.profiles = ProfileStore(people={'wxid_x': Profile('wxid_x', names=('Alice',), phrases=('蛙趣',))})
         self.plugin.habits = HabitStore(habits=(Habit('蛙趣', 126, ('蛙趣 你的ID和小红书一样的吧',)),))
 
@@ -455,10 +458,10 @@ class TestReplyPolicy(unittest.TestCase):
             self.ctx(content='这个怎么弄啊', history=history), now=1000.0))
 
     def test_focus_still_allows_when_group_is_hot(self):
-        """ 专注期里没人点名、群里正热、自己没刷屏时，照旧参与。 """
+        """ 专注期里没人点名、群里正热、有内容分时才参与（压力分封顶 40 不够）。 """
         history = history_with(15, now=1000.0)
         self.assertIsNotNone(self._focus_policy().evaluate(
-            self.ctx(content='这天气真怪', history=history), now=1000.0))
+            self.ctx(content='这个怎么弄啊', history=history), now=1000.0))
 
     def test_aliases_can_be_per_contact(self):
         """ 别名也能按会话取（分会话人设改了别名，在群里叫得应）。 """

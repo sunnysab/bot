@@ -15,16 +15,19 @@ from typing import Literal
 
 NECESSITY_THRESHOLD = 60
 
-# 存在感：最近这段时间内自己发言占比越高，越不该再插话
+# 存在感：最近这段时间内自己发言占比越高，越不该再插话。
+# 实测：老参数（0.25/0.60、最多扣 25）压不住热群里的刷屏——bot 占到群消息的
+# 36% 时也只扣 7 分，而分数线是 60+。于是收紧起算点、放大量级
 PRESENCE_WINDOW_SECONDS = 300.0
-PRESENCE_FREE_RATIO = 0.25
-PRESENCE_FULL_RATIO = 0.60
-PRESENCE_PENALTY_MAX = 25
+PRESENCE_FREE_RATIO = 0.15
+PRESENCE_FULL_RATIO = 0.45
+PRESENCE_PENALTY_MAX = 40
 
 # 活跃度压力：群里聊得越热，主动参与的压力越大。
-# 封顶 60 = 阈值，所以「群足够热」本身就能触发参与，不必等有人提问；
-# 普通陈述句（内容分 0）需要活动窗口内 10 条别人的消息才够格。
-PRESSURE_MAX = 60
+# **封顶必须低于阈值**：老参数封顶 60 = 阈值，意味着「群够热」本身就能触发，
+# 内容一分不加也过线——实测热群里 75/131 轮都是这种纯压力分，bot 每 34 秒一条。
+# 现在封顶 40 < 阈值 60，热群也需要内容贡献（问句 +20 / 请求 +25）才够格。
+PRESSURE_MAX = 40
 PRESSURE_FULL_ACTIVITY = 10  # 活动窗口内 10 条别人的消息即拿满
 
 QUESTION_TERMS = ('怎么', '如何', '为什么', '有没有', '是不是', '哪里有')
@@ -223,16 +226,16 @@ def _self_check() -> None:
     assert score_necessity(NecessityInput('在吗', True, False, True)).score == 80
     assert score_necessity(NecessityInput('在吗', False, False, False)).kind == 'private'
 
-    # 热聊群里说句闲话就能插嘴
-    assert score('今天真冷', activity=10).score >= NECESSITY_THRESHOLD
-    # 冷清群里说句闲话，不够格
-    assert score('大家好啊', activity=1).score < NECESSITY_THRESHOLD
+    # 热群本身不再够格：闲话（无内容分）过不了线
+    assert score('今天真冷', activity=10).score < NECESSITY_THRESHOLD
     # 热聊群里抛问题，够格
     assert score('这个怎么弄啊', activity=10).score >= NECESSITY_THRESHOLD
+    # 冷清群里说句闲话，不够格
+    assert score('大家好啊', activity=1).score < NECESSITY_THRESHOLD
     # 热聊群里纯短反应，仍不够
     assert score('哈哈哈哈', activity=10).score < NECESSITY_THRESHOLD
-    # 请求类直接命中
-    assert score('谁能帮我看看', activity=8).score >= NECESSITY_THRESHOLD
+    # 请求类命中；热度不够时也得等热度
+    assert score('谁能帮我看看', activity=10).score >= NECESSITY_THRESHOLD
     # 自己刷屏后，同样的问题被压回阈值下
     assert score('这个怎么弄啊', activity=10, self_replies=6, recent_messages=10).score < NECESSITY_THRESHOLD
     # 媒体占位不算内容分（但热聊群靠活跃度照样能触发）

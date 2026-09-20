@@ -77,7 +77,7 @@ class TestFocusPrompt(unittest.IsolatedAsyncioTestCase):
     async def test_focus_note_reaches_both_models(self):
         ai = FakeAi()
         plugin = ChatPlugin(ai, context_length=10, policy=ReplyPolicy(focus=FocusMode(enter_activity=3)))
-        reply = await plugin.handle(make_ctx(5, content='这个怎么弄啊'))
+        reply = await plugin.handle(make_ctx(10, content='这个怎么弄啊'))
 
         self.assertEqual(reply.texts, ['收到'])
         self.assertIn('【专注模式】', ai.planner_calls[0][1])

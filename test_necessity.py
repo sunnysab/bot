@@ -24,8 +24,8 @@ class TestNecessity(unittest.TestCase):
     def test_short_reaction_never_passes(self):
         self.assertLess(score('哈哈哈哈', activity=20).score, NECESSITY_THRESHOLD)
 
-    def test_request_passes_in_moderately_active_group(self):
-        self.assertGreaterEqual(score('谁能帮我看看', activity=8).score, NECESSITY_THRESHOLD)
+    def test_request_passes_in_active_group(self):
+        self.assertGreaterEqual(score('谁能帮我看看', activity=10).score, NECESSITY_THRESHOLD)
 
     def test_presence_penalty_suppresses_chatterbox(self):
         noisy = score('这个怎么弄啊', activity=10, self_replies=6, recent_messages=10)
@@ -35,11 +35,13 @@ class TestNecessity(unittest.TestCase):
         # 媒体占位不算内容分，但热聊群的活跃度压力照旧（图片本身也值得评一句）
         self.assertEqual(score('[图片：一只橘猫]', activity=20).score,
                          score('一句平平无奇的话', activity=20).score)
-        self.assertLess(score('[图片：一只橘猫]', activity=5).score, NECESSITY_THRESHOLD)
+        self.assertLess(score('[图片：一只橘猫]', activity=20).score, NECESSITY_THRESHOLD)
 
-    def test_active_group_plain_chatter_triggers(self):
-        # 封顶 60 = 阈值：群热到 10 条/窗口，普通闲聊也能参与
-        self.assertGreaterEqual(score('今天真冷', activity=10).score, NECESSITY_THRESHOLD)
+    def test_active_group_plain_chatter_stays_below_threshold(self):
+        # 封顶 40 < 阈值 60：群热本身不再够格，闲话要说过线得有内容分
+        self.assertLess(score('今天真冷', activity=10).score, NECESSITY_THRESHOLD)
+        # 同一句闲话在更热的群里也一样（压力已封顶）
+        self.assertLess(score('今天真冷', activity=30).score, NECESSITY_THRESHOLD)
 
     def test_score_never_negative(self):
         self.assertGreaterEqual(score('哈哈哈哈', activity=0, self_replies=9, recent_messages=10).score, 0)
