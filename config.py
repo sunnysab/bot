@@ -79,8 +79,9 @@ class Config:
     #   2048 → finish=stop，reasoning=1137（它想得更多，但答案一样）
     # 给不思考的模型给大了也没代价（上限不是目标值），所以直接定 1024
     describe_max_tokens: int = 1024
-    # 图片描述要抄全图里的字（菜单/截图），15 字那点预算不够；thinking 模型的推理也算在内
-    describe_image_max_tokens: int = 4096
+    # 图片描述的生成上限。新 prompt 把输出限在 12 行（约 150~450 token），1024 够用；
+    # 也不能给大：Kimi-K2.5 在 4096 下会退化成「六个核桃×N」死循环（实测）
+    describe_image_max_tokens: int = 1024
     describe_history_limit: int = 3
     # 内联给模型的图片：窗口里的图按需取字节、附在请求里。这是本轮最费 token 的一块，
     # 留个开关能随时关掉
@@ -200,7 +201,7 @@ if __name__ == '__main__':
     tuned = Config.from_env()
     assert tuned.backoff_start_after == 3 and tuned.backoff_max_seconds == 60.0, tuned
     assert base.describe_max_tokens == 1024, base     # thinking 模型的推理也算进生成预算
-    assert base.describe_image_max_tokens == 4096, base  # 图片要认全字，预算得给够
+    assert base.describe_image_max_tokens == 1024, base  # 输出限 12 行，给它就够
     assert base.describe_model == '', base               # 默认跟主模型；要换识图模型才设
     assert base.image_inline is True and base.image_shrink_target == 1024 * 1024, base
     assert base.reply_mode == 'agent', base           # 默认单段式；two_stage 留作对照

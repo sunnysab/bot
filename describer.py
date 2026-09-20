@@ -72,7 +72,7 @@ class MediaDescriber:
         :param timeout: 单张媒体的下载+识图超时（秒），超时保留占位符
         :param max_tokens: 表情描述的最大 token 数，限制慢模型的输出长度
         :param image_max_tokens: 图片描述的最大 token 数，不给就和 max_tokens 一样。
-            图片要抄全图里的字，15 字那点预算不够
+            图片要抄文字 + 逐项列东西，比表情的一句话多
         """
         self._ai = ai
         self._cache = cache
