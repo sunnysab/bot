@@ -1,15 +1,15 @@
 import asyncio
 import base64
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from typing import Any
 
 from loguru import logger
 from weixin_bot import Message, WeChatBot, WeChatBotError
 
-from context import SYSTEM_KINDS, ChatWindow, MessageKind
+from context import SYSTEM_KINDS, ChatWindow, MessageKind, message_handle
 from emojis import Emoji
-from media import render
+from media import parse_reference_media, render
 
 # 内存里最多留这么多附件字节 / 这么多条：识图只在「刚取到」和「马上要用」之间复用，
 # 留多了只是白占内存（附件的长期保管是 daemon 的事）
@@ -279,6 +279,24 @@ class Wechat:
         raw, _ = await self.media_bytes_by_id(msg.msg_id)
         return raw
 
+    def link_media(self, msg: Message, media) -> tuple[int, Callable[[], Awaitable[bytes]] | None]:
+        """ 这条消息要内联给模型的媒体从哪来，返回 `(media_id, download)`。
+
+        自己有图就是它自己；自己是个引用、被引的那条是图，就跟到 `ref_svrid` 上去。
+        引用的图即使原消息已经滑出窗口也能取——字节按 svrid 问 daemon，不依赖原记录还在。
+        缺描述的表情才算值（有标签没必要再附图），和 `Media.describable` 一个口径。
+        """
+        if media is not None and media.describable:
+            return msg.msg_id, (lambda m=msg: self.media_bytes(m))
+        if MessageKind.of(msg.msg_type) is MessageKind.APPMSG and msg.ref_svrid:
+            quoted = parse_reference_media(msg.content)
+            if quoted is not None and quoted.describable:
+                async def fetch(rid=msg.ref_svrid) -> bytes:
+                    raw, _ = await self.media_bytes_by_id(rid)
+                    return raw
+                return msg.ref_svrid, fetch
+        return 0, None
+
     async def voice_text(self, msg: Message, timeout: int = 20) -> str:
         """ 语音转文字。
 
@@ -411,13 +429,17 @@ class Wechat:
 
         result = ChatWindow()
         for msg in messages:
-            content, media = render(msg.msg_type, msg.content, msg.text)
+            handle = message_handle(msg.msg_id)
+            quoted = message_handle(msg.ref_svrid) if msg.ref_svrid else ''
+            content, media = render(msg.msg_type, msg.content, msg.text,
+                                     handle=handle, quoted_handle=quoted)
             # 不知道为什么有的消息还是 xml 格式的，这里直接过滤掉吧
             if not content or content.startswith('<'):
                 continue
-            download = (lambda m=msg: self.media_bytes(m)) if (media and media.describable) else None
+            media_id, download = self.link_media(msg, media)
             result.append(msg.sender_name, content, msg.create_time, media=media, download=download,
-                          is_self=msg.is_self)
+                          is_self=msg.is_self, msg_id=msg.msg_id, media_id=media_id,
+                          handle=message_handle(media_id) if media_id else '')
 
         result.sort()
         return result

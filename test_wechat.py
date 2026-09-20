@@ -6,6 +6,7 @@ import unittest
 
 from weixin_bot import Message, WeChatBotError
 
+from media import Media
 from wechat import Wechat
 
 QUOTE_XML = ('<msg><appmsg><title>回复内容</title><type>57</type>'
@@ -13,6 +14,13 @@ QUOTE_XML = ('<msg><appmsg><title>回复内容</title><type>57</type>'
              '<svrid>1</svrid><fromusr>456@chatroom</fromusr><chatusr>wxid_alice</chatusr>'
              '<displayname>Alice</displayname><content>&lt;msg&gt;&lt;appmsg&gt;&lt;title&gt;被引用的内容'
              '&lt;/title&gt;&lt;/appmsg&gt;&lt;/msg&gt;</content></refermsg></appmsg></msg>')
+
+
+QUOTE_IMAGE_XML = ('<msg><appmsg><title>这个咋样</title><type>57</type>'
+                   '<fromusername>wxid_me</fromusername><refermsg><type>3</type>'
+                   '<svrid>555</svrid><fromusr>456@chatroom</fromusr><chatusr>wxid_alice</chatusr>'
+                   '<content>&lt;msg&gt;&lt;img md5="2f8f1e" /&gt;&lt;/msg&gt;</content>'
+                   '</refermsg></appmsg></msg>')
 
 
 def make_message(**kwargs) -> Message:
@@ -46,9 +54,9 @@ class FakeBot:
         self.page = {'limit': limit, 'before_id': before_id, 'after_id': after_id}
         self.query = query
         return [
-            make_message(msg_type=1, content='第一条', clean_text='第一条', create_time=200),
-            make_message(msg_type=3, content='<img cdnurl="x"/>', clean_text='', create_time=201),
-            make_message(msg_type=49, content=QUOTE_XML, clean_text=QUOTE_XML, create_time=202),
+            make_message(msg_id=101, msg_type=1, content='第一条', clean_text='第一条', create_time=200),
+            make_message(msg_id=102, msg_type=3, content='<img md5="2f8f1e" />', clean_text='', create_time=201),
+            make_message(msg_id=103, msg_type=49, content=QUOTE_XML, clean_text=QUOTE_XML, create_time=202),
         ]
 
     async def get_chatroom_member(self, chatroom, wxid):
@@ -99,10 +107,29 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(window), 3)
         self.assertEqual(window[0].sender, 'Alice')
         self.assertEqual(window[0].text, '第一条')
-        self.assertEqual(window[1].text, '[图片]')
+        # 图片带上短标签，好和内联给模型的附件对上
+        self.assertTrue(window[1].text.startswith('[图片 #'), window[1].text)
+        self.assertEqual(window[1].media_id, 102)
         # 被引的那条渲染成人话：这里是条链接（内层 appmsg 没有 type）
         self.assertEqual(window[2].text, '回复内容（引用前文的消息：[链接] 被引用的内容）')
+        self.assertEqual(window[2].media_id, 0)          # 链接不内联
         self.assertEqual([r.t for r in window], [200, 201, 202])
+
+    async def test_link_media_follows_a_quoted_image(self):
+        # 引用图：媒体身份跟到被引的 svrid 上，原消息不在窗口也能取字节
+        quote = make_message(msg_id=556, msg_type=49, content=QUOTE_IMAGE_XML,
+                             clean_text=QUOTE_IMAGE_XML, ref_svrid=555)
+        media_id, download = self.wechat.link_media(quote, None)
+        self.assertEqual(media_id, 555)
+        self.assertIsNotNone(download)
+        # 自己的图用自己的 msg_id
+        image = make_message(msg_id=555, msg_type=3, content='<img md5="2f8f1e" />')
+        media_id, download = self.wechat.link_media(image, Media('image', '2f8f1e'))
+        self.assertEqual(media_id, 555)
+        self.assertIsNotNone(download)
+        # 带标签的表情不内联（没必要再烧一次 vision）
+        emoji = make_message(msg_id=557, msg_type=47, content='<emoji md5="m" />')
+        self.assertEqual(self.wechat.link_media(emoji, Media('emoji', 'm', '摊倒')), (0, None))
 
     async def test_get_recent_sessions_filters_non_contacts(self):
         sessions = await self.wechat.get_recent_sessions(3)

@@ -76,6 +76,27 @@ class FakeWechat:
             raise RuntimeError('下载附件失败: invalid data: 消息无 cdnurl')
         return self.image
 
+    async def media_bytes_by_id(self, msg_id):
+        """ 按 svrid 取字节；引用图走这条。 """
+        self.downloads.append(msg_id)
+        if self.image is None:
+            raise RuntimeError('下载附件失败: invalid data: 消息无 cdnurl')
+        return self.image, 'jpg'
+
+    def link_media(self, msg, media):
+        """ 和 Wechat.link_media 一个意思：自己有图就用自己，引用图跟到被引的 svrid 上。 """
+        from media import parse_reference_media
+        if media is not None and media.describable:
+            return msg.msg_id, (lambda m=msg: self.media_bytes(m))
+        if msg.msg_type == 49 and msg.ref_svrid:
+            quoted = parse_reference_media(msg.content)
+            if quoted is not None and quoted.describable:
+                async def fetch(rid=msg.ref_svrid) -> bytes:
+                    raw, _ = await self.media_bytes_by_id(rid)
+                    return raw
+                return msg.ref_svrid, fetch
+        return 0, None
+
     async def voice_text(self, msg, timeout=20):
         """ 语音转写。默认返回空（= 转写失败），测成功的路径就设 self.transcript。 """
         self.voices.append(msg.msg_id)
@@ -98,9 +119,10 @@ class FakePlugin(Plugin):
         return Reply(texts=list(self.texts), stop=self._stop, emoji=self.emoji, at=self.at)
 
 
-def make_msg(text='hello', is_self=False, msg_type=1, create_time=None):
+def make_msg(text='hello', is_self=False, msg_type=1, create_time=None, ref_svrid=0, msg_id=None):
     return types.SimpleNamespace(msg_type=msg_type, content=text, clean_text=text, text=text, is_self=is_self,
-                                 msg_id=random.getrandbits(62),          # daemon 的 server_id 是 64 位
+                                 msg_id=random.getrandbits(62) if msg_id is None else msg_id,  # daemon 的 server_id 是 64 位
+                                 ref_svrid=ref_svrid,
                                  reply_target='456@chatroom', sender_name='Alice', sender='wxid_alice',
                                  sender_display_name='Alice',
                                  create_time=int(time.time()) if create_time is None else create_time,
@@ -634,7 +656,28 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(describer.scheduled), 1)
         # 有下载入口才轮得到识图：字节归 daemon 按 msg_id 取
         self.assertIsNotNone(describer.scheduled[0].download)
-        self.assertEqual(describer.scheduled[0].text, '[图片]')
+        # 占位符带短标签（`#abcd`），好和内联给模型的附件对上
+        self.assertTrue(describer.scheduled[0].text.startswith('[图片 #'), describer.scheduled[0].text)
+
+    async def test_quote_of_an_image_points_at_the_same_media(self):
+        """ 引用的图要和原图用同一个标签、同一个 media_id——这样模型看到的附件就是那张图。 """
+        self.bot.set_default_plugin(FakePlugin(texts=[]))
+        md5 = '87e65490da9b4228f45a167205caf5eb'
+        await self.bot.on_message(make_msg(
+            text=f'<msg><img aeskey="k" cdnbigimgurl="305f" md5="{md5}" /></msg>',
+            msg_type=3, msg_id=555))
+        quote = ('<msg><appmsg><title>这个咋样</title><type>57</type>'
+                 '<refermsg><type>3</type><svrid>555</svrid><chatusr>wxid_alice</chatusr>'
+                 f'<content>&lt;msg&gt;&lt;img md5="{md5}" /&gt;&lt;/msg&gt;</content>'
+                 '</refermsg></appmsg><fromusername>wxid_bob</fromusername></msg>')
+        await self.bot.on_message(make_msg(text=quote, msg_type=49, msg_id=556, ref_svrid=555))
+        await asyncio.sleep(0.05)
+
+        image_record, quote_record = self._window()[-2], self._window()[-1]
+        self.assertEqual(image_record.media_id, 555)
+        self.assertEqual(quote_record.media_id, 555)          # 引用图落到同一张
+        self.assertEqual(quote_record.handle, image_record.handle)
+        self.assertIn(f'[图片 {image_record.handle}]', quote_record.text)
 
     async def test_quoted_message_is_answered(self):
         """ 引用消息的正文就是一句话，不能因为 msg_type=49 就被当成「不支持的类型」。 """

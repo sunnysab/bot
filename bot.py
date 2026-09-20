@@ -7,7 +7,7 @@ from typing import TypeVar
 from loguru import logger
 from weixin_bot import WeChatBotError
 
-from context import ChatWindow, ContextManager, MessageContext, MessageKind, SingleRecord
+from context import ChatWindow, ContextManager, MessageContext, MessageKind, SingleRecord, message_handle
 from describer import MediaDescriber
 from emojis import Emoji, EmojiLibrary, parse_emoji_xml
 from events import Status, bus
@@ -593,15 +593,20 @@ class Bot:
             msg.sender_display_name = await self._wechat.get_display_name(msg.sender, msg.reply_target)
         logger.debug(msg)
 
-        # 非文本消息的正文换成可读标记：图片/表情/位置/视频/语音/链接/文件/引用
-        text, media = render(msg.msg_type, msg.content, msg.text)
+        # 非文本消息的正文换成可读标记：图片/表情/位置/视频/语音/链接/文件/引用。
+        # handle 是内联图片的短标签（`#4k2p`）；引用图用被引那条的 svrid 生成，
+        # 这样原文那行和引用注解里会落在同一个标签上
+        handle = message_handle(msg.msg_id)
+        quoted_handle = message_handle(msg.ref_svrid) if msg.ref_svrid else ''
+        text, media = render(msg.msg_type, msg.content, msg.text,
+                             handle=handle, quoted_handle=quoted_handle)
+        # 要内联给模型的图从哪来：自己有图就是它自己，引用图就跟到 ref_svrid 上。
+        # **必须在下面改写 msg.content 之前调**——link_media 要读引用消息里的原始 XML
+        media_id, download = self._wechat.link_media(msg, media)
+        # 记录的标签由 media_id 定：引用图时它是被引那条的 svrid，不是自己这条的
+        record_handle = message_handle(media_id) if media_id else ''
         if text:
             msg.content = msg.clean_text = text
-        # 值不值得排识图由 `media.describable` 说（图片/表情 + 缺描述）。
-        # 以前它还要求 XML 里有明文 cdnurl，那是 daemon 只会直连下载时候的事——
-        # 现在按 msg_id 走 CDN 帧，入站图片也下得来，那条限制只会让图片永远没描述
-        download = ((lambda m=msg: self._wechat.media_bytes(m))
-                    if (media and media.describable) else None)
         # 语音：先让 daemon 转成文字再进历史，否则模型只看到 `[语音 3″]`，什么也接不上。
         # 转写要上传 + 轮询（秒级），失败就保留占位符——不能让它拖垮消息链
         if kind is MessageKind.VOICE and not msg.is_self and media is not None:
@@ -618,7 +623,8 @@ class Bot:
         if msg.is_self:
             record = self._history.push_message(msg.reply_target, self_name, msg.content,
                                                 msg.create_time, media=media, download=download,
-                                                is_self=True)
+                                                is_self=True, msg_id=msg.msg_id, media_id=media_id,
+                                                handle=record_handle)
             if self._describer:
                 self._describer.schedule(record)
             bus.publish(Status.PHONE, chat_id=msg.reply_target, chat_name=source,
@@ -626,7 +632,8 @@ class Bot:
             return
 
         record = self._history.push_message(msg.reply_target, msg.sender_name, msg.content, msg.create_time,
-                                            media=media, download=download)
+                                            media=media, download=download, msg_id=msg.msg_id,
+                                            media_id=media_id, handle=record_handle)
         # 媒体描述缺失时后台识图，稍后原地回写这条记录，不阻塞本轮回复
         if self._describer:
             self._describer.schedule(record)
