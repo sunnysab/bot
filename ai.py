@@ -6,8 +6,16 @@ from loguru import logger
 from tools import AssistantTurn, parse_tool_calls
 
 DESCRIBE_PROMPT = '用不超过 15 个字描述这张图片或表情包的内容和情绪，不要标点符号'
-# 识图被截断时最多翻倍到这里（见 OpenAI.describe）
-RETRY_CEILING = 4096
+# 图片换一条口径：菜单/截图的字不能只压成一句 vibe。表情还是用上面那条短的——
+# 表情要的就是情绪标签，长输出只会让 thinking 模型多烧预算
+IMAGE_DESCRIBE_PROMPT = (
+    '把图里所有文字原样抄下来（保留原文，别翻译、别总结），再用一句话说这张图是什么。'
+    '只输出这两部分，不要分析。没有文字就只写那一句。')
+# 提示词换版：老描述（15 字版）在 media_cache 里 version 为空，查不到就会重新描述
+IMAGE_PROMPT_VERSION = 'img-v2'
+# 识图被截断时最多翻倍到这里（见 OpenAI.describe）。
+# 图片描述要抄全图里的字，起步就 4096，得留出翻倍重试的余地
+RETRY_CEILING = 8192
 
 
 @dataclass

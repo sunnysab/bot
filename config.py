@@ -74,6 +74,8 @@ class Config:
     #   2048 → finish=stop，reasoning=1137（它想得更多，但答案一样）
     # 给不思考的模型给大了也没代价（上限不是目标值），所以直接定 1024
     describe_max_tokens: int = 1024
+    # 图片描述要抄全图里的字（菜单/截图），15 字那点预算不够；thinking 模型的推理也算在内
+    describe_image_max_tokens: int = 4096
     describe_history_limit: int = 3
     # 内联给模型的图片：窗口里的图按需取字节、附在请求里。这是本轮最费 token 的一块，
     # 留个开关能随时关掉
@@ -193,6 +195,7 @@ if __name__ == '__main__':
     tuned = Config.from_env()
     assert tuned.backoff_start_after == 3 and tuned.backoff_max_seconds == 60.0, tuned
     assert base.describe_max_tokens == 1024, base     # thinking 模型的推理也算进生成预算
+    assert base.describe_image_max_tokens == 4096, base  # 图片要认全字，预算得给够
     assert base.image_inline is True and base.image_shrink_target == 1024 * 1024, base
     assert base.reply_mode == 'agent', base           # 默认单段式；two_stage 留作对照
     assert base.quote_replies is True, base            # 真机验过，引用回复默认开

@@ -12,10 +12,10 @@ from dataclasses import replace
 
 from loguru import logger
 
-from ai import AiProvider
+from ai import IMAGE_DESCRIBE_PROMPT, IMAGE_PROMPT_VERSION, AiProvider
 from context import SingleRecord
 from emojis import EMOJI_DESCRIBE_PROMPT, Emoji, EmojiLibrary, parse_description
-from media import Media
+from media import Media, add_handle
 
 
 class MediaCache:
@@ -29,17 +29,28 @@ class MediaCache:
         self._conn.execute(
             'CREATE TABLE IF NOT EXISTS media ('
             'md5 TEXT PRIMARY KEY, kind TEXT, description TEXT, model TEXT, updated_at INTEGER)')
+        # 提示词换版时让老描述自然失效：老行没写 version，按版本查就 miss，用到时重描述
+        columns = {row[1] for row in self._conn.execute('PRAGMA table_info(media)').fetchall()}
+        if 'version' not in columns:
+            self._conn.execute('ALTER TABLE media ADD COLUMN version TEXT DEFAULT ""')
         self._conn.commit()
 
-    def get(self, md5: str) -> str | None:
+    def get(self, md5: str, version: str | None = None) -> str | None:
+        """ 取描述。version=None 表示不管版本（后台浏览用），给了版本就只认那一版。 """
         with self._lock:
-            row = self._conn.execute('SELECT description FROM media WHERE md5 = ?', (md5,)).fetchone()
+            if version is None:
+                row = self._conn.execute('SELECT description FROM media WHERE md5 = ?', (md5,)).fetchone()
+            else:
+                row = self._conn.execute('SELECT description FROM media WHERE md5 = ? AND version = ?',
+                                         (md5, version)).fetchone()
         return row[0] if row else None
 
-    def put(self, md5: str, kind: str, description: str, model: str) -> None:
+    def put(self, md5: str, kind: str, description: str, model: str, version: str = '') -> None:
         with self._lock:
-            self._conn.execute('INSERT OR REPLACE INTO media VALUES (?, ?, ?, ?, ?)',
-                               (md5, kind, description, model, int(time.time())))
+            self._conn.execute(
+                'INSERT OR REPLACE INTO media (md5, kind, description, model, updated_at, version) '
+                'VALUES (?, ?, ?, ?, ?, ?)',
+                (md5, kind, description, model, int(time.time()), version))
             self._conn.commit()
 
     def items(self) -> list[tuple[str, str, str, int]]:
@@ -56,16 +67,19 @@ class MediaDescriber:
     """ 后台把媒体描述回写到历史记录，不阻塞消息处理。 """
 
     def __init__(self, ai: AiProvider, cache: MediaCache, model: str, concurrency: int = 2,
-                 timeout: float = 30.0, max_tokens: int = 64):
+                 timeout: float = 30.0, max_tokens: int = 64, image_max_tokens: int | None = None):
         """ :param concurrency: 同时进行的识图上限，防止刷图打爆接口
         :param timeout: 单张媒体的下载+识图超时（秒），超时保留占位符
-        :param max_tokens: 描述的最大 token 数，限制慢模型的输出长度
+        :param max_tokens: 表情描述的最大 token 数，限制慢模型的输出长度
+        :param image_max_tokens: 图片描述的最大 token 数，不给就和 max_tokens 一样。
+            图片要抄全图里的字，15 字那点预算不够
         """
         self._ai = ai
         self._cache = cache
         self._model = model
         self._timeout = timeout
         self._max_tokens = max_tokens
+        self._image_max_tokens = image_max_tokens
         self._sem = asyncio.Semaphore(concurrency)
         self._inflight: dict[str, asyncio.Task] = {}
         self._tasks: set[asyncio.Task] = set()
@@ -93,14 +107,16 @@ class MediaDescriber:
         self._cache.close()
 
     async def _apply(self, media: Media, record: SingleRecord) -> None:
+        version = IMAGE_PROMPT_VERSION if media.kind == 'image' else ''
         try:
-            description = self._cache.get(media.md5) or await self._describe_once(media, record.download)
+            description = self._cache.get(media.md5, version) or await self._describe_once(media, record.download)
         except Exception as e:
             self._warn_once(f'{media.kind}:{e}', f'描述媒体失败 md5={media.md5}: {e}')
             return
         if description:
             label = '图片' if media.kind == 'image' else '表情'
-            record.text = f'[{label}：{description}]'
+            # handle 不能丢：内联图片靠它把附件和这行对上
+            record.text = add_handle(f'[{label}：{description}]', record.handle)
 
     def _warn_once(self, key: str, message: str) -> None:
         """ 同一类失败只警告一次。
@@ -139,9 +155,14 @@ class MediaDescriber:
         image = await download()
         if not image:
             return None
-        description = await self._ai.describe(image, max_tokens=self._max_tokens)
+        if media.kind == 'image':
+            description = await self._ai.describe(image, max_tokens=self._image_max_tokens or self._max_tokens,
+                                                  prompt=IMAGE_DESCRIBE_PROMPT)
+        else:
+            description = await self._ai.describe(image, max_tokens=self._max_tokens)
         if description:
-            self._cache.put(media.md5, media.kind, description, self._model)
+            version = IMAGE_PROMPT_VERSION if media.kind == 'image' else ''
+            self._cache.put(media.md5, media.kind, description, self._model, version)
         return description
 
 

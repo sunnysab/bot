@@ -32,6 +32,7 @@ from dotenv import load_dotenv
 from loguru import logger
 from weixin_bot import WeChatBotError
 
+from ai import IMAGE_PROMPT_VERSION
 from config import DOTENV_PATH, Config
 from context import SingleRecord
 from describer import MediaCache, MediaDescriber
@@ -104,8 +105,9 @@ async def fill(config: Config, cache: MediaCache, inventory: Inventory,
                 inventory.add(media, msg.create_time)
                 if describer is None or not media.needs_description:
                     continue
-                if cache.get(media.md5):
-                    continue                        # 描述过的不再排（describer 也会跳过）
+                # 图片只认新提示词那版描述，老的 15 字版要重新描述（describer 也这么判）
+                if cache.get(media.md5, IMAGE_PROMPT_VERSION if media.kind == 'image' else ''):
+                    continue
                 if limit and scheduled >= limit:
                     continue
                 describer.schedule(SingleRecord(
@@ -173,7 +175,8 @@ async def amain(args: argparse.Namespace) -> None:
             ai, _planner = _providers(config)
             describer = None if args.dry_run else MediaDescriber(
                 ai, cache, model=config.deepseek_model, concurrency=args.concurrency,
-                timeout=config.describe_timeout, max_tokens=config.describe_max_tokens)
+                timeout=config.describe_timeout, max_tokens=config.describe_max_tokens,
+                image_max_tokens=config.describe_image_max_tokens)
             try:
                 filled = await fill(config, cache, inventory, describer, args.days, args.limit)
             except WeChatBotError as e:

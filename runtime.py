@@ -197,7 +197,8 @@ class Runtime:
         return MediaDescriber(self.ai, self.media_cache, model=self.config.deepseek_model,
                               concurrency=self.config.describe_concurrency,
                               timeout=self.config.describe_timeout,
-                              max_tokens=self.config.describe_max_tokens)
+                              max_tokens=self.config.describe_max_tokens,
+                              image_max_tokens=self.config.describe_image_max_tokens)
 
     def _make_emoji_describer(self) -> EmojiDescriber | None:
         # 给偷来的表情补「使用场景」：微信的 desc 只有一个标签，够搜标签不够搜场合

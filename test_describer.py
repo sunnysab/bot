@@ -3,6 +3,7 @@
 import asyncio
 import unittest
 
+from ai import IMAGE_PROMPT_VERSION
 from context import SingleRecord
 from describer import MediaCache, MediaDescriber
 from media import Media
@@ -15,9 +16,10 @@ class FakeAi:
         self.calls = 0
         self.last_max_tokens = None
 
-    async def describe(self, image, max_tokens=64):
+    async def describe(self, image, max_tokens=64, prompt=''):
         self.calls += 1
         self.last_max_tokens = max_tokens
+        self.last_prompt = prompt
         await asyncio.sleep(self.delay)
         return self.description
 
@@ -60,7 +62,7 @@ class TestMediaDescriber(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.ai.last_max_tokens, 64)
 
     async def test_cache_hit_skips_model(self):
-        self.cache.put('md5-2', 'image', '缓存里的猫', 'test')
+        self.cache.put('md5-2', 'image', '缓存里的猫', 'test', version=IMAGE_PROMPT_VERSION)
         record, msg = make_record('md5-2')
         self.describer.schedule(record)
         await self.describer.join()
@@ -68,6 +70,17 @@ class TestMediaDescriber(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record.text, '[图片：缓存里的猫]')
         self.assertEqual(self.ai.calls, 0)
         self.assertEqual(msg.downloads, 0)
+
+    async def test_image_uses_ocr_prompt_and_old_version_misses(self):
+        # 老描述（15 字版，没写 version）不算命中 → 用新提示词重新描述
+        self.cache.put('md5-7', 'image', '自助餐菜单丰盛令人期待', 'test')
+        record, _ = make_record('md5-7')
+        self.describer.schedule(record)
+        await self.describer.join()
+
+        self.assertEqual(self.ai.calls, 1)
+        self.assertIn('原样抄下来', self.ai.last_prompt)
+        self.assertEqual(self.cache.get('md5-7', IMAGE_PROMPT_VERSION), '一只橘猫')
 
     async def test_same_md5_is_described_once(self):
         pairs = [make_record('md5-3') for _ in range(3)]
