@@ -46,9 +46,14 @@ from reply_trace import find as find_trace
 from reply_trace import latencies as trace_latencies
 from runtime import HOT_FIELDS, RESTART_FIELDS, ReplyScope
 
-PAGE = Path(__file__).parent / 'admin.html'
-# 面板的纯渲染函数（能在 node 里单独测，见 test_admin_ui.js）
-UI_JS = Path(__file__).parent / 'admin.js'
+# 面板：web/ 是 React 源码，web/dist 是 vite 的产物。HTTP 服务只读产物，构建由
+# `cd web && npm run build` 负责——所以这里不再有「页面文件」这个概念
+WEB_DIR = Path(__file__).parent / 'web'
+DIST = WEB_DIR / 'dist'
+ASSETS = DIST / 'assets'
+BUILD_HINT = ('面板还没构建（web/dist 不存在）。\n\n'
+              '    cd web && npm install && npm run build\n\n'
+              '开发期也可以只跑前端：cd web && npm run dev（它会自己把 /api 转发过来）\n')
 SIDECAR = Path(__file__).parent / 'admin.db'
 # 可以在面板上改的提示词。模板都不长，整体替换比行编辑简单也可控
 PROMPTS = {'planner': Path(__file__).parent / 'planner.txt',
@@ -72,6 +77,10 @@ MEDIA_TYPES = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
                '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
                '.mp4': 'video/mp4', '.wav': 'audio/wav', '.mp3': 'audio/mpeg',
                '.amr': 'audio/amr', '.silk': 'audio/silk'}
+# vite 产物里可能出现的东西。认不出的一律当二进制发下去，浏览器自己会拒
+ASSET_TYPES = {'.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
+               '.map': 'application/json', '.svg': 'image/svg+xml', '.woff2': 'font/woff2',
+               **MEDIA_TYPES}
 
 # 不回显的字段：表单里留空 = 保持原值
 SECRET_FIELDS = frozenset({'deepseek_key', 'planner_key'})
@@ -762,11 +771,9 @@ class Admin:
         route = url.path
         try:
             if route in ('/', '/index.html'):
-                return self._send(handler, PAGE.read_text(encoding='utf-8'),
-                                  'text/html; charset=utf-8')
-            if route == '/admin.js':
-                return self._send(handler, UI_JS.read_text(encoding='utf-8'),
-                                  'application/javascript; charset=utf-8')
+                return self._page(handler)
+            if route.startswith('/assets/'):
+                return self._asset(handler, route)
             if route == '/api/state':
                 return self._json(handler, self.state())
             if route == '/api/health':
@@ -805,7 +812,8 @@ class Admin:
                 return self._json(handler, self.trace(unquote(route[len('/api/trace/'):])))
             if route == '/api/media':
                 data, content_type = self.media((query.get('msg_id') or [''])[0])
-                return self._send_bytes(handler, data, content_type, cache=True)
+                return self._send_bytes(handler, data, content_type,
+                                       cache='private, max-age=300')
             if route == '/api/config':
                 return self._json(handler, self.read_config())
             self._json(handler, {'error': 'not found'}, 404)
@@ -867,27 +875,48 @@ class Admin:
             logger.warning(f'管理后台 POST {route} 出错: {e}')
             self._json(handler, {'error': str(e)}, 500)
 
+    def _page(self, handler) -> None:
+        """SPA 的壳。产物没构建就说清楚该跑什么——空白页最难查"""
+        page = DIST / 'index.html'
+        if not page.exists():
+            return self._send(handler, BUILD_HINT, 'text/plain; charset=utf-8', 503)
+        self._send(handler, page.read_text(encoding='utf-8'), 'text/html; charset=utf-8')
+
+    @staticmethod
+    def _asset(handler, route: str) -> None:
+        """vite 的产物：文件名带内容 hash，所以可以长期缓存。
+
+        路径解析后必须仍然落在 dist/assets 里——不然 `/assets/../../.env` 就把仓库读穿了。
+        """
+        path = (ASSETS / route[len('/assets/'):]).resolve()
+        if not path.is_relative_to(ASSETS.resolve()) or not path.is_file():
+            return Admin._json(handler, {'error': 'not found'}, 404)
+        content_type = ASSET_TYPES.get(path.suffix.lower(), 'application/octet-stream')
+        Admin._send_bytes(handler, path.read_bytes(), content_type,
+                          cache='public, max-age=31536000, immutable')
+
     @staticmethod
     def _send(handler, body: str, content_type: str, code: int = 200) -> None:
         Admin._send_bytes(handler, body.encode('utf-8'), content_type, code)
 
     @staticmethod
     def _send_bytes(handler, data: bytes, content_type: str, code: int = 200,
-                    cache: bool = False) -> None:
+                    cache: str = 'no-store') -> None:
         handler.send_response(code)
         handler.send_header('Content-Type', content_type)
         handler.send_header('Content-Length', str(len(data)))
-        # 默认不缓存：页面、JS 和 /api/* 都是「看着会变」的东西，缓存一小时会让面板
-        # 显示旧数据/旧代码。附件例外（一模几百 KB，滚回去别重下），但**不能**按
-        # 内容寻址看：同一个 msg_id 给什么字节是会变的——原图被服务端回收后就退回
-        # 缩略图。所以只缓存 5 分钟，让这种切换几分钟内自愈，而不是拖一小时
-        handler.send_header('Cache-Control', 'private, max-age=300' if cache else 'no-store')
+        # 默认不缓存：页面和 /api/* 都是「看着会变」的东西，缓存一小时会让面板显示旧数据/旧代码。
+        # 附件例外（一模几百 KB，滚回去别重下），但**不能**按内容寻址看：同一个 msg_id 给什么
+        # 字节是会变的——原图被服务端回收后就退回缩略图。所以只缓存 5 分钟，让这种切换
+        # 几分钟内自愈，而不是拖一小时。vite 带 hash 的产物是唯一能长期缓存的东西
+        handler.send_header('Cache-Control', cache)
         handler.end_headers()
         handler.wfile.write(data)
 
-    def _json(self, handler, payload, code: int = 200) -> None:
-        self._send(handler, json.dumps(payload, ensure_ascii=False, default=str),
-                   'application/json', code)
+    @staticmethod
+    def _json(handler, payload, code: int = 200) -> None:
+        Admin._send(handler, json.dumps(payload, ensure_ascii=False, default=str),
+                    'application/json', code)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -1254,12 +1283,13 @@ def _self_check() -> None:
     assert set(PROMPTS) == {'planner', 'replyer', 'agent'}, PROMPTS
 
     # 面板的状态表必须覆盖每一个 Status，否则 chip 会显示裸状态名
-    js = UI_JS.read_text(encoding='utf-8')
-    assert '/admin.js' in PAGE.read_text(encoding='utf-8'), 'admin.html 没引用 /admin.js'
+    assert 'src/main.tsx' in (WEB_DIR / 'index.html').read_text(encoding='utf-8'), \
+        'web/index.html 没引用 src/main.tsx'
+    status_ts = (WEB_DIR / 'src' / 'status.ts').read_text(encoding='utf-8')
     missing = [s for name, s in vars(Status).items()
                if name.isupper() and not name.startswith('_') and isinstance(s, str)
-               and f'{s}:' not in js]
-    assert not missing, f'admin.js 的 LABEL/GROUP 没覆盖这些状态: {missing}'
+               and f'{s}:' not in status_ts]
+    assert not missing, f'web/src/status.ts 的 LABEL/GROUP 没覆盖这些状态: {missing}'
 
     print('admin self-check ok')
 

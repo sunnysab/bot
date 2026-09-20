@@ -17,3 +17,7 @@ __pycache__/
 *.egg-info/
 .env
 admin.db*
+
+# 面板前端（产物由 npm run build 生成，不进仓库）
+web/node_modules/
+web/dist/
