@@ -42,7 +42,7 @@ class TestReferenceMessage(unittest.TestCase):
                          '直接用这个点进去对比')
 
     def test_not_a_quote_raises(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValueError):
             parse_reference_message('<msg><appmsg><title>文章</title><type>5</type></appmsg></msg>')
 
 

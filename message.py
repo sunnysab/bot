@@ -40,7 +40,12 @@ def parse_reference_message(xml_data: str) -> dict:
     root = et.fromstring(body)
 
     message_sub_type = root.find('.//type').text
-    assert message_sub_type == '57', '消息类型不是引用消息'
+    # 拿到的 XML 不是引用：这是 daemon 给的输入不对，不是内部不变式被破坏，
+    # 所以抛 ValueError（调用方 `parse_appmsg` 捕 Exception 退回「[引用消息]」）。
+    # 用 assert 的话，`python -O` 下这层校验直接消失，接着 `find(...).text` 会以
+    # 「NoneType 没有 text」的名义报一个和真实原因无关的错。
+    if message_sub_type != '57':
+        raise ValueError(f'不是引用消息（appmsg type={message_sub_type}）')
 
     content = root.find('.//title').text
     sender = root.find('.//fromusername').text
