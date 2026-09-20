@@ -65,7 +65,9 @@ class Config:
     describe_media: bool = True
     media_cache_path: str = 'media_cache.db'
     describe_concurrency: int = 2
-    describe_timeout: float = 30.0
+    # 单张图的下载+识图超时。中转实测一张普通照片要 ~45s（250 个输出 token 就花了
+    # 40 多秒，慢在中转/上游排队而不是 token 速率），30s 会把结果整条丢掉
+    describe_timeout: float = 90.0
     # 识图的生成上限（不是上下文）。**thinking 模型会先推理再回答，推理也算在这个上限里**——
     # 实测（deepseek-v4.1-flash，识图 prompt + 9094 字节真表情图）：
     #   64 → finish=length，reasoning=64，content 空

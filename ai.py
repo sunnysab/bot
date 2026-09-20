@@ -190,13 +190,14 @@ class OpenAI(AiProvider):
                        prompt: str = DESCRIBE_PROMPT) -> str | None:
         """ 识图描述：把图片/表情压成一句短语，写入历史记录。
 
-        **会重试一次**：这个模型是 thinking 的，推理也算在 max_tokens 里，而推理长度
-        看 prompt 心情（实测同一批表情 8 ~ >2048）。碰上截断就翻倍再试一次，
-        比事后看到「描述失败」好查。
+        **只在什么都没吐出来时才重试**：这个模型是 thinking 的，推理也算在 max_tokens
+        里，碰上截断就翻倍再来一次。但第一遍已经有正文（哪怕被截断）时不能再试——
+        翻倍只换一次更慢的调用，而整条是被 describer 的 timeout 罩着的，多花的那些秒
+        正好会把已经拿到的那半段一起超时丢掉（线上就是这样：截断 → 重试 → 超时 → 空）。
         """
         text, truncated = await self._describe_once(image, prompt, max_tokens)
-        if truncated and max_tokens < RETRY_CEILING:
-            logger.debug(f'识图被截断（max_tokens={max_tokens}），翻倍重试一次')
+        if not text and truncated and max_tokens < RETRY_CEILING:
+            logger.debug(f'识图被截断且没拿到内容（max_tokens={max_tokens}），翻倍重试一次')
             text, truncated = await self._describe_once(image, prompt, max_tokens * 2)
         if not text:
             logger.warning(f'识图没拿到内容（{"推理吃完了预算" if truncated else "空回复"}，'
@@ -301,6 +302,17 @@ def _self_check() -> None:
         provider._describe_once = always_truncated
         assert await provider.describe(b'x', max_tokens=RETRY_CEILING) is None
         assert calls == [RETRY_CEILING], calls       # 到顶了就不再翻倍
+        # 第一遍已经有正文（哪怕被截断）就不再翻倍：翻倍只会更慢，
+        # 还可能被 describer 的 timeout 把已经拿到的这段一起丢掉
+        calls.clear()
+
+        async def truncated_with_text(image, prompt, budget):
+            calls.append(budget)
+            return ('文字：菜单', True)
+
+        provider._describe_once = truncated_with_text
+        assert await provider.describe(b'x', max_tokens=4096) == '文字：菜单'
+        assert calls == [4096], calls
         # 没截断就不重试
         calls.clear()
         provider._describe_once = lambda *a: _ok()
