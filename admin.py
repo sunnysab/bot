@@ -494,6 +494,8 @@ class Admin:
                       or msg.sender_display_name or msg.sender,
             'outgoing': bool(msg.is_self),
             'text': text,
+            # 原始载荷（XML / 带 wxid 前缀的正文）：详情抽屉里要看它，渲染层丢掉的信息全在这
+            'xml': msg.content,
             'status': own.status if own else '',
             'status_detail': own.detail if own else '',
             'score': own.score if own else 0,
@@ -1076,6 +1078,10 @@ def _self_check() -> None:
     assert quoted['text'] == '直接用这个点进去对比', quoted
     assert quoted['quote'] == {'content': '直接用这个点进去对比', 'name': 'zzq',
                                'text': '[链接] 和我一起测测'}, quoted
+
+    # 详情抽屉要能看原始 XML：行里带上没被渲染丢掉的载荷
+    assert row['xml'] == '这个怎么弄啊'
+    assert quoted['xml'].startswith('<msg><appmsg>'), quoted['xml']
     # 普通链接（type != 57）不走引用块
     link = admin._row(msg(49, '<msg><appmsg><title>一篇文章</title><type>5</type></appmsg></msg>'))
     assert link['quote'] is None, link

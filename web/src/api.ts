@@ -66,6 +66,8 @@ export interface Msg {
   sender: string;
   outgoing: boolean;
   text: string;
+  /** 原始载荷（XML / 带 wxid 前缀的正文）；详情抽屉要看它 */
+  xml: string;
   status: string;
   status_detail: string;
   score: number;

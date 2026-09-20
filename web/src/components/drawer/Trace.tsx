@@ -10,12 +10,14 @@ interface Props {
   msgId: string | null;
   /** 选中那条气泡的正文。以前从 DOM 里捞，现在直接从 messages 里取 */
   picked: string;
+  /** 选中那条的原始载荷（XML）。渲染层丢掉的字段只能从这里看 */
+  xml: string;
   /** 事件轮询说「这条消息有新事件」，靠它重取 */
   tick: number;
 }
 
 /** 「这条消息」：为什么被跳过 / 这一轮模型看到了什么。 */
-export function Trace({ msgId, picked, tick }: Props) {
+export function Trace({ msgId, picked, xml, tick }: Props) {
   const { data } = usePoll(
     () => msgId ? get<TraceView>(`/api/trace/${encodeURIComponent(msgId)}`) : Promise.resolve(null),
     0, [msgId, tick]);
@@ -44,6 +46,14 @@ export function Trace({ msgId, picked, tick }: Props) {
         <span>回复进度</span>
         <span>{view.reply ? <Chip status={view.reply.status} detail={view.reply.detail} /> : '—'}</span>
       </div>
+
+      {/* 渲染层把 XML 收成了人话，出问题时（引用/媒体解析）只有原文能说明白 */}
+      {xml && (
+        <details className="xml">
+          <summary>原始 XML</summary>
+          <Pre text={xml} />
+        </details>
+      )}
 
       {!tr ? (
         <>

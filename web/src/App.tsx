@@ -220,7 +220,8 @@ export default function App() {
     local.set('aside.w', String(w));
   }, []);
 
-  const picked = messages.find(m => m.msg_id === selected)?.text ?? '';
+  const pickedMsg = messages.find(m => m.msg_id === selected);
+  const picked = pickedMsg?.text ?? '';
 
   return (
     <>
@@ -252,7 +253,7 @@ export default function App() {
         </div>
         <Drawer
           panel={panel} tab={tab} onTab={setTab} onClose={() => setPanel(null)}
-          msgId={selected} picked={picked} traceTick={traceTick}
+          msgId={selected} picked={picked} pickedXml={pickedMsg?.xml ?? ''} traceTick={traceTick}
           health={health.data} onRefresh={refresh} chatName={chatName}
         />
       </main>

@@ -14,6 +14,7 @@ const base = {
   onClose: () => {},
   msgId: '1',
   picked: '正文',
+  pickedXml: '<msg><img md5="m" /></msg>',
   traceTick: 0,
   health: null,
   onRefresh: () => {},

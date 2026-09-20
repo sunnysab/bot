@@ -9,7 +9,7 @@ import type { Msg } from '../api';
 import { Message } from './Message';
 
 const msg = (over: Partial<Msg>): Msg => ({
-  cursor: 1, msg_id: '123', ts: 1700000000, sender: 'Alice', outgoing: false, text: '',
+  cursor: 1, msg_id: '123', ts: 1700000000, sender: 'Alice', outgoing: false, text: '', xml: '',
   status: '', status_detail: '', score: 0, reply_status: '', reply_detail: '',
   dry_text: '', media: null, quote: null, ...over,
 });

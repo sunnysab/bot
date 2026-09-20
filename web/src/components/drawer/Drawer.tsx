@@ -23,6 +23,8 @@ interface Props {
   onClose: () => void;
   msgId: string | null;
   picked: string;
+  /** 选中那条的原始载荷，喂给「这条消息」的 XML 折叠块 */
+  pickedXml: string;
   traceTick: number;
   health: Res<HealthRes> | null;
   onRefresh: () => void;
@@ -35,7 +37,7 @@ interface Props {
  * 「面板自己」的东西不是一回事。两种模式互斥，切回来就是重新取一次。
  */
 export function Drawer({
-  panel, tab, onTab, onClose, msgId, picked, traceTick, health, onRefresh, chatName,
+  panel, tab, onTab, onClose, msgId, picked, pickedXml, traceTick, health, onRefresh, chatName,
 }: Props) {
   if (!panel) return null;
   return (
@@ -44,7 +46,7 @@ export function Drawer({
       {panel === 'message' ? (
         <>
           <h3>这条消息</h3>
-          <Trace msgId={msgId} picked={picked} tick={traceTick} />
+          <Trace msgId={msgId} picked={picked} xml={pickedXml} tick={traceTick} />
         </>
       ) : (
         <>
