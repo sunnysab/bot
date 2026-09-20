@@ -11,7 +11,7 @@ from media import render
 
 
 class Wechat:
-    """ 微信机器人组件（weixin-rs relay 适配层） """
+    """ 微信机器人组件（weixin-rs daemon 适配层） """
 
     AsyncMessageCb = Callable[[Message], Coroutine[Any, Any, None]]
 
@@ -42,7 +42,7 @@ class Wechat:
         self._bot.on_ready(func)
 
     async def start(self) -> None:
-        """ 连接 relay 并持续接收消息，断线自动重连 """
+        """ 连接 daemon 并持续接收消息，断线自动重连 """
         await self._bot.start()
 
     async def stop(self) -> None:
@@ -97,8 +97,8 @@ class Wechat:
 
         text = f'{ats}\n\n{msg}' if ats else msg
         logger.info(f'To {receiver}: {text}')
-        # 返回值里带 relay 给的 msg_id（微信服务端消息 ID）。管理后台靠它把
-        # 「排队中 → 已发送」贴到 relay 库里的那条出站记录上，不能丢
+        # 返回值里带 daemon 给的 msg_id（微信服务端消息 ID）。管理后台靠它把
+        # 「排队中 → 已发送」贴到 daemon 库里的那条出站记录上，不能丢
         return await self._bot.send_text(to=receiver, text=text, at_users=at_users, at_names=at_names,
                                          ref_svrid=ref_svrid)
 
@@ -109,7 +109,7 @@ class Wechat:
         return [item for item in emojis if item.sendable][:limit]
 
     async def send_emoji(self, emoji: Emoji, receiver: str) -> dict:
-        """ 发一张表情。返回值带 relay 的 msg_id，理由同 send_text。 """
+        """ 发一张表情。返回值带 daemon 的 msg_id，理由同 send_text。 """
         if not emoji.sendable:
             logger.warning(f'表情缺下载地址，发不出去：{emoji.md5}')
             return {'sent': False}
@@ -117,12 +117,12 @@ class Wechat:
             logger.info(f'[DRY RUN] To {receiver}: 表情「{emoji.desc or emoji.md5}」')
             return {'sent': False, 'dry_run': True}
         logger.info(f'To {receiver}: 表情「{emoji.desc or emoji.md5}」')
-        return await self._bot.send_emoji(to=receiver, emoji=emoji.to_relay())
+        return await self._bot.send_emoji(to=receiver, emoji=emoji.to_daemon())
 
     async def revoke(self, to: str, msg_id: int) -> dict:
         """ 撤回自己发出的一条消息。
 
-        msg_id 是 send_text / send_emoji 回执里的那个。relay 只认**本进程发过、
+        msg_id 是 send_text / send_emoji 回执里的那个。daemon 只认**本进程发过、
         2 分钟内**的消息（超时它用 410 快失败），别人的和手机上发的撤不了。
         """
         if self.dry_run:
@@ -134,7 +134,7 @@ class Wechat:
     def is_session(self, peer: str) -> bool:
         """ 这个 peer 值不值得当会话：私聊（`wxid_`）或群（`@chatroom`）。
 
-        **自己的 wxid 不算**。relay 的 device-sync（msg_type=51，from/to 都是自己）
+        **自己的 wxid 不算**。daemon 的 device-sync（msg_type=51，from/to 都是自己）
         会被 `list_conversations` 按 peer 分组成一个假会话，而 `get_messages` 的
         contact 过滤是 `from_user=? OR to_user=?`——点进去就是**全部**发给 bot 的消息。
         公众号 / filehelper / weixin 也一并排掉，会话的定义只写在这一处。
@@ -148,32 +148,32 @@ class Wechat:
                 if self.is_session(c.peer)]
 
     async def status(self) -> dict:
-        """ relay 的连接 / 登录状态。管理后台的健康卡用。 """
+        """ daemon 的连接 / 登录状态。管理后台的健康卡用。 """
         return await self._bot.get_status()
 
     async def media_bytes_by_id(self, msg_id: int) -> tuple[bytes, str]:
         """ 取一条消息的附件字节，返回 (data, ext)。
 
-        **附件由 relay 下载并保管**（它认得 CDN blob，也有自己的磁盘缓存），bot 只按
+        **附件由 daemon 下载并保管**（它认得 CDN blob，也有自己的磁盘缓存），bot 只按
         msg_id 要字节——不关心它缓存在哪个目录、叫什么名字，更不该去扒它的文件。
         """
         data = await self._bot.call('get_media_bytes', {'msg_id': msg_id})
         payload = data if isinstance(data, dict) else {}
         encoded = payload.get('data_base64')
         if not encoded:
-            raise ValueError(f'relay 没返回附件内容（msg_id={msg_id}）')
+            raise ValueError(f'daemon 没返回附件内容（msg_id={msg_id}）')
         return base64.b64decode(encoded), str(payload.get('ext') or '')
 
     async def media_bytes(self, msg: Message) -> bytes:
         """ 取一条消息附件的原始字节（识图用）。
 
         **不走 SDK 的 `msg.get_media_bytes()`**：那条路走 PKT_DL_OPEN 分块流，
-        而 relay 的 DL_OPEN 分支按 `RelayRequest`（action + params）解包，SDK 只塞了
+        而 daemon 的 DL_OPEN 分支按 `DaemonRequest`（action + params）解包，SDK 只塞了
         params，解不出就被 `unwrap_or_default()` 吞掉，最后报 400「缺少 msg_id」——
         报错和真实原因（图片的 XML 里没有 cdnurl）完全无关，查半天。
 
         这里走普通 RPC 的 `get_media_bytes`（形状是对的），拿 base64 再解回来，
-        失败时的报错就是 relay 的原始报错。
+        失败时的报错就是 daemon 的原始报错。
         """
         raw, _ = await self.media_bytes_by_id(msg.msg_id)
         return raw
@@ -181,8 +181,8 @@ class Wechat:
     async def voice_text(self, msg: Message, timeout: int = 20) -> str:
         """ 语音转文字。
 
-        附件和转写都在 relay 做（转写要把 SILK 上传到微信服务端再轮询，bot 做不了），
-        relay 用 `{wxid}_voice_{msg_id}` 当 voiceId，所以同一条消息重复请求能命中结果。
+        附件和转写都在 daemon 做（转写要把 SILK 上传到微信服务端再轮询，bot 做不了），
+        daemon 用 `{wxid}_voice_{msg_id}` 当 voiceId，所以同一条消息重复请求能命中结果。
         拿不到文本就返回空串——调用方保留占位符就行，别让转写拖垮消息链。
         """
         result = await self._bot.transcribe_voice(msg.msg_id, timeout=timeout)
@@ -192,9 +192,9 @@ class Wechat:
                        before_id: int = 0, after_id: int = 0):
         """ 管理后台用：某个会话的历史。
 
-        直接返回 relay 的原始消息，不走 fetch_history 那层历史记录封装——
+        直接返回 daemon 的原始消息，不走 fetch_history 那层历史记录封装——
         面板要 msg_id 才能把状态贴上去，也要原始 XML 才能渲染媒体。
-        翻页游标是 relay 的 `messages.id`（不是 64 位的 msg_id）：`before_id` 往早翻，
+        翻页游标是 daemon 的 `messages.id`（不是 64 位的 msg_id）：`before_id` 往早翻，
         `after_id` 往新翻。
         """
         return await self._bot.get_messages(limit=limit, contact=peer, reverse=True,
@@ -204,9 +204,9 @@ class Wechat:
     async def sender_names(self, chat: str, senders) -> dict[str, str]:
         """ 把 wxid 批量解析成显示名（群昵称 > 备注）。
 
-        relay 的 `sender_display_name` 查不到时会**拿 wxid 当名字**返回，那不是名字。
+        daemon 的 `sender_display_name` 查不到时会**拿 wxid 当名字**返回，那不是名字。
         bot 自己的消息处理链会退到 `get_contact` 再查一次（见 get_display_name），
-        面板走的是 relay 原始消息，没经过那道，所以要自己补。
+        面板走的是 daemon 原始消息，没经过那道，所以要自己补。
         实测某群里 278 条有 130 条的发送者是 wxid，但只有 4 个不同的人——
         解析一遍就都好了，而且查到的名字会缓存。
         """
@@ -225,7 +225,7 @@ class Wechat:
     async def get_display_name(self, wxid: str, chatroom: str = '') -> str:
         """ 获取联系人的显示名称. 对于群友，优先使用本地的备注，其次使用群昵称，最后使用微信昵称
 
-        注意 relay 查不到群成员时会**拿 wxid 当名字**返回，那不是名字，得接着往下找。
+        注意 daemon 查不到群成员时会**拿 wxid 当名字**返回，那不是名字，得接着往下找。
         """
         if chatroom == wxid:  # 非群聊
             chatroom = ''

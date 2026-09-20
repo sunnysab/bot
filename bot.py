@@ -21,8 +21,8 @@ from wechat import Message, Wechat
 EMOJI_LOCAL_ENOUGH = 3
 EMOJI_RESULT_LIMIT = 8
 EMOJI_SAVE_INTERVAL = 5.0      # 表情库最长隔这么久落一次盘（热度是运行时累加的）
-STALE_MESSAGE_SECONDS = 300.0  # 比这更旧的消息只当上下文：relay 长链重连会补推离线积压
-REVOKE_WINDOW_SECONDS = 120.0  # relay 只认 2 分钟内的撤回，超了不必白跑一次 RPC
+STALE_MESSAGE_SECONDS = 300.0  # 比这更旧的消息只当上下文：daemon 长链重连会补推离线积压
+REVOKE_WINDOW_SECONDS = 120.0  # daemon 只认 2 分钟内的撤回，超了不必白跑一次 RPC
 SENT_KEEP = 10                 # 每个会话最多记这么多条自己的出站，只用来撤回
 
 FILTERED_KINDS = {
@@ -38,8 +38,8 @@ def _aslist(x: T | list[T]) -> list[T]:
     return x if isinstance(x, list) else [x]
 
 
-def _relay_id(result) -> int | None:
-    """ 从 relay 的发送回执里取 server_id。拿不到（演习 / 服务端没回 / 假 relay）返回 None。 """
+def _daemon_id(result) -> int | None:
+    """ 从 daemon 的发送回执里取 server_id。拿不到（演习 / 服务端没回 / 假 daemon）返回 None。 """
     return result.get('msg_id') if isinstance(result, dict) else None
 
 
@@ -47,7 +47,7 @@ def _relay_id(result) -> int | None:
 class Sent:
     """ 本进程发出去的一条消息。
 
-    relay 的 msg_id 只有 _deliver 拿得到，而且撤回必须用它，所以得主动记一笔。
+    daemon 的 msg_id 只有 _deliver 拿得到，而且撤回必须用它，所以得主动记一笔。
     record 指向历史里的那条，撤回成功后从上下文里抹掉。
     """
 
@@ -69,9 +69,9 @@ class Bot:
                  quote_window: float = 180.0, rng: random.Random | None = None):
         """ 初始化机器人
 
-        @param host: weixin-rs relay 服务器地址
-        @param port: weixin-rs relay 服务器端口
-        @param unix_path: relay 的 Unix domain socket 路径，非空时优先于 host/port
+        @param host: weixin-rs daemon 服务器地址
+        @param port: weixin-rs daemon 服务器端口
+        @param unix_path: daemon 的 Unix domain socket 路径，非空时优先于 host/port
         @param dry_run: 是否为测试模式
         @param x_delay: 每条消息回复的延迟时间系数（将根据消息长度乘此系数，再叠加随机抖动）
         @param send_interval: 全局最小发送间隔（秒），用于规避风控
@@ -133,7 +133,7 @@ class Bot:
 
     @property
     def wechat(self) -> Wechat:
-        """ relay 适配层。管理后台直接拿它读会话列表和历史。 """
+        """ daemon 适配层。管理后台直接拿它读会话列表和历史。 """
         return self._wechat
 
     @property
@@ -188,7 +188,7 @@ class Bot:
             # 附件走 Wechat.media_bytes（普通 RPC），不用 SDK 的 msg.get_media_bytes——
             # 那条分块流是坏的，所以「表情使用场景」一直没补上过（scene_count 永远是 0）。
             #
-            # 能不能下载得看 relay 能不能在 XML 里找到**字面量** `cdnurl="`（它的
+            # 能不能下载得看 daemon 能不能在 XML 里找到**字面量** `cdnurl="`（它的
             # find_attr 不容空格）——实测群里 19 条带 cdnurl 的表情里 15 条写的是
             # `cdnurl = "…`，下了也白下。所以条件跟 media.PLAIN_URL 同标准
             self.emoji_describer.schedule(self.emojis.get(emoji.md5),
@@ -316,7 +316,7 @@ class Bot:
         if emoji:
             self.emoji_count += 1
         stored = final or (f'[表情：{emoji.desc or "表情"}]' if emoji else '')
-        # 演习：没发出去、不进历史、也不在 relay 里。正文只能靠事件带出去
+        # 演习：没发出去、不进历史、也不在 daemon 里。正文只能靠事件带出去
         record = None
         if stored and not self.dry_run:
             record = self._history.push_message(chat, sender, stored, int(time.time()), is_self=True)
@@ -331,30 +331,30 @@ class Bot:
 
     async def _deliver(self, item: Outbound) -> None:
         """ 真正发送，由 OutboundQueue 串行调用。历史和计数在 enqueue 时就已经落好。 """
-        # relay 给的 server_id：这条出站消息在 relay 里的身份。拿不到就留空
-        relay_id = None
+        # daemon 给的 server_id：这条出站消息在 daemon 里的身份。拿不到就留空
+        daemon_id = None
         error = ''
         try:
             if item.text:
                 result = await self._wechat.send_text(item.text, item.receiver,
                                                       ref_svrid=item.ref_svrid or None)
-                relay_id = _relay_id(result)
+                daemon_id = _daemon_id(result)
             if item.emoji:
                 result = await self._wechat.send_emoji(item.emoji, item.receiver)
-                relay_id = relay_id or _relay_id(result)
+                daemon_id = daemon_id or _daemon_id(result)
         except Exception as e:
-            # relay 长链发送回执解析有 bug：消息通常已经投递出去，重发会重复发。
+            # daemon 长链发送回执解析有 bug：消息通常已经投递出去，重发会重复发。
             # 所以只告警不重试；历史在 enqueue 时已经写过，下一轮模型仍看得到。
             error = str(e)
             logger.warning(f'发送报错，按已投递处理（不重试）{item.receiver}: {e}')
 
         # 记下自己的出站 msg_id：撤回只有这里拿得到。就算上面报过错，
-        # 只要拿到 id 就说明 relay 已经收下了（长链回执解析有 bug，消息通常已投递）
-        if relay_id and not self.dry_run:
-            self._remember(item, relay_id)
+        # 只要拿到 id 就说明 daemon 已经收下了（长链回执解析有 bug，消息通常已投递）
+        if daemon_id and not self.dry_run:
+            self._remember(item, daemon_id)
 
         if self.dry_run:
-            # 演习：没发出去、不进历史、也不在 relay 里。正文只能靠事件带出去，
+            # 演习：没发出去、不进历史、也不在 daemon 里。正文只能靠事件带出去，
             # 否则面板上这条回复就彻底消失了
             stored = item.text or (f'[表情：{item.emoji.desc or "表情"}]' if item.emoji else '')
             bus.publish(Status.DRY_RUN, chat_id=item.receiver, chat_name=item.chat_name,
@@ -363,13 +363,13 @@ class Bot:
             return
 
         bus.publish(Status.FAILED if error else Status.SENT, chat_id=item.receiver,
-                    chat_name=item.chat_name, msg_id=relay_id, reply_to=item.reply_to,
+                    chat_name=item.chat_name, msg_id=daemon_id, reply_to=item.reply_to,
                     origin='bot', detail=error[:200])
 
-    def _remember(self, item: Outbound, relay_id) -> None:
+    def _remember(self, item: Outbound, daemon_id) -> None:
         """ 记下一条自己的出站，撤回时靠它定位。 """
         try:
-            msg_id = int(relay_id)
+            msg_id = int(daemon_id)
         except (TypeError, ValueError):
             return
         text = item.text or (f'[表情：{item.emoji.desc or "表情"}]' if item.emoji else '')
@@ -402,7 +402,7 @@ class Bot:
 
         index：1 = 最近一条，2 = 再往前一条。text：原话里的一小段，只在
         **唯一命中**时直接撤，命中 0 条或多条都把候选表回给模型让它自己挑。
-        两个都不给也是列候选表。这样模型不需要（也拿不到）relay 的 msg_id。
+        两个都不给也是列候选表。这样模型不需要（也拿不到）daemon 的 msg_id。
         """
         if index and text:
             return '一次只能按 index 或 text 指定一种。'
@@ -426,7 +426,7 @@ class Bot:
         try:
             await self._wechat.revoke(chat, sent.msg_id)
         except Exception as e:
-            # relay 会给可读的原因（超 2 分钟是 410），原样转给模型
+            # daemon 会给可读的原因（超 2 分钟是 410），原样转给模型
             logger.warning(f'撤回失败（{chat} msg_id={sent.msg_id}）: {e}')
             return f'撤回失败：{e}'
         entries.pop(target)
@@ -438,7 +438,7 @@ class Bot:
     def _quote_target(self, msg: Message) -> int:
         """ 引用回复的目标：被回复那条的 64 位 svrId；不该引用时返回 0。
 
-        `msg.msg_id` 就是 svrId（relay 的 server_id），正是 `<refermsg><svrid>` 要的东西。
+        `msg.msg_id` 就是 svrId（daemon 的 server_id），正是 `<refermsg><svrid>` 要的东西。
         只在**群聊且最近消息比较多**时引用：私聊、冷清群里每条都带引用反而怪。
         """
         if not self.quote_replies or not msg.is_chatroom:
@@ -556,7 +556,7 @@ class Bot:
         # 自己的名字；消息来源：群消息取群名称，否则取联系人备注
         self_name: str = await self._wechat.get_display_name(self.wxid, msg.reply_target)
         source = await self._wechat.get_display_name(msg.reply_target)
-        # relay 有时把群成员的显示名解析成了 wxid，那样历史里全是 wxid，得自己补一次
+        # daemon 有时把群成员的显示名解析成了 wxid，那样历史里全是 wxid，得自己补一次
         if msg.is_chatroom and msg.sender_name == msg.sender:
             msg.sender_display_name = await self._wechat.get_display_name(msg.sender, msg.reply_target)
         logger.debug(msg)
@@ -569,7 +569,7 @@ class Bot:
         # 硬试也是一次注定失败的 RPC（见 media.Media.downloadable）
         download = ((lambda m=msg: self._wechat.media_bytes(m))
                     if (media and media.describable) else None)
-        # 语音：先让 relay 转成文字再进历史，否则模型只看到 `[语音 3″]`，什么也接不上。
+        # 语音：先让 daemon 转成文字再进历史，否则模型只看到 `[语音 3″]`，什么也接不上。
         # 转写要上传 + 轮询（秒级），失败就保留占位符——不能让它拖垮消息链
         if kind is MessageKind.VOICE and not msg.is_self and media is not None:
             try:
@@ -599,7 +599,7 @@ class Bot:
             self._describer.schedule(record)
         bus.publish(Status.RECEIVED, chat_id=msg.reply_target, chat_name=source, msg_id=msg.msg_id)
 
-        # 离线的积压不触发决策：relay 长链重连会把几个钟头前的消息当 live 推过来，
+        # 离线的积压不触发决策：daemon 长链重连会把几个钟头前的消息当 live 推过来，
         # 照发会对着死了的话题连回几十条。写进历史当上下文就够了。
         if msg.create_time and time.time() - msg.create_time > STALE_MESSAGE_SECONDS:
             ago = int(time.time() - msg.create_time)

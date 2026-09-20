@@ -28,7 +28,7 @@ class Outbound:
     text: str = ''
     sender: str = ''
     emoji: Emoji | None = None
-    # 这条回复针对的入站消息。出站要等 relay 收下之后才有自己的 msg_id，
+    # 这条回复针对的入站消息。出站要等 daemon 收下之后才有自己的 msg_id，
     # 在那之前面板只能靠 reply_to 把「排队中/输入中」挂到对应的入站气泡上
     reply_to: str = ''
     chat_name: str = ''

@@ -10,7 +10,7 @@
    它就把刚才在聊什么、发过什么表情全忘了。所以它们归 Runtime 长期持有，
    热重载只就地改常数。
 2. **分两档**：能热生效的（模型、提示词、门控、专注常数、错别字）就地换；
-   路径 / relay / 识图 / 日志只能整进程重启——那些是构造期就定死的东西。
+   路径 / daemon / 识图 / 日志只能整进程重启——那些是构造期就定死的东西。
    `apply()` 返回「改了但热重载管不着」的字段列表，让面板如实提示。
 """
 
@@ -121,7 +121,7 @@ HOT_FIELDS = frozenset({
 })
 # 构造期就定死的东西：路径 / 传输 / 识图 / 日志
 RESTART_FIELDS = frozenset({
-    'relay_host', 'relay_port', 'relay_unix', 'admin_port', 'log_path', 'log_level',
+    'daemon_host', 'daemon_port', 'daemon_unix', 'admin_port', 'log_path', 'log_level',
     'describe_media', 'media_cache_path', 'describe_concurrency', 'describe_timeout',
     'describe_max_tokens', 'describe_history_limit',
     'profile_path', 'habit_path', 'moment_path', 'emoji_path', 'scope_path', 'moment_batch',
@@ -176,7 +176,7 @@ class Runtime:
 
     def _make_bot(self) -> Bot:
         config = self.config
-        return Bot(config.relay_host, config.relay_port, unix_path=config.relay_unix, x_delay=0.5,
+        return Bot(config.daemon_host, config.daemon_port, unix_path=config.daemon_unix, x_delay=0.5,
                    send_interval=config.send_interval, describer=self.describer,
                    describe_history_limit=config.describe_history_limit,
                    keeper=MomentKeeper(self.ai, self.memories, batch=config.moment_batch),

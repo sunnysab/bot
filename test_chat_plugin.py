@@ -337,7 +337,7 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
     async def test_image_fetch_failure_degrades_to_text(self):
         """ 图片拉不下来不能把整轮回复带崩。
 
-        真实场景：这套 relay 下的图片 XML 里只有加密 fileid、没有 cdnurl，
+        真实场景：这套 daemon 下的图片 XML 里只有加密 fileid、没有 cdnurl，
         下载永远失败。以前这个异常会一路冒到 SDK 的 dispatch，那一轮就没人回了。
         """
         ctx = make_ctx(make_msg(msg_type=3))
@@ -723,7 +723,7 @@ class TestToolLoop(unittest.IsolatedAsyncioTestCase):
 
 
 class TestRevokeTool(unittest.IsolatedAsyncioTestCase):
-    """ 撤回工具：模型只说「撤哪条」，relay 要的 msg_id 由 Bot 解析。 """
+    """ 撤回工具：模型只说「撤哪条」，daemon 要的 msg_id 由 Bot 解析。 """
 
     def setUp(self):
         self.revoked = []

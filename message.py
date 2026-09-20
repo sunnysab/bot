@@ -21,7 +21,7 @@ def fix_xml(xml: str) -> str:
 
 
 def parse_reference_message(xml_data: str) -> dict:
-    """解析引用消息。relay 有时会在 XML 前拼一行 'wxid_xxx:'，直接截到第一个 '<'。"""
+    """解析引用消息。daemon 有时会在 XML 前拼一行 'wxid_xxx:'，直接截到第一个 '<'。"""
     start = xml_data.find('<')
     xml_data = fix_xml(xml_data[start:] if start > 0 else xml_data)
     root = et.fromstring(xml_data)
@@ -59,6 +59,6 @@ if __name__ == '__main__':
     assert parsed['referred_message_sender'] == 'wxid_kf7zbyjjxs8r22', parsed
     assert parsed['referred_message'] == '和我一起测测', parsed
 
-    # relay 在正文前拼了 sender 前缀的场景
+    # daemon 在正文前拼了 sender 前缀的场景
     assert parse_reference_message('wxid_abc:\n' + sample)['content'] == '直接用这个点进去对比'
     print('ok')

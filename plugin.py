@@ -43,7 +43,7 @@ from tools import (
     tool_message,
 )
 
-# 搜表情：给个关键词，还一堆能发出去的候选。由 Bot 提供（它才连 relay）。
+# 搜表情：给个关键词，还一堆能发出去的候选。由 Bot 提供（它才连 daemon）。
 # 插件自己不发表情——发送统一走 OutboundQueue，那里的限速不能绕过去。
 EmojiSearch = Callable[[str], Awaitable[list[Emoji]]]
 
@@ -910,7 +910,7 @@ class ChatPlugin(Plugin):
     async def _build_message(ctx: MessageContext, transcript: str, image: bool = False) -> str | list:
         """ 文本消息直接发送；图片消息把真实图片作为 content block 附在文本后（DeepSeek 原生识图）。
 
-        图片拉不下来就退回纯文本：附件取不到是常事（这套 relay 下的图片 XML 里
+        图片拉不下来就退回纯文本：附件取不到是常事（这套 daemon 下的图片 XML 里
         根本没有可下载的 cdnurl，只有加密 fileid），它不该把整轮回复带崩——
         更不该让用户看到一条和真实原因无关的报错。历史里本来就有 `[图片]` 占位符。
         """

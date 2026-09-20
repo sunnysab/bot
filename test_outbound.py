@@ -28,7 +28,7 @@ class TestOutboundQueue(unittest.IsolatedAsyncioTestCase):
     async def test_send_failure_does_not_break_worker(self):
         async def send(item):
             if item.text == 'boom':
-                raise RuntimeError('relay down')
+                raise RuntimeError('daemon down')
             await self._send(item)
 
         queue = OutboundQueue(send, min_interval=0)

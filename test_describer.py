@@ -93,7 +93,7 @@ class TestMediaDescriber(unittest.IsolatedAsyncioTestCase):
         record = SingleRecord('Alice', '[图片]', 1, media=Media('image', 'md5-5'))
 
         async def broken():
-            raise RuntimeError('relay down')
+            raise RuntimeError('daemon down')
 
         record.download = broken
         self.describer.schedule(record)

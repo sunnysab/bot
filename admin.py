@@ -2,10 +2,10 @@
 
 三条原则：
 
-1. **消息正文的事实源是 relay**，不在这里另存一份。这里只做两件事——
-   把 relay 的消息读出来、把 events.py 里的状态贴上去。
+1. **消息正文的事实源是 daemon**，不在这里另存一份。这里只做两件事——
+   把 daemon 的消息读出来、把 events.py 里的状态贴上去。
 2. **绝不拖累聊天。** 启动整段 try/except；任何一路出错只打日志 + 返回 500。
-3. **msg_id 一律字符串。** relay 的 server_id 是 64 位整数，实测 985 条里 958 条
+3. **msg_id 一律字符串。** daemon 的 server_id 是 64 位整数，实测 985 条里 958 条
    超过 JS 安全整数 2^53（最大 9202842881785760589）。当数字过 JSON 会被 JS 悄悄
    改掉，然后状态就永远贴不上，而且不报错。
 
@@ -53,16 +53,16 @@ PROMPTS = {'planner': Path(__file__).parent / 'planner.txt',
            'agent': Path(__file__).parent / 'agent.txt'}
 DEFAULT_PORT = 8099          # 8080 在本机被 iptv 占了，别用
 CHATS_LIMIT = 50
-MESSAGES_LIMIT = 300         # v1 一次拉满，relay 的 get_messages 还不能翻页
+MESSAGES_LIMIT = 300         # v1 一次拉满，daemon 的 get_messages 还不能翻页
 RPC_TIMEOUT = 15.0
 MEDIA_TIMEOUT = 60.0         # 第一次要现下（CDN 握手 + 拉字节），比普通 RPC 慢得多
-MEDIA_CONCURRENCY = 3        # 面板同时向 relay 要几个附件：relay 的 CDN 回退不持短链锁
+MEDIA_CONCURRENCY = 3        # 面板同时向 daemon 要几个附件：daemon 的 CDN 回退不持短链锁
 LOG_TAIL_BYTES = 256 * 1024  # 只看日志尾巴，不把整份读进内存
 
-# 语音转码的派生目录。**原始附件不在这里**——下载和保管都是 relay 的事，
+# 语音转码的派生目录。**原始附件不在这里**——下载和保管都是 daemon 的事，
 # bot 只按 msg_id 要字节；这里只放 SILK → WAV 的结果（浏览器放不了 SILK）
 DERIVED_MEDIA_DIR = Path(__file__).parent / 'media_cache' / 'derived'
-# 浏览器要的 content-type。relay 只回扩展名，这里转一下；认不出的一律当二进制
+# 浏览器要的 content-type。daemon 只回扩展名，这里转一下；认不出的一律当二进制
 MEDIA_TYPES = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
                '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
                '.mp4': 'video/mp4', '.wav': 'audio/wav', '.mp3': 'audio/mpeg',
@@ -88,7 +88,7 @@ CONFIG_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
                 'planner_rounds')),
     ('出站', ('send_interval', 'typo_rate', 'dry_run')),
     ('观测', ('trace_path',)),
-    ('改了要重启进程', ('relay_host', 'relay_port', 'relay_unix', 'admin_port', 'log_path', 'log_level',
+    ('改了要重启进程', ('daemon_host', 'daemon_port', 'daemon_unix', 'admin_port', 'log_path', 'log_level',
                     'describe_media', 'media_cache_path', 'describe_concurrency', 'describe_timeout',
                     'describe_max_tokens', 'describe_history_limit', 'profile_path', 'habit_path',
                     'moment_path', 'emoji_path', 'scope_path', 'moment_batch', 'persona_path')),
@@ -207,7 +207,7 @@ def _quote(content: str, kind) -> dict | None:
 def _silk_to_wav(data: bytes, msg_id: str) -> bytes:
     """ 微信语音是 SILK，浏览器放不了，转成 24k 单声道 WAV 并缓存。
 
-    输入是字节（附件归 relay 管），转码结果落 bot 自己的派生目录。
+    输入是字节（附件归 daemon 管），转码结果落 bot 自己的派生目录。
     pilk 是可选依赖，缺了就让面板回退到文字（外面会包成 500，前端 onerror 接住）。
     """
     wav = DERIVED_MEDIA_DIR / f'{msg_id}.wav'
@@ -225,7 +225,7 @@ def _silk_to_wav(data: bytes, msg_id: str) -> bytes:
 
 
 class DecisionLog:
-    """ 状态元数据的窄表（`admin.db`）。**只存元数据，不存正文**——正文的事实源是 relay。
+    """ 状态元数据的窄表（`admin.db`）。**只存元数据，不存正文**——正文的事实源是 daemon。
 
     为什么需要它：放行率 / 沉默率这类统计需要分母，而 `reply_trace` 只记
     「走到模型的那一轮」——门控拦下的、出站失败的都没有。
@@ -280,8 +280,8 @@ class Admin:
         self.port = port
         self.dotenv = DOTENV_PATH      # 自检里会换成临时文件
         self.decisions = DecisionLog(sidecar)
-        # 面板一次刷一堆图，不能把它们同时全砸给 relay（它的 CDN 回退那次握手的
-        # 并发保护有已知缺口）。这里限一下，顺便不让附件把模型的 relay 调用挤掉
+        # 面板一次刷一堆图，不能把它们同时全砸给 daemon（它的 CDN 回退那次握手的
+        # 并发保护有已知缺口）。这里限一下，顺便不让附件把模型的 daemon 调用挤掉
         self._media_gate = threading.Semaphore(MEDIA_CONCURRENCY)
         self.server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -343,19 +343,19 @@ class Admin:
         }
 
     def health(self) -> dict:
-        """ 健康状态卡。relay 那项要走一次 RPC，可能慢——所以单开一个接口。 """
+        """ 健康状态卡。daemon 那项要走一次 RPC，可能慢——所以单开一个接口。 """
         runtime = self.runtime
         now = time.time()
-        relay: dict = {'ok': False}
+        daemon: dict = {'ok': False}
         try:
             status = self.call(self._wechat.status(), timeout=5.0)
-            relay = {'ok': True,
+            daemon = {'ok': True,
                      'wxid': status.get('wxid', ''), 'nickname': status.get('nickname', ''),
                      'uin': status.get('uin')}
-        except Exception as e:  # noqa: BLE001 —— relay 挂了也要能把面板打开
-            # 带上类型名：`str(TimeoutError())` 是空串，面板就会显示“relay 取不到状态”却什么都
+        except Exception as e:  # noqa: BLE001 —— daemon 挂了也要能把面板打开
+            # 带上类型名：`str(TimeoutError())` 是空串，面板就会显示“daemon 取不到状态”却什么都
             # 说不出来——那正是最难查的一种失败
-            relay['error'] = f'{type(e).__name__}: {e}'
+            daemon['error'] = f'{type(e).__name__}: {e}'
 
         focus = [{'chat': chat, 'rounds': session.rounds, 'reason': session.reason,
                   'idle_left': max(0.0, runtime.focus.idle - (now - session.last_message)),
@@ -363,7 +363,7 @@ class Admin:
                  for chat, session in runtime.focus.sessions.items()]
         bot = runtime.bot
         return {
-            'relay': relay,
+            'daemon': daemon,
             'focus': focus,
             'focus_counts': {'entered': runtime.focus.entered, 'exited': runtime.focus.exited},
             'backoff': {chat: round(left, 1) for chat, left in runtime.backoff.pending(now).items()},
@@ -380,7 +380,7 @@ class Admin:
 
     def chats(self) -> list[dict]:
         out = []
-        # 启动竞态专用短超时：relay 还没 load_context 时这个 RPC 会一直挂到 15s，
+        # 启动竞态专用短超时：daemon 还没 load_context 时这个 RPC 会一直挂到 15s，
         # 让首次打开的面板白屏 15 秒。正常一次也就几百毫秒
         for chat in self.call(self._wechat.conversations(limit=CHATS_LIMIT), timeout=5.0):
             peer = getattr(chat, 'peer', '')
@@ -405,15 +405,15 @@ class Admin:
 
     def messages(self, chat: str, limit: int = MESSAGES_LIMIT,
                  before: int = 0, after: int = 0) -> dict:
-        """ 会话历史（分页）。`before`/`after` 是 relay 的 `messages.id` 游标。
+        """ 会话历史（分页）。`before`/`after` 是 daemon 的 `messages.id` 游标。
 
         返回 {'messages': [...], 'has_more': bool}。has_more 靠「满页 = 可能还有」近似，
-        relay 的 get_messages 不把 has_more 透给 SDK——测到不够再给 SDK 加。
+        daemon 的 get_messages 不把 has_more 透给 SDK——测到不够再给 SDK 加。
         """
         if not chat:
             return {'messages': [], 'has_more': False}
         raw = self.call(self._wechat.messages(chat, limit=limit, before_id=before, after_id=after))
-        # relay 的 sender_display_name 查不到时会拿 wxid 当名字，那不是名字。
+        # daemon 的 sender_display_name 查不到时会拿 wxid 当名字，那不是名字。
         # 只对真正拿不到的那几个查（查到的会缓存），不是每条都查
         unknown = [m.sender for m in raw
                    if not m.is_self and m.sender and m.sender_display_name == m.sender]
@@ -423,7 +423,7 @@ class Admin:
 
     def _row(self, msg, names: dict[str, str] | None = None) -> dict | None:
         kind = MessageKind.of(msg.msg_type)
-        # 设备同步(51)/系统消息不该进聊天记录，而 relay 的 exclude_system 只排
+        # 设备同步(51)/系统消息不该进聊天记录，而 daemon 的 exclude_system 只排
         # 10000/10002——实测 51 有 34 条挂在群里，必须自己滤掉
         if kind in SYSTEM_KINDS or kind is MessageKind.OTHER:
             return None
@@ -444,7 +444,7 @@ class Admin:
         own = bus.status_of(msg.msg_id)
         reply = bus.progress_of(msg.msg_id)
         return {
-            'cursor': (msg.raw_data or {}).get('id'),      # relay 自增 id，翻页用
+            'cursor': (msg.raw_data or {}).get('id'),      # daemon 自增 id，翻页用
             'msg_id': str(msg.msg_id),                     # 身份键，字符串
             'ts': msg.create_time,
             'sender': ('我' if msg.is_self else '') or (names or {}).get(msg.sender) \
@@ -467,11 +467,11 @@ class Admin:
     def media(self, msg_id: str) -> tuple[bytes, str]:
         """ 取一条消息的附件字节，返回 (data, content-type)。
 
-        附件由 relay 下载和保管（它认得 CDN blob，也有自己的磁盘缓存）；bot 只按
+        附件由 daemon 下载和保管（它认得 CDN blob，也有自己的磁盘缓存）；bot 只按
         msg_id 要字节，不关心它存在哪。
         """
         if not msg_id.isdigit():
-            raise ValueError(f'msg_id 必须是 relay 的整数 id：{msg_id!r}')
+            raise ValueError(f'msg_id 必须是 daemon 的整数 id：{msg_id!r}')
         with self._media_gate:
             data, ext = self.call(self._wechat.media_bytes_by_id(int(msg_id)), timeout=MEDIA_TIMEOUT)
         ext = ext.lower()
@@ -861,7 +861,7 @@ _STARTED_AT = time.time()
 
 
 def _self_check() -> None:
-    """ 不连 relay 的自检：拿假 runtime 把「渲染 + 贴状态 + 路由」这条链走通。 """
+    """ 不连 daemon 的自检：拿假 runtime 把「渲染 + 贴状态 + 路由」这条链走通。 """
     import tempfile
     import types
 
@@ -999,7 +999,7 @@ def _self_check() -> None:
     link = admin._row(msg(49, '<msg><appmsg><title>一篇文章</title><type>5</type></appmsg></msg>'))
     assert link['quote'] is None, link
 
-    # 附件接口：relay 下载并保管 → bot 只要字节 → 带 content-type 吐给浏览器
+    # 附件接口：daemon 下载并保管 → bot 只要字节 → 带 content-type 吐给浏览器
     async def fake_media_bytes(msg_id):
         return b'\xff\xd8\xff\x00', 'jpg'
 
@@ -1019,9 +1019,9 @@ def _self_check() -> None:
     # 日志尾巴：文件不存在返回空
     assert admin.log_tail() == []
 
-    # 健康卡：relay 拿不到也要能出结果（loop 是 None，会抛 → 被兜住）
+    # 健康卡：daemon 拿不到也要能出结果（loop 是 None，会抛 → 被兜住）
     health = admin.health()
-    assert health['relay']['ok'] is False and 'error' in health['relay']
+    assert health['daemon']['ok'] is False and 'error' in health['daemon']
     assert health['focus'][0]['chat'] == '测试群' and health['backoff'] == {'测试群': 12.0}
     assert health['emojis']['sendable'] == 4 and health['moments'] == 7
 
@@ -1066,17 +1066,17 @@ def _self_check() -> None:
     flat = {item['name']: item for group in admin.read_config()['groups'] for item in group['items']}
     assert flat['deepseek_key']['secret'] and flat['deepseek_key']['value'] == ''
     assert flat['deepseek_key']['isset'] is False        # Config() 默认 key 是空
-    assert flat['typo_rate']['hot'] and not flat['relay_port']['hot']
+    assert flat['typo_rate']['hot'] and not flat['daemon_port']['hot']
 
     # 写回 .env：先校验 → 原子写 → 保留注释 → 报出要重启的字段
     with tempfile.TemporaryDirectory() as tmp:
         admin.dotenv = Path(tmp) / '.env'
         admin.dotenv.write_text('# 注释\nTYPO_RATE=0.08\n', encoding='utf-8')
-        out = admin.write_config({'typo_rate': '0', 'relay_port': '9999'})
-        assert out['changed'] == {'typo_rate': '0.0', 'relay_port': '9999'}, out
-        assert out['stale'] == ['relay_port'], out
+        out = admin.write_config({'typo_rate': '0', 'daemon_port': '9999'})
+        assert out['changed'] == {'typo_rate': '0.0', 'daemon_port': '9999'}, out
+        assert out['stale'] == ['daemon_port'], out
         written = admin.dotenv.read_text(encoding='utf-8')
-        assert '# 注释' in written and 'TYPO_RATE=0' in written and 'RELAY_PORT=9999' in written
+        assert '# 注释' in written and 'TYPO_RATE=0' in written and 'DAEMON_PORT=9999' in written
 
         # 坏值：一个字都不能写（否则下次启动直接起不来）
         try:

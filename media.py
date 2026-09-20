@@ -19,10 +19,10 @@ class Media:
     description: str | None = None
     # 源 XML 里有没有**明文可下载的 URL**。
     #
-    # 为什么要先判这个：relay 的 `download_message` 只认 `cdnurl`/`cdnurlbigimg` 里的
+    # 为什么要先判这个：daemon 的 `download_message` 只认 `cdnurl`/`cdnurlbigimg` 里的
     # 明文 URL。而入站图片的 XML 里只有 `cdnbigimgurl`/`cdnmidimgurl`
     # 那种**加密 fileid**（`305f0201...`）——实测 30 张图片 30 张没有 cdnurl。
-    # 拿不到就别去试：每次尝试都是一次注定失败的 RPC + relay 一条 WARN 日志。
+    # 拿不到就别去试：每次尝试都是一次注定失败的 RPC + daemon 一条 WARN 日志。
     downloadable: bool = False
     size: int = 0            # 字节数（图片/语音/视频都能从 XML 里读到）
     duration: int = 0        # 秒（语音/视频）
@@ -67,7 +67,7 @@ def is_placeholder(text: str) -> bool:
 
 
 def strip_prefix(content: str) -> str:
-    """ relay 有时在 XML 前拼一行 'wxid_xxx:'，截到第一个 '<'。 """
+    """ daemon 有时在 XML 前拼一行 'wxid_xxx:'，截到第一个 '<'。 """
     start = content.find('<')
     return content[start:] if start > 0 else content
 
@@ -131,14 +131,14 @@ def parse_emoji_description(content: str) -> str | None:
     return text or None
 
 
-# relay 的 `cdn::find_attr` 找的是**字面量** `cdnurl="`（等号两边不能有空格），
+# daemon 的 `cdn::find_attr` 找的是**字面量** `cdnurl="`（等号两边不能有空格），
 # 所以这里必须跟它**一样严格**，否则就是一次次注定失败的 RPC。
 #
 # 实测群里 19 条带 cdnurl 的表情，15 条写的是 `cdnurl = "http...`（另一种客户端的
-# XML 风格），relay 看不见 → 报「无 cdnurl」。等 relay 把 find_attr 改成容忍空格之后，
+# XML 风格），daemon 看不见 → 报「无 cdnurl」。等 daemon 把 find_attr 改成容忍空格之后，
 # 这里也要跟着放宽（见 notes/未完成.md）。
 # 表情/图片 XML 里的明文 http 直链。等号两边允许空白：客户端确实会写成 `cdnurl = "…"`，
-# relay 的 `cdn::find_attr` 也得认这种写法（两边口径必须一致，否则识图会白排一次必失败的下载）
+# daemon 的 `cdn::find_attr` 也得认这种写法（两边口径必须一致，否则识图会白排一次必失败的下载）
 PLAIN_URL = re.compile(r'cdnurl\s*=\s*"https?://')
 
 
@@ -158,7 +158,7 @@ def parse_media(content: str) -> Media | None:
 
 
 def parse_voice(content: str) -> Media | None:
-    """ 语音（msg_type=34）。字节拿不到（relay 不存），但**时长在 XML 里**，
+    """ 语音（msg_type=34）。字节拿不到（daemon 不存），但**时长在 XML 里**，
     微信自己也只显示时长。 """
     if '<voicemsg' not in content:
         return None
@@ -257,7 +257,7 @@ def render(msg_type: int, content: str, text: str) -> tuple[str, Media | None]:
 
 
 if __name__ == '__main__':
-    # 自检：真实 relay 数据的 desc（含多语言条目），以及各种解析失败的兜底
+    # 自检：真实 daemon 数据的 desc（含多语言条目），以及各种解析失败的兜底
     assert parse_emoji_description('<msg><emoji desc="ChEKB2RlZmF1bHQSBuWVp+WVpw==" /></msg>') == '啧啧'
     assert parse_emoji_description('<msg><emoji desc="ChEKB2RlZmF1bHQSBuaRiuWAkg==" /></msg>') == '摊倒'
     assert parse_emoji_description(
@@ -285,13 +285,13 @@ if __name__ == '__main__':
     assert enc.downloadable is False, enc
     plain = parse_media('<msg><img md5="m" cdnurl="http://wxapp.tc.qq.com/x" /></msg>')
     assert plain.downloadable is True and plain.describable is True, plain
-    # 带空格的写法 relay 现在也认，所以这里要认为能下（见 PLAIN_URL）
+    # 带空格的写法 daemon 现在也认，所以这里要认为能下（见 PLAIN_URL）
     spaced_dl = parse_media('<msg><img md5="m" cdnurl = "http://x" /></msg>')
     assert spaced_dl.downloadable is True, spaced_dl
     # 表情：有 cdnurl 的才值得排识图；带 desc 的本来就不用描述
     sticker = parse_media('<msg><emoji md5="m" cdnurl="http://x" /></msg>')
     assert sticker.downloadable is True and sticker.describable is True
-    # 带空格的写法和 relay 的宽容口径对齐——两边不一致会白跑一次必失败的 RPC
+    # 带空格的写法和 daemon 的宽容口径对齐——两边不一致会白跑一次必失败的 RPC
     spaced = parse_media('<msg><emoji md5="m" cdnurl = "http://x" /></msg>')
     assert spaced.downloadable is True, spaced
     tagged = parse_media('<msg><emoji md5="m" desc="ChEKB2RlZmF1bHQSBuWVp+WVpw==" cdnurl="http://x" /></msg>')

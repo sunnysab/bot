@@ -1,4 +1,4 @@
-""" Wechat 适配层自检：不连 relay，用 stub 替换 SDK 客户端。 """
+""" Wechat 适配层自检：不连 daemon，用 stub 替换 SDK 客户端。 """
 
 import types
 import unittest
@@ -27,7 +27,7 @@ class FakeBot:
         self.sent: list[dict] = []
         self.contact_calls: list[str] = []
         self.wxid = 'wxid_me'
-        # 实测 relay 查不到群成员时是拿 wxid 当名字返回的；置空模拟这种情况
+        # 实测 daemon 查不到群成员时是拿 wxid 当名字返回的；置空模拟这种情况
         self.group_card = 'AliceGroupCard'
         self.contacts = {'wxid_alice': 'Alice', '456@chatroom': '一起哈啤'}
 
@@ -95,7 +95,7 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
 
     async def test_get_recent_sessions_filters_non_contacts(self):
         sessions = await self.wechat.get_recent_sessions(3)
-        # wxid_me = 自己（relay 的 device-sync 会按 peer 分出一个和自己聊的假会话）
+        # wxid_me = 自己（daemon 的 device-sync 会按 peer 分出一个和自己聊的假会话）
         self.assertEqual(sessions, ['456@chatroom', 'wxid_bob'])
         # 公众号会占满会话列表，必须多取一批再过滤
         self.assertGreater(self.wechat._bot.requested_limit, 3)
@@ -125,8 +125,8 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
         await self.wechat.send_text('你好', '456@chatroom')
         self.assertEqual(self.wechat._bot.sent, [])
 
-    async def test_member_name_falls_back_when_relay_returns_wxid(self):
-        """ relay 查不到群成员就返 wxid；那不是名字，得退到联系人表。 """
+    async def test_member_name_falls_back_when_daemon_returns_wxid(self):
+        """ daemon 查不到群成员就返 wxid；那不是名字，得退到联系人表。 """
         self.wechat._bot.group_card = ''
         name = await self.wechat.get_display_name('wxid_alice', '456@chatroom')
         self.assertEqual(name, 'Alice')
@@ -145,7 +145,7 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
     async def test_media_bytes_goes_through_plain_rpc(self):
         """ 附件走普通 RPC `get_media_bytes`，不走坏的 DL_OPEN 分块流。
 
-        分块流那条路：relay 的 DL_OPEN 分支按 RelayRequest（action + params）解包，
+        分块流那条路：daemon 的 DL_OPEN 分支按 DaemonRequest（action + params）解包，
         而 SDK 只塞了 params，解不出就被 unwrap_or_default() 吞掉，最后报 400
         「缺少 msg_id」——那个报错和真实原因（图片没有 cdnurl）完全无关。
         """
@@ -159,13 +159,13 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raw, b'\xff\xd8\xff\xe0')
         self.assertEqual(self.calls, [('get_media_bytes', {'msg_id': 777})])
 
-        # relay 说没内容时要报得诚实，而不是拿一个空字节流充数
+        # daemon 说没内容时要报得诚实，而不是拿一个空字节流充数
         self.reply = {'filename': 'x', 'size': 0}
         with self.assertRaises(ValueError):
             await self.wechat.media_bytes(make_message(msg_id=778))
 
     async def test_media_bytes_by_id_returns_ext(self):
-        """ 面板要的是 (字节, 扩展名)，附件仍由 relay 保管。 """
+        """ 面板要的是 (字节, 扩展名)，附件仍由 daemon 保管。 """
         import base64
 
         self.wechat._bot.call = self._call
@@ -175,7 +175,7 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((data, ext), (b'GIF89a', 'gif'))
 
     async def test_message_pagination_cursors_are_passed_through(self):
-        """ 面板翻页要用 relay 的 messages.id 游标，不能拿 64 位 msg_id 比大小。 """
+        """ 面板翻页要用 daemon 的 messages.id 游标，不能拿 64 位 msg_id 比大小。 """
         await self.wechat.messages('456@chatroom', limit=50, before_id=99)
         self.assertEqual(self.wechat._bot.page,
                          {'limit': 50, 'before_id': 99, 'after_id': None})

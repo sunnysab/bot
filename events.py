@@ -1,12 +1,12 @@
 """ 事件总线：把消息处理过程中的状态变化广播给管理后台。
 
-只传**元数据**，不传正文——正文的事实源是 relay 的 messages 表，
+只传**元数据**，不传正文——正文的事实源是 daemon 的 messages 表，
 这里只回答「这条消息现在到哪一步了、跳过的原因是什么」。
 设计见 notes/管理后台设计.md。
 
 两条硬规矩：
 1. **publish 整体吞异常。** 后台坏掉绝不能影响聊天（和 reply_trace.py 一个原则）。
-2. **msg_id 一律存字符串。** relay 的 server_id 是 64 位整数（实测 985 条里 958 条
+2. **msg_id 一律存字符串。** daemon 的 server_id 是 64 位整数（实测 985 条里 958 条
    超过 JS 安全整数 2^53），当数字过 JSON 会被 JS 悄悄改掉，然后状态就永远贴不上，
    而且不报错。转字符串是这条链上唯一可靠的时刻。
 
@@ -74,12 +74,12 @@ class Event:
     """ 一次状态变化。
 
     :param seq: 单调递增，面板轮询的游标就是它
-    :param msg_id: 事件主体的身份键，**字符串**。入站用 relay 的 msg_id；
-                   出站要等 relay 发出去之后才有；演习模式的出站永远是空
+    :param msg_id: 事件主体的身份键，**字符串**。入站用 daemon 的 msg_id；
+                   出站要等 daemon 发出去之后才有；演习模式的出站永远是空
     :param reply_to: 这条事件属于哪条消息。出站还没拿到自己的 msg_id 时
                      （queued / typing）靠它挂到被回复的那条入站消息上
     :param origin: '' / 'bot' / 'phone'
-    :param text: 只有演习模式的出站才带正文——那条回复没进历史、也没进 relay，
+    :param text: 只有演习模式的出站才带正文——那条回复没进历史、也没进 daemon，
                  不带就彻底没人看得见
     """
 
@@ -125,7 +125,7 @@ class EventBus:
         # 长跑时 msg_id 只增不减，无界字典就是一个慢慢涨的内存泄漏
         self._latest: OrderedDict[str, Event] = OrderedDict()
         # 被回复的消息 msg_id -> 那个回复最近到哪一步了。
-        # 出站要等 relay 收下才有自己的身份，所以回复的进度挂在被回复的那条上
+        # 出站要等 daemon 收下才有自己的身份，所以回复的进度挂在被回复的那条上
         self._by_reply: OrderedDict[str, Event] = OrderedDict()
         # 每条事件都要跑一遍的回调（落盘用）。同步调用，自己负责快
         self._subscribers: list = []

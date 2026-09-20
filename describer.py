@@ -99,7 +99,7 @@ class MediaDescriber:
     def _warn_once(self, key: str, message: str) -> None:
         """ 同一类失败只警告一次。
 
-        图片在这套 relay 下**永远**下不下来（XML 里只有加密 fileid、没有 cdnurl），
+        图片在这套 daemon 下**永远**下不下来（XML 里只有加密 fileid、没有 cdnurl），
         每张都刷一条 warning 会把日志冲掉，真正要看的东西反而找不着。
         """
         if key in self._warned:
@@ -263,7 +263,7 @@ if __name__ == '__main__':
         broken.record(hot)
 
         async def boom():
-            raise RuntimeError('relay 挂了')
+            raise RuntimeError('daemon 挂了')
 
         safe = EmojiDescriber(FakeAi(), broken, model='m')
         safe.schedule(hot, boom)

@@ -75,8 +75,8 @@ class TestRuntimeReload(unittest.TestCase):
         self.assertIs(self.runtime.chat_plugin.emoji_policy, self.runtime.emoji_policy)
 
     def test_apply_reports_fields_that_need_a_process_restart(self):
-        stale = self.runtime.apply(replace(self.runtime.config, relay_port=1234, typo_rate=0.0))
-        self.assertEqual(stale, ['relay_port'])      # 热重载管不着传输层
+        stale = self.runtime.apply(replace(self.runtime.config, daemon_port=1234, typo_rate=0.0))
+        self.assertEqual(stale, ['daemon_port'])      # 热重载管不着传输层
 
     def test_dry_run_toggle_reaches_both_objects(self):
         """ 演习开关：Bot 决定写不写历史/发不发事件，Wechat 决定真发还是只打日志。 """

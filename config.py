@@ -51,10 +51,10 @@ def _quote(value: str) -> str:
 class Config:
     """ 运行配置。全部来自环境变量，启动时一次性读取。 """
 
-    relay_host: str = '127.0.0.1'
-    relay_port: int = 9099
-    # 走 Unix domain socket 时填写（如 /tmp/weixin-relay.sock），否则留空走 TCP
-    relay_unix: str = ''
+    daemon_host: str = '127.0.0.1'
+    daemon_port: int = 9099
+    # 走 Unix domain socket 时填写（如 /tmp/weixin-daemon.sock），否则留空走 TCP
+    daemon_unix: str = ''
     deepseek_key: str = ''
     deepseek_model: str = 'deepseek-flash'
     # 主模型的服务地址，可指向第三方 OpenAI 兼容服务（更便宜的代理/中转）
@@ -169,10 +169,10 @@ class Config:
 if __name__ == '__main__':
     # 自检：无环境变量时用默认值，有环境变量时覆盖
     base = Config.from_env()
-    assert base.relay_port == 9099 and base.send_interval == 1.0 and base.deepseek_key == '', base
-    os.environ.update(RELAY_PORT='9098', SEND_INTERVAL='2.5', DEEPSEEK_KEY='k')
+    assert base.daemon_port == 9099 and base.send_interval == 1.0 and base.deepseek_key == '', base
+    os.environ.update(DAEMON_PORT='9098', SEND_INTERVAL='2.5', DEEPSEEK_KEY='k')
     overridden = Config.from_env()
-    assert overridden.relay_port == 9098, overridden
+    assert overridden.daemon_port == 9098, overridden
     assert overridden.send_interval == 2.5, overridden
     assert overridden.deepseek_key == 'k', overridden
     # 专注模式与错别字可以从环境变量调

@@ -102,7 +102,7 @@
 <body>
 <header>
   <b id="who">…</b>
-  <span><span class="dot" id="relaydot"></span><span id="relay">relay</span></span>
+  <span><span class="dot" id="daemondot"></span><span id="daemon">daemon</span></span>
   <span id="counts" style="color:var(--dim)"></span>
   <span class="badge" id="drybadge" style="display:none">演习模式</span>
   <button id="drybtn">演习模式</button>
@@ -174,7 +174,7 @@ const post = async (u, body) => (await fetch(u, {method:'POST', headers:{'Conten
 
 let since = 0, current = null, currentName = '', reloading = false, selected = null;
 let chats = [], tab = 'trace';
-// 当前已加载消息的 relay 游标（messages.id，不是 64 位 msg_id）：翻页和增量都靠它
+// 当前已加载消息的 daemon 游标（messages.id，不是 64 位 msg_id）：翻页和增量都靠它
 let oldest = 0, newest = 0;
 
 function chip(status, detail){
@@ -195,12 +195,12 @@ function mediaBody(r){
                  onclick="window.open(this.src)">${cap}`;
   }
   if(m.kind === 'voice'){
-    // preload=none：不点开就不去 relay 要字节（语音要现下+转码，慢）
+    // preload=none：不点开就不去 daemon 要字节（语音要现下+转码，慢）
     return `<audio controls preload="none" src="${url}" ${fb}></audio>
             <div class="detail">${esc(r.text)}</div>`;
   }
   if(m.kind === 'video'){
-    // relay 已支持 CDN 帧下视频（filetype=4）；preload=none 理由同语音
+    // daemon 已支持 CDN 帧下视频（filetype=4）；preload=none 理由同语音
     return `<video class="media" controls preload="none" src="${url}" ${fb}></video>`;
   }
   // 其它：老实留文字
@@ -238,8 +238,8 @@ async function loadChats(){
          <span class="allow ${c.allowed?'on':''}" title="允许回复" data-on="${c.allowed?1:0}">${c.allowed?'✓':'✕'}</span>
        </span></div>
        <div class="l">${c.allowed?'':'<span class="tag">🔇不回</span>'}${c.focus?'<span class="tag">🎯专注</span>':''}${esc(c.last)}</div>
-     </div>`).join('') || '<div class="empty">没有会话（relay 可能还没起）</div>';
-  // ponytail: relay 比面板起得慢（要 load_context），空了就 3s 重试，自愈
+     </div>`).join('') || '<div class="empty">没有会话（daemon 可能还没起）</div>';
+  // ponytail: daemon 比面板起得慢（要 load_context），空了就 3s 重试，自愈
   if(!chats.length) setTimeout(loadChats, 3000);
   document.querySelectorAll('.chat').forEach(el => {
     const box = el.querySelector('.allow');
@@ -270,7 +270,7 @@ async function loadMessages(){
   reloading = true;
   const data = await get(`/api/messages?chat=${encodeURIComponent(chat)}&limit=300`);
   reloading = false;
-  // 后台 500（多半是 relay RPC 超时：启动时识图/下载会把 RPC 排队）。以前这里对
+  // 后台 500（多半是 daemon RPC 超时：启动时识图/下载会把 RPC 排队）。以前这里对
   // undefined 取 .length 直接抛异常，抛完 #stream 就永远停在「左边选一个会话」= 视图卡死
   if(!data.messages){
     $('#stream').innerHTML = `<div class="empty">消息没取到：${esc(data.error||'后台没响应')}（2 秒后重试）</div>`;
@@ -338,7 +338,7 @@ async function poll(){
     since = seq;
     let stale = false;
     for(const e of events){
-      // 出站事件靠 reply_to 挂在被回复的那条上（relay 要发出去才有出站的身份）
+      // 出站事件靠 reply_to 挂在被回复的那条上（daemon 要发出去才有出站的身份）
       if(e.reply_to) patch(e.reply_to, e.status, e.detail, 'reply');
       if(e.msg_id) patch(e.msg_id, e.status, e.detail, 'own');
       if(e.chat_id === current && (e.status==='received' || e.status==='phone')) stale = true;
@@ -346,7 +346,7 @@ async function poll(){
     if(stale && !reloading) loadNew();
     $('#seq').textContent = '事件 #' + seq;
     if(selected) showPanel();          // 抽屉开着就跟着最新状态走
-  }catch(err){ $('#relay').textContent = '管理后台断开'; }
+  }catch(err){ $('#daemon').textContent = '管理后台断开'; }
 }
 
 async function state(){
@@ -362,13 +362,13 @@ async function state(){
 async function health(){
   let h;
   try{ h = await get('/api/health'); }catch(e){ h = null; }
-  if(!h || !h.relay){ $('#panel-health').innerHTML = '<div class="empty">健康检查失败</div>'; return; }
-  const dot = $('#relaydot'), lbl = $('#relay');
-  dot.className = 'dot ' + (h.relay.ok ? 'ok' : 'bad');
-  lbl.textContent = h.relay.ok ? `${h.relay.nickname}（relay 正常）` : 'relay 取不到状态';
+  if(!h || !h.daemon){ $('#panel-health').innerHTML = '<div class="empty">健康检查失败</div>'; return; }
+  const dot = $('#daemondot'), lbl = $('#daemon');
+  dot.className = 'dot ' + (h.daemon.ok ? 'ok' : 'bad');
+  lbl.textContent = h.daemon.ok ? `${h.daemon.nickname}（daemon 正常）` : 'daemon 取不到状态';
   const kv = o => Object.entries(o).map(([k,v]) => `<span>${esc(k)}</span><span>${esc(JSON.stringify(v))}</span>`).join('');
   $('#panel-health').innerHTML = `
-    <h3>relay</h3><div class="kv">${kv(h.relay)}</div>
+    <h3>daemon</h3><div class="kv">${kv(h.daemon)}</div>
     <h3>专注会话（进 ${h.focus_counts.entered} / 出 ${h.focus_counts.exited}）</h3>
     <div class="kv">${h.focus.length ? h.focus.map(f =>
       `<span>${esc(f.chat)}</span><span>${f.rounds} 轮 · ${esc(f.reason)} · 空闲 ${Math.round(f.idle_left)}s / 上限 ${Math.round(f.max_left)}s</span>`).join('') : '<span>无</span><span></span>'}</div>

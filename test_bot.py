@@ -1,4 +1,4 @@
-""" Bot 编排自检：决策入队、stop 语义、静音、手机上自己发的消息只记不回。不连 relay。 """
+""" Bot 编排自检：决策入队、stop 语义、静音、手机上自己发的消息只记不回。不连 daemon。 """
 
 import asyncio
 import random
@@ -13,8 +13,8 @@ from emojis import Emoji, EmojiLibrary
 from media import Media, render
 from plugin import EndProcessing, Plugin, RepeatPlugin, Reply
 
-# relay 回的 server_id：真实量级是 19 位，故意用超过 JS 安全整数 2^53 的值
-RELAY_MSG_ID = 4212345678901234567
+# daemon 回的 server_id：真实量级是 19 位，故意用超过 JS 安全整数 2^53 的值
+DAEMON_MSG_ID = 4212345678901234567
 
 
 class FakeWechat:
@@ -47,7 +47,7 @@ class FakeWechat:
 
     async def send_emoji(self, emoji, receiver):
         self.emojis_sent.append((receiver, emoji.md5))
-        return {'sent': True, 'msg_id': RELAY_MSG_ID}
+        return {'sent': True, 'msg_id': DAEMON_MSG_ID}
 
     @property
     def wxid(self) -> str:
@@ -59,10 +59,10 @@ class FakeWechat:
             raise RuntimeError('解析长链 newsendmsg 响应失败: invalid data: unsupported wiretype 7')
         self.sent.append((receiver, text))
         self.refs.append(ref_svrid)
-        return {'sent': True, 'msg_id': RELAY_MSG_ID}
+        return {'sent': True, 'msg_id': DAEMON_MSG_ID}
 
     async def media_bytes(self, msg):
-        """ 附件下载。默认拉不下来——这套 relay 下的图片就是拉不下来。
+        """ 附件下载。默认拉不下来——这套 daemon 下的图片就是拉不下来。
 
         要测成功的路径就往 FakeWechat.image 里塞字节。
         """
@@ -75,7 +75,7 @@ class FakeWechat:
         """ 语音转写。默认返回空（= 转写失败），测成功的路径就设 self.transcript。 """
         self.voices.append(msg.msg_id)
         if self.transcript is None:
-            raise RuntimeError('语音转写失败: relay 拒绝：dry_run=true')
+            raise RuntimeError('语音转写失败: daemon 拒绝：dry_run=true')
         return self.transcript
 
     async def get_display_name(self, wxid, chatroom=''):
@@ -94,7 +94,7 @@ class FakePlugin(Plugin):
 
 def make_msg(text='hello', is_self=False, msg_type=1, create_time=None):
     return types.SimpleNamespace(msg_type=msg_type, content=text, clean_text=text, text=text, is_self=is_self,
-                                 msg_id=random.getrandbits(62),          # relay 的 server_id 是 64 位
+                                 msg_id=random.getrandbits(62),          # daemon 的 server_id 是 64 位
                                  reply_target='456@chatroom', sender_name='Alice', sender='wxid_alice',
                                  sender_display_name='Alice',
                                  create_time=int(time.time()) if create_time is None else create_time,
@@ -139,8 +139,8 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent.status, events.Status.SENT)
         self.assertEqual(sent.reply_to, str(msg.msg_id))     # 挂回被回复的那条
         self.assertEqual(sent.origin, 'bot')
-        # relay 回的 server_id 是 64 位整数，进事件流必须已经是字符串
-        self.assertEqual(sent.msg_id, str(RELAY_MSG_ID))
+        # daemon 回的 server_id 是 64 位整数，进事件流必须已经是字符串
+        self.assertEqual(sent.msg_id, str(DAEMON_MSG_ID))
         # 两个不同的问题：这条消息自己走到哪了 / 回复走到哪了
         self.assertEqual(events.bus.status_of(msg.msg_id).status, events.Status.RECEIVED)
         self.assertEqual(events.bus.progress_of(msg.msg_id).status, events.Status.SENT)
@@ -188,7 +188,7 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([r.text for r in self._window()], ['hello', 'hi'])
 
     async def test_send_failure_still_records_history(self):
-        """ relay 回执解析失败但消息已投递：不能重试，历史也要照写。 """
+        """ daemon 回执解析失败但消息已投递：不能重试，历史也要照写。 """
         self.bot.set_default_plugin(FakePlugin(texts=['hi', 'there']))
         self.bot._wechat.fail = True
         await self.bot.on_message(make_msg())
@@ -214,7 +214,7 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self._window()), 1)
 
     async def test_stale_backlog_is_recorded_but_not_answered(self):
-        """ relay 长链重连补推的离线积压：写进历史当上下文，但不触发回复。 """
+        """ daemon 长链重连补推的离线积压：写进历史当上下文，但不触发回复。 """
         self.bot.set_default_plugin(FakePlugin(texts=['hi']))
         await self.bot.on_message(make_msg(create_time=int(time.time()) - 3600))
         await asyncio.sleep(0.05)
@@ -274,7 +274,7 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
     async def test_mute_and_unmute(self):
         """ 管理后台的静音按钮。键是**显示名**，因为插件链就是按显示名分发的。 """
         self.bot.set_default_plugin(FakePlugin(texts=['hi']))
-        # 这个群在 relay 里叫「测试群」；插件链拿到的 source 就是显示名
+        # 这个群在 daemon 里叫「测试群」；插件链拿到的 source 就是显示名
         self.bot._wechat.names['456@chatroom'] = '测试群'
         self.assertFalse(self.bot.is_muted('测试群'))
 
@@ -463,7 +463,7 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
     async def test_repeat_happens_once_even_before_the_first_reply_is_sent(self):
         """复读一次后，即便那条回复还没真发出去，也不能再复读一次。
 
-        线上 bug：第二条队形触发复读、回复卡在出站队列里（relay RPC 还没回），第三条队形
+        线上 bug：第二条队形触发复读、回复卡在出站队列里（daemon RPC 还没回），第三条队形
         紧跟着进来；当时历史是发完才写的，复读机看不到自己刚复读过，就再跟一遍。
         """
         self.bot.outbox._typing_delay = lambda text: 0.3
@@ -538,7 +538,7 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
 
 
 class TestRevoke(unittest.IsolatedAsyncioTestCase):
-    """ 撤回：模型只说「撤哪条」，relay 要的 msg_id 由 Bot 记账解析。 """
+    """ 撤回：模型只说「撤哪条」，daemon 要的 msg_id 由 Bot 记账解析。 """
 
     async def asyncSetUp(self):
         self.bot = Bot('127.0.0.1', 9999, x_delay=0, send_interval=0)
@@ -561,7 +561,7 @@ class TestRevoke(unittest.IsolatedAsyncioTestCase):
         self.assertIn('在的 咋啦', [r.text for r in self.window()])
 
         result = await self.bot.revoke('456@chatroom', index=1)
-        self.assertEqual(self.bot._wechat.revoked, [('456@chatroom', RELAY_MSG_ID)])
+        self.assertEqual(self.bot._wechat.revoked, [('456@chatroom', DAEMON_MSG_ID)])
         self.assertIn('已撤回', result)
         # 撤了就得从上下文里抹掉，否则下一轮模型以为自己说过
         self.assertNotIn('在的 咋啦', [r.text for r in self.window()])
@@ -593,7 +593,7 @@ class TestRevoke(unittest.IsolatedAsyncioTestCase):
         self.assertIn('没有可撤回', result)
         self.assertEqual(self.bot._wechat.revoked, [])
 
-    async def test_relay_refusal_is_reported_verbatim(self):
+    async def test_daemon_refusal_is_reported_verbatim(self):
         await self.send(['在的'])
         self.bot._wechat.revoke_fail = True
         result = await self.bot.revoke('456@chatroom', index=1)
@@ -758,7 +758,7 @@ class TestEmojiStealing(unittest.IsolatedAsyncioTestCase):
         self._stock(count=1)
 
         async def boom(keyword, limit=10):
-            raise RuntimeError('relay 挂了')
+            raise RuntimeError('daemon 挂了')
 
         self.bot._wechat.search_emoji = boom
         found = await self.bot.search_emoji('摊倒')

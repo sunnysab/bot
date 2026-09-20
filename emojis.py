@@ -1,6 +1,6 @@
 """ 表情包：发一张表情所需的全部元数据。
 
-relay 的 send_emoji 要完整元数据（md5 + cdnurl + encrypturl + aeskey + len），
+daemon 的 send_emoji 要完整元数据（md5 + cdnurl + encrypturl + aeskey + len），
 而 search_emoji 返回的正好就是这个形状——**所以搜到的直接就能发**，
 不用像 MaiBot 那样拼 5x5 图再拿视觉模型挑。
 
@@ -115,7 +115,7 @@ class EmojiLibrary:
 
     @property
     def sendable_count(self) -> int:
-        """ 现在真能发出去的有几张——剩下的只是在等 relay 收到一次。 """
+        """ 现在真能发出去的有几张——剩下的只是在等 daemon 收到一次。 """
         return sum(1 for item in self._entries.values() if item.sendable)
 
     @property
@@ -215,7 +215,7 @@ class EmojiPolicy:
 
 @dataclass(frozen=True)
 class Emoji:
-    """ 一张表情。字段和 relay 的 EmojiItem 对齐。 """
+    """ 一张表情。字段和 daemon 的 EmojiItem 对齐。 """
 
     md5: str
     desc: str = ''
@@ -233,7 +233,7 @@ class Emoji:
     def sendable(self) -> bool:
         """ 能不能发出去。
 
-        只要 md5 + 下载地址。relay 发表情走 `/sendemoji`（CGI 68），服务端拿 md5 自己
+        只要 md5 + 下载地址。daemon 发表情走 `/sendemoji`（CGI 68），服务端拿 md5 自己
         补齐元数据，不需要本地有 len/aeskey——商店搜回来的那些（len 恒为 0）也能发。
         """
         return bool(self.md5 and self.cdnurl)
@@ -246,10 +246,10 @@ class Emoji:
             return '群里用过'
         return ''
 
-    def to_relay(self) -> dict[str, Any]:
-        """ relay 的 emoji 参数格式（字段名 len 不是 length）。
+    def to_daemon(self) -> dict[str, Any]:
+        """ daemon 的 emoji 参数格式（字段名 len 不是 length）。
 
-        热度和场景只在本地有意义，不发给 relay。
+        热度和场景只在本地有意义，不发给 daemon。
         """
         data = asdict(self)
         data['len'] = data.pop('length')
@@ -316,8 +316,8 @@ def _self_check() -> None:
     })
     assert emoji.sendable and emoji.desc == '高兴' and emoji.heat == '群里常用'
 
-    # 转回 relay 要的形状：字段名是 len，且不带上我们自己加的 count/scene
-    payload = emoji.to_relay()
+    # 转回 daemon 要的形状：字段名是 len，且不带上我们自己加的 count/scene
+    payload = emoji.to_daemon()
     assert payload['len'] == 348401 and 'length' not in payload and 'count' not in payload
     assert 'scene' not in payload
     assert payload['md5'].startswith('a56b') and payload['aeskey'].startswith('df54')
@@ -349,7 +349,7 @@ def _self_check() -> None:
     # 场景是给决策者看的，候选行里要带上
     assert Emoji(md5='x', desc='无语', scene='别人说了很离谱的话').render(3) == \
         '3. 无语｜别人说了很离谱的话'
-    assert 'scene' not in Emoji(md5='x', desc='无语', scene='s').to_relay()
+    assert 'scene' not in Emoji(md5='x', desc='无语', scene='s').to_daemon()
 
     # 描述拆解：不按格式来也不能丢
     assert parse_description('无语|别人说了很离谱的话，想吐槽又懒得打字的时候') == \

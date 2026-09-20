@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 
 class MessageKind(IntEnum):
-    """ 微信消息的语义分类。数值来自 relay，是全仓唯一一处 msg_type 映射。 """
+    """ 微信消息的语义分类。数值来自 daemon，是全仓唯一一处 msg_type 映射。 """
 
     OTHER = 0
     TEXT = 1
