@@ -72,7 +72,8 @@ export function Trace({ msgId, picked, tick }: Props) {
             <button onClick={() => replay('all')}>重放两步</button>
             <button onClick={() => replay('expressor')}>只重放表达</button>
           </div>
-          <pre>{out}</pre>
+          {/* 没重放过就不画这个框：`.drawer pre` 带边框，空着就是一个多余的空盒子 */}
+          {out && <pre>{out}</pre>}
         </>
       )}
     </>
