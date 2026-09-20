@@ -232,7 +232,7 @@ function row(r){
 async function loadChats(){
   ({chats = []} = await get('/api/chats'));
   $('#chats').innerHTML = chats.map(c =>
-    `<div class="chat ${c.chat_id===current?'on':''}" data-chat="${esc(c.chat_id)}">
+    `<div class="chat ${c.chat_id===current?'on':''}" data-chat="${esc(c.chat_id)}" data-name="${esc(c.name)}">
        <div class="n">${esc(c.name)}<span style="display:flex;gap:6px;align-items:center;flex:none">
          <em>${c.count||''}</em>
          <span class="allow ${c.allowed?'on':''}" title="允许回复" data-on="${c.allowed?1:0}">${c.allowed?'✓':'✕'}</span>
@@ -246,7 +246,9 @@ async function loadChats(){
     box.onclick = async e => {
       e.stopPropagation();                       // 别顺带把会话选中了
       const on = el.querySelector('.allow').dataset.on !== '1';
-      await post('/api/allow', {chat: el.dataset.chat, on});
+      // 「允许回复」名单的键是**显示名**（插件链按它分发），不是 peer id；
+      // 传 chat_id 会写进一条和读取对不上的记录，✓/✕ 于是显得“点了没反应”
+      await post('/api/allow', {chat: el.dataset.name, on});
       loadChats();
     };
     el.onclick = () => {
