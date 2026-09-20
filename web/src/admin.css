@@ -1,7 +1,9 @@
   :root{
-    --bg:#f5f6f8; --panel:#fff; --line:#e3e6ea; --fg:#1c1f23; --dim:#8b939c;
+    --bg:#ededed; --panel:#fff; --line:#e3e6ea; --fg:#1c1f23; --dim:#8b939c;
     --pending:#9aa4af; --replied:#2f9e6b; --skipped:#d9a825; --warn:#e08a2b;
     --failed:#d9534f; --phone:#4a86c8; --dry:#9b6dd6; --accent:#4a86c8;
+    /* 会话底比两边深一阶（微信就是这样），出站绿、入站白 */
+    --chat:#e4e4e6; --bubble:#fff; --bubble-out:#95ec69;
   }
   *{box-sizing:border-box}
   body{margin:0;font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
@@ -24,7 +26,9 @@
   #splitter{flex:none;width:6px;cursor:col-resize}
   #splitter:hover{background:var(--accent);opacity:.35}
   main.aside-off #chats,main.aside-off #splitter{display:none}
-  .chat{padding:8px 12px;border-bottom:1px solid var(--line);cursor:pointer;position:relative}
+  .chat{padding:8px 10px;border-bottom:1px solid var(--line);cursor:pointer;position:relative;
+        display:flex;gap:9px;align-items:flex-start}
+  .chat-body{flex:1;min-width:0}
   .chat:hover{background:#f0f3f6}
   .chat.on{background:#e8f1fb;box-shadow:inset 3px 0 0 var(--accent)}
   .chat .n{font-weight:600;display:flex;justify-content:space-between;gap:6px}
@@ -35,19 +39,44 @@
                font-size:12px;border:1px solid var(--line);color:var(--dim);cursor:pointer;
                background:#fff;user-select:none}
   .chat .allow.on{background:var(--replied);border-color:var(--replied);color:#fff}
-  .center{flex:1;display:flex;flex-direction:column;min-width:0}
+  .center{flex:1;display:flex;flex-direction:column;min-width:0;position:relative}
   .toolbar{padding:6px 14px;background:var(--panel);border-bottom:1px solid var(--line);
            display:flex;gap:8px;align-items:center;font-size:13px;flex-wrap:wrap}
   .toolbar .grow{flex:1}
-  section{flex:1;overflow:auto;padding:14px 18px;min-width:0}
-  .row{display:flex;margin-bottom:12px}
-  .row.out{justify-content:flex-end}
-  .bubble{max-width:min(660px,78%);background:var(--panel);border:1px solid var(--line);
-          border-radius:10px;padding:7px 11px;cursor:pointer}
-  .row.out .bubble{background:#e7f3ff;border-color:#cfe4f7}
-  .bubble:hover{border-color:var(--accent)}
-  .bubble.sel{box-shadow:0 0 0 2px rgba(74,134,200,.35)}
-  .who{font-size:12px;color:var(--dim);margin-bottom:2px}
+  /* 消息流单独包一层：左边给气泡区，右边浮动按钮定在这里（定在 #stream 上会跟着滚） */
+  .stream-wrap{flex:1;display:flex;min-height:0;position:relative}
+  section{flex:1;overflow:auto;padding:16px 20px;min-width:0;background:var(--chat)}
+  .av{flex:none;border-radius:4px;object-fit:cover;background:#dfe3e8}
+  .av.fallback{display:flex;align-items:center;justify-content:center;color:#fff;
+               font-size:15px;font-weight:500;user-select:none}
+  .row{display:flex;gap:10px;align-items:flex-start;margin-bottom:14px}
+  .row.out{flex-direction:row-reverse}
+  .bubble{max-width:min(560px,66%);background:var(--bubble);border:1px solid transparent;
+          border-radius:6px;padding:8px 11px;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+  .row.out .bubble{background:var(--bubble-out)}
+  .bubble:hover{filter:brightness(.98)}
+  .bubble.sel{box-shadow:0 0 0 2px rgba(74,134,200,.45)}
+  /* 跳过来的那条闪一下，不然滚到位了也不知道看哪儿 */
+  .row.jump .bubble{animation:jump 1.6s ease-out}
+  @keyframes jump{0%,55%{box-shadow:0 0 0 3px rgba(74,134,200,.6)}100%{box-shadow:0 0 0 3px rgba(74,134,200,0)}}
+  .who{font-size:11.5px;color:var(--dim);margin-bottom:2px}
+  .row.out .who{color:rgba(28,31,35,.6)}
+  /* 时间分隔：相邻消息隔得久才插一条 */
+  .day{text-align:center;font-size:11.5px;color:var(--dim);margin:4px 0 14px}
+  /* 系统提示（拍一拍 / 撕回 / 入群）：微信里就是居中一行小灰字 */
+  .sysline{text-align:center;font-size:11.5px;color:var(--dim);margin:2px 0 12px;padding:0 40px}
+  .to-bottom{position:absolute;right:20px;bottom:14px;z-index:4;border-radius:16px;background:#fff;
+             border:1px solid var(--line);box-shadow:0 2px 6px rgba(0,0,0,.14);padding:5px 12px;
+             font-size:12.5px;cursor:pointer}
+  .to-bottom:hover{background:#f4f6f8}
+  /* 浮条：跳引用没命中之类的一句话。定位在 .center 上（不是 #stream） */
+  .note{position:absolute;top:50px;left:50%;transform:translateX(-50%);z-index:6;max-width:70%;
+        background:rgba(0,0,0,.76);color:#fff;font-size:12px;padding:5px 12px;border-radius:14px}
+  .composer{display:flex;gap:8px;padding:8px 14px;background:var(--panel);
+            border-top:1px solid var(--line);flex:none}
+  .composer input{flex:1;min-width:0;padding:6px 10px;border:1px solid var(--line);
+                  border-radius:6px;outline:none}
+  .composer input:focus{border-color:var(--accent)}
   .body{white-space:pre-wrap;word-break:break-word}
   .meta{margin-top:5px;font-size:12px;color:var(--dim);display:flex;gap:8px;flex-wrap:wrap;align-items:center}
   .chip{padding:0 7px;border-radius:9px;font-size:11px;color:#fff;background:var(--pending);white-space:nowrap}
@@ -62,8 +91,16 @@
   .media{display:block;max-width:100%;max-height:260px;border-radius:8px;cursor:zoom-in}
   .media.emoji{max-height:110px;max-width:150px}
   audio{max-width:100%;height:34px;vertical-align:middle}
-  .quote{border-left:3px solid var(--line);background:#f7f8fa;border-radius:6px;padding:3px 8px;
-         margin-bottom:5px;font-size:12px;color:var(--dim);white-space:pre-wrap;word-break:break-word}
+  .quote{border-left:3px solid var(--line);background:#f2f3f5;border-radius:4px;padding:4px 8px;
+         margin-bottom:5px;font-size:12px;color:var(--dim);white-space:pre-wrap;
+         word-break:break-word;cursor:pointer;max-height:46px;overflow:hidden}
+  /* 点开看被引全文（被引那条不在这一页时走这条路） */
+  .quote.open{max-height:none}
+  .quote:hover{background:#eaecf0}
+  /* 出站是绿底，灰块套在上面发灰发脏，改成压暗一档 */
+  .row.out .quote{background:rgba(0,0,0,.07)}
+  .row.out .quote:hover{background:rgba(0,0,0,.11)}
+  .row.out .meta,.row.out .detail{color:rgba(28,31,35,.6)}
   .quote b{color:var(--fg);font-weight:600}
   .drawer{width:420px;background:var(--panel);border-left:1px solid var(--line);
           overflow:auto;flex:none;padding:12px 14px;font-size:13px}
@@ -77,6 +114,12 @@
   .drawer summary{cursor:pointer;color:var(--dim);font-size:12px;user-select:none}
   .drawer summary:hover{color:var(--fg)}
   .drawer details[open] summary{margin-bottom:6px}
+  /* 原始 XML 的着色。只上颜色，不拼 HTML（正文转义那条规矩对这里同样有效） */
+  .xml-body .t-tag{color:#5b6672}
+  .xml-body .t-name{color:#0b6bcb}
+  .xml-body .t-attr{color:#b3541e}
+  .xml-body .t-str{color:#22863a}
+  .xml-body .t-decl{color:#8b939c}
   /* 两列键值：标签按内容定宽（不然中文标签会被值挤成一列竖排字），
      值列必须能缩（minmax(0,1fr)）+ 任意断行，否则长 JSON 直接把抽屉撑出横向滚动 */
   .kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:3px 10px;font-size:12px}

@@ -1,6 +1,7 @@
 """ Wechat 适配层自检：不连 daemon，用 stub 替换 SDK 客户端。 """
 
 import asyncio
+import base64
 import types
 import unittest
 
@@ -36,6 +37,7 @@ class FakeBot:
         self.sent: list[dict] = []
         self.pats: list[tuple[str, str | None]] = []
         self.contact_calls: list[str] = []
+        self.rpc: list[tuple[str, dict]] = []
         self.wxid = 'wxid_me'
         self.nickname = 'Bot'
         # 实测 daemon 查不到群成员时是拿 wxid 当名字返回的；置空模拟这种情况
@@ -74,6 +76,14 @@ class FakeBot:
         self.contact_calls.append(user)
         name = self.contacts.get(user)
         return [types.SimpleNamespace(username=user, name=name)] if name else []
+
+    async def call(self, action, params):
+        """ 通用 RPC（SDK 的 WeChatBot.call）。目前只有头像走这条路。 """
+        self.rpc.append((action, params))
+        if action == 'get_headimg' and params.get('users', [''])[0] == 'wxid_alice':
+            return {'images': [{'username': 'wxid_alice', 'ext': 'jpg', 'size': 4,
+                                'data_base64': base64.b64encode(b'\xff\xd8\xff\x00').decode()}]}
+        return {'images': []}
 
     async def send_text(self, to, text, at_users, at_names, ref_svrid=None):
         self.sent.append({'to': to, 'text': text, 'at_users': at_users, 'at_names': at_names,
@@ -204,6 +214,18 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
             await self.wechat.get_display_name('wxid_alice', '456@chatroom')
         self.assertEqual(self.wechat._bot.contact_calls, ['456@chatroom'])   # 群里那个人走群名片
         self.assertEqual(await self.wechat.get_display_name('456@chatroom'), '一起哈啤')
+
+    async def test_avatar_goes_through_daemon(self):
+        """ 头像字节直接向 daemon 要：缓存（先读盘）和下载都在它那边，和附件一个分工。 """
+        data, ext = await self.wechat.avatar('wxid_alice')
+        self.assertEqual((data, ext), (b'\xff\xd8\xff\x00', 'jpg'))
+        self.assertEqual(self.wechat._bot.rpc[-1], ('get_headimg', {'users': ['wxid_alice']}))
+
+    async def test_avatar_raises_when_daemon_has_none(self):
+        """ 没有这张图是常态：抛出去让面板回 404、浏览器退回首字色块，
+        而不是拿一个空字节流冒充图片（那样面板会画一张破图）。 """
+        with self.assertRaises(ValueError):
+            await self.wechat.avatar('wxid_ghost')
 
     async def test_media_bytes_goes_through_plain_rpc(self):
         """ 附件走普通 RPC `get_media_bytes`，不走坏的 DL_OPEN 分块流。

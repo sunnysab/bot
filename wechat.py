@@ -434,6 +434,34 @@ class Wechat:
             logger.debug(f'failed to resolve contact {wxid}: {e}')
         return ''
 
+    async def message_cursor(self, contact: str, svrid: int) -> int:
+        """ 按服务端 msg_id 反查会话内的翻页游标（daemon 的 `messages.id`）。
+
+        面板手里只有引用块带的 64 位 svrId，而翻页要的是另一个空间的 cursor，
+        所以得问一次。本地库里没有这条（引用的是早就滚出缓存的消息）返回 0，
+        调用方据此退回「只展开被引全文」。
+        """
+        try:
+            data = await self._bot.call('resolve_message', {'contact': contact, 'svrid': int(svrid)})
+        except Exception as e:  # noqa: BLE001 —— 404 也走这里，查不到不是故障
+            logger.debug(f'resolve message cursor failed: {e}')
+            return 0
+        return int((data or {}).get('cursor') or 0)
+
+    async def avatar(self, wxid: str) -> tuple[bytes, str]:
+        """ 头像原始字节 + 扩展名。
+
+        下载和缓存都在 daemon（`get_headimg`：先读盘、没有再打 batchgetheadimg），
+        bot 只按 wxid 要——和附件一个分工，不去扒它的缓存目录。
+        服务端没有这张图就抛：调用方（面板）把它变成 404，浏览器退回首字色块。
+        """
+        data = await self._bot.call('get_headimg', {'users': [wxid]})
+        images = (data or {}).get('images') or []
+        if not images:
+            raise ValueError(f'{wxid} 没有头像')
+        img = images[0]
+        return base64.b64decode(img['data_base64']), str(img.get('ext') or 'jpg')
+
     async def fetch_history(self, wxid: str, count: int = 50, query: str = '') -> ChatWindow:
         """ 获取群或联系人的聊天记录
 

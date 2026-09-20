@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { get, post } from './api';
-import type { Chat, EventsRes, HealthRes, MessagesRes, Msg, StateRes, StatusEvent } from './api';
+import type { Chat, EventsRes, HealthRes, MessagesRes, Msg, Res, StateRes, StatusEvent } from './api';
 import { ChatList } from './components/ChatList';
+import { Composer } from './components/Composer';
 import { Header } from './components/Header';
 import { Lightbox } from './components/Lightbox';
 import { Stream } from './components/Stream';
@@ -36,6 +37,12 @@ export default function App() {
   const [zoom, setZoom] = useState('');
   const [seq, setSeq] = useState(0);
   const [down, setDown] = useState(false);
+  /** 跳到某条引用后要闪的那条（空串=不闪）。用 id 而不是 ref，Message 的 memo 才认得出 */
+  const [jumpId, setJumpId] = useState('');
+  /** 没看过的新消息条数。不在底部时挂在「跳到最新」按钮上 */
+  const [newCount, setNewCount] = useState(0);
+  /** 浮条提示（跳引用没命中之类），2 秒自己消失 */
+  const [note, setNote] = useState('');
   const [aside, setAside] = useState(() => ({
     w: Number(local.get('aside.w', '230')) || 230,
     off: local.get('aside.off', '') === '1',
@@ -43,6 +50,8 @@ export default function App() {
 
   const box = useRef<HTMLElement>(null);
   const scroll = useRef<ScrollHint>({});
+  /** 视口在不在底部。在底部新消息就自动跟下去，不在就只计数 */
+  const stick = useRef(true);
   // 当前已加载消息的 daemon 游标（messages.id，不是 64 位 msg_id）：翻页和增量都靠它
   const cursor = useRef({ oldest: 0, newest: 0 });
   const since = useRef(0);
@@ -90,6 +99,9 @@ export default function App() {
     setStreamError('');
     cursor.current = cursorsOf(d.messages);
     scroll.current = { bottom: true };
+    // 切会话/重拉一定是「从头看」，跟随状态跟着归位，否则回到底部这件事再也不会自动发生
+    stick.current = true;
+    setNewCount(0);
     setMessages(d.messages);
   }, []);
 
@@ -115,6 +127,10 @@ export default function App() {
     const rows = d.messages;
     if (live.current.chatId !== id || !rows?.length) return;
     setMessages(prev => [...prev, ...rows]);
+    // 在底部：新消息直接跟下去（微信就是这个手感）。翻上去看历史时不动视口，
+    // 只累加计数——否则每来一条消息就把人踢回底部
+    if (stick.current) scroll.current = { bottom: true };
+    else setNewCount(n => n + rows.length);
     const c = cursorsOf(rows);
     cursor.current = {
       newest: Math.max(cursor.current.newest, c.newest),
@@ -180,6 +196,77 @@ export default function App() {
     setPanel('message');
   }, []);
   const onZoom = useCallback((url: string) => setZoom(url), []);
+  const onStick = useCallback((v: boolean) => { stick.current = v; }, []);
+
+  const toBottom = useCallback(() => {
+    const el = box.current;
+    if (el) el.scrollTop = el.scrollHeight;
+    setNewCount(0);
+  }, []);
+
+  /** 点引用块：当前页里没有就去 daemon 取一段以它为中心的历史，换来定位。
+   *
+   * 返回 false 表示真定位不了（daemon 缓存里也没这条）——气泡会自己展开被引全文。
+   */
+  const loadAround = useCallback(async (msgId: string): Promise<boolean> => {
+    const id = live.current.chatId;
+    if (!id) return false;
+    setNote('定位中…');
+    busy.current = true;   // 这期间不做增量，免得和整页替换抢 cursor
+    let d: Res<MessagesRes>;
+    try {
+      d = await get<MessagesRes>(
+        `/api/messages?chat=${encodeURIComponent(id)}&limit=120&around=${encodeURIComponent(msgId)}`);
+    } catch (e) {
+      // fetch 本身失败（后台没起/断网）：别把 busy 卡死，否则增量再也不跑了
+      setNote(`取不到那条消息：${e}`);
+      return false;
+    } finally {
+      busy.current = false;
+    }
+    if (live.current.chatId !== id) return false;   // 期间切了会话，这批不算数
+    if (!d.messages?.length) {
+      setNote(d.error || '取不到那条消息');
+      return false;
+    }
+    cursor.current = cursorsOf(d.messages);
+    stick.current = false;        // 人在历史里，新消息不该把视口踢回底部
+    scroll.current = {};          // 不按 bottom/keep 摆，交给目标那条自己滚过来
+    setMessages(d.messages);
+    setJumpId(msgId);
+    setNewCount(0);
+    setNote('');
+    return true;
+  }, []);
+
+  /** 点引用块：被引那条已加载就跳过去（返回 true），否则现取一段再跳。
+   *
+   * 「不在这一页」是真会发生的：一页 300 条，被引的可能是三天前那条。
+   */
+  const onJump = useCallback(async (msgId: string): Promise<boolean> => {
+    if (!msgId) return false;
+    if (messages.some(m => m.msg_id === msgId)) {
+      setJumpId(msgId);
+      setNote('');
+      return true;
+    }
+    const ok = await loadAround(msgId);
+    if (!ok) setNote('被引消息不在 daemon 的缓存里了，已展开全文');
+    return ok;
+  }, [messages, loadAround]);
+
+  useEffect(() => {
+    if (!jumpId) return;
+    const timer = window.setTimeout(() => setJumpId(''), 1600);
+    return () => window.clearTimeout(timer);
+  }, [jumpId]);
+
+  useEffect(() => {
+    if (!note) return;
+    const timer = window.setTimeout(() => setNote(''), 2600);
+    return () => window.clearTimeout(timer);
+  }, [note]);
+
 
   const allow = useCallback(async (name: string, on: boolean) => {
     // 「允许回复」名单的键是**显示名**（插件链按它分发），不是 peer id
@@ -244,12 +331,15 @@ export default function App() {
             onAllow={() => void allow(chatName, !chat?.allowed)}
             onFocus={() => void focus(chatName, !chat?.focus)}
             onEarlier={() => void loadEarlier(box.current)}
-            onSend={send}
           />
+          {note && <div className="note">{note}</div>}
           <Stream
             messages={messages} own={own} reply={reply} selected={selected} error={streamError}
-            hasChat={!!chatId} box={box} scroll={scroll} onPick={onPick} onZoom={onZoom}
+            flash={jumpId} newCount={newCount} hasChat={!!chatId} box={box} scroll={scroll}
+            onPick={onPick} onZoom={onZoom} onJump={onJump}
+            onStick={onStick} onToBottom={toBottom}
           />
+          <Composer chatName={chatName} onSend={send} />
         </div>
         <Drawer
           panel={panel} tab={tab} onTab={setTab} onClose={() => setPanel(null)}

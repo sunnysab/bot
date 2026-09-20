@@ -7,6 +7,9 @@
  * 2. **会话的键是显示名**（群名 / 备注），不是 peer id。允许回复名单、分会话人设都按显示名
  *    存，插件链也按显示名分发；peer id（`chat_id`）只用来打 /api/messages、/api/media
  *    这类按会话取数据的接口。混用会写出一个和读取对不上的记录。
+ * 3. **头像地址由后端给**（`sender_head` / `head`），是**同源**地址（`/api/avatar`），
+ *    可直接塞 `src`。取不到就是 404，`<Avatar>` 会退成首字色块——空串表示连 wxid
+ *    都没有，直接画首字，不要发请求。
  *
  * 后台 500 时返回的是 `{error}`。以前失败一律给 `{}`，于是调用方只能瞎猜；现在照常解析，
  * 调用方要么读 error 说清楚，要么当没这回事——拿到的仍是普通对象，不会炸。
@@ -42,6 +45,8 @@ export interface Chat {
   count: number;
   updated_at: number;
   last: string;
+  /** 头像同源地址，空串 = 直接画首字 */
+  head: string;
   allowed: boolean;
   focus: boolean;
 }
@@ -57,14 +62,21 @@ export interface MediaInfo {
 export interface Quote {
   name: string;
   text: string;
+  /** 被引消息的 msg_id（与 `Msg.msg_id` 同一空间），空串 = 不知道是谁，不做跳转 */
+  ref_msg_id: string;
 }
 
 export interface Msg {
   cursor: number;
   msg_id: string;
   ts: number;
+  /** 发送者（显示名）。头像走 `sender_head`，身份键（wxid）在它里面 */
   sender: string;
+  /** 头像同源地址，空串 = 连 wxid 都没有（直接画首字，不发请求） */
+  sender_head: string;
   outgoing: boolean;
+  /** 系统提示（拍一拍/撕回/入群…）：居中一行小灰字，不是气泡 */
+  system: boolean;
   text: string;
   /** 原始载荷（XML / 带 wxid 前缀的正文）；详情抽屉要看它 */
   xml: string;

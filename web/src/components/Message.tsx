@@ -1,8 +1,9 @@
-import { memo, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 
 import { mediaUrl } from '../api';
 import type { Msg, StatusEvent } from '../api';
 import { clock } from '../format';
+import { Avatar } from './Avatar';
 import { Chip } from './Chip';
 
 interface Props {
@@ -12,8 +13,12 @@ interface Props {
   /** 挂在它上面的出站进度事件 */
   reply?: StatusEvent;
   selected: boolean;
+  /** 刚从别处跳过来的那条：闪一下，让人知道落在哪里 */
+  flash: boolean;
   onPick: (msgId: string) => void;
   onZoom: (url: string) => void;
+  /** 点引用块：跳得过去（包含现取一页）返回 true；返回 false 时气泡自己展开被引全文 */
+  onJump: (msgId: string) => Promise<boolean>;
 }
 
 /** 一条气泡。
@@ -21,12 +26,40 @@ interface Props {
  * `memo` 不是可选项：面板每秒拉一次事件，300 条气泡都得靠「props 引用没变就跳过」。
  * App 在合并事件时只替换变化的那几个 key，所以 `own`/`reply` 对没动的消息保持同一引用。
  */
-export const Message = memo(function Message({ m, own, reply, selected, onPick, onZoom }: Props) {
+export const Message = memo(function Message(
+  { m, own, reply, selected, flash, onPick, onZoom, onJump }: Props,
+) {
+  const [open, setOpen] = useState(false);
+  const row = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (flash) row.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [flash]);
+
+  // 点引用：先试跳过去（不在当前页时 App 会现取一段），跳不了就就地展开全文。
+  // 总比「点了没反应」强
+  const pickQuote = async () => {
+    const ref = m.quote?.ref_msg_id;
+    if (ref && await onJump(ref)) return;
+    setOpen(v => !v);
+  };
+
+  // 系统提示（拍一拍/撕回/入群）：微信里是居中一行小灰字，没有头像、没有气泡、不可点
+  if (m.system) return <div className="sysline">{m.text}</div>;
+
   return (
-    <div className={`row ${m.outgoing ? 'out' : ''}`}>
+    <div ref={row} className={`row ${m.outgoing ? 'out' : ''} ${flash ? 'jump' : ''}`}>
+      <Avatar head={m.sender_head} name={m.sender} />
       <div className={`bubble ${selected ? 'sel' : ''}`} onClick={() => onPick(m.msg_id)}>
         <div className="who">{m.sender} · {clock(m.ts)}</div>
-        {m.quote && <div className="quote"><b>{m.quote.name}</b>：{m.quote.text}</div>}
+        {m.quote && (
+          <div
+            className={`quote ${open ? 'open' : ''}`}
+            title={m.quote.ref_msg_id ? '点一下跳过去' : '点一下看全文'}
+            onClick={e => { e.stopPropagation(); void pickQuote(); }}
+          >
+            <b>{m.quote.name}</b>：{m.quote.text}
+          </div>
+        )}
         {m.media ? <Media m={m} onZoom={onZoom} /> : <div className="body">{m.text}</div>}
         {m.dry_text && <div className="body dry-text">{m.dry_text}</div>}
         <div className="meta">

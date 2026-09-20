@@ -29,7 +29,7 @@ from dataclasses import MISSING, replace
 from dataclasses import fields as dataclass_fields
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from dotenv import load_dotenv
 from jinja2 import StrictUndefined, Template, TemplateSyntaxError, UndefinedError
@@ -65,6 +65,7 @@ MESSAGES_LIMIT = 300         # v1 一次拉满，daemon 的 get_messages 还不�
 RPC_TIMEOUT = 15.0
 LOGIN_TIMEOUT = 60.0          # 取二维码要现走一次短链握手 + getloginqrcode，比普通 RPC 慢得多
 MEDIA_TIMEOUT = 60.0         # 图片要现下原图（实测 0.5~1.3s），比普通 RPC 慢得多
+AVATAR_TIMEOUT = 20.0        # 首次头像要现走一次 batchgetheadimg 短链（响应里带图片字节）
 MEDIA_CONCURRENCY = 3        # 面板同时向 daemon 要几个附件：daemon 那边原图是一张一张下的，
                              # 这里限的是「几个 HTTP 线程被慢 RPC 占着」，别把面板的其它请求挤掉
 LOG_TAIL_BYTES = 256 * 1024  # 只看日志尾巴，不把整份读进内存
@@ -204,8 +205,12 @@ def _rates(counts: dict[str, int]) -> dict:
     }
 
 
-def _quote(content: str, kind) -> dict | None:
+def _quote(content: str, kind, ref_svrid: int = 0) -> dict | None:
     """ 引用消息（appmsg type=57）拆成结构化的块，面板才能画成引用样式。
+
+    `ref_svrid` 是被引消息的 msg_id：daemon 的 `ref_svrid` 是权威值，
+    XML 里的 `refermsg/svrid` 给 daemon 没填的历史数据兜底。两者都没有就给空串——
+    面板拿到空串就不做跳转（而不是跳到一个不存在的 id）。
 
     取不到就返回 None——调用方保留 render() 给的平铺文本。
     """
@@ -217,7 +222,8 @@ def _quote(content: str, kind) -> dict | None:
         return None
     name = tag(content, 'displayname') or parsed['referred_message_sender']
     # 被引的那条可能是图片 / 表情 / 链接：走同一个渲染，否则面板上会显示一段 XML
-    return {'content': parsed['content'], 'name': name, 'text': render_referred(parsed)}
+    return {'content': parsed['content'], 'name': name, 'text': render_referred(parsed),
+            'ref_msg_id': str(ref_svrid or parsed['referred_message_id'] or '')}
 
 
 def _silk_to_wav(data: bytes, msg_id: str) -> bytes:
@@ -438,6 +444,9 @@ class Admin:
                 'count': getattr(chat, 'msg_count', 0),
                 'updated_at': getattr(chat, 'updated_at', 0),
                 'last': preview[:60],
+                # 头像同源地址：这个接口 5 秒一轮，绝不能在这儿发 RPC（头像字节由浏览器
+                # 按需拉，/api/avatar 那边有 daemon 的磁盘缓存兼 404 缓存）
+                'head': self._avatar_url(peer),
                 # 静音和专注都按**显示名**记（插件链就是按显示名分发的）
                 'allowed': self.runtime.reply_scope.allows(name),
                 'focus': name in self.runtime.focus.sessions,
@@ -445,16 +454,42 @@ class Admin:
         return out
 
     def messages(self, chat: str, limit: int = MESSAGES_LIMIT,
-                 before: int = 0, after: int = 0) -> dict:
+                 before: int = 0, after: int = 0, around: str = '') -> dict:
         """ 会话历史（分页）。`before`/`after` 是 daemon 的 `messages.id` 游标。
+
+        `around` 给一条消息的 msg_id（引用块里带的就是它），返回**以它为中心**的一段：
+        点引用跳到不在当前这一页的那条靠它，前后各半页——只有上文的话，
+        「那句话到底在说什么」还是看不全。
 
         返回 {'messages': [...], 'has_more': bool}。has_more 靠「满页 = 可能还有」近似，
         daemon 的 get_messages 不把 has_more 透给 SDK——测到不够再给 SDK 加。
         """
         if not chat:
             return {'messages': [], 'has_more': False}
+        if around:
+            return self._around(chat, around, limit)
         raw = self.call(self._wechat.messages(chat, limit=limit, before_id=before, after_id=after,
                                               exclude_system=False))
+        return {'messages': self._rows(chat, raw), 'has_more': len(raw) >= limit}
+
+    def _around(self, chat: str, msg_id: str, limit: int) -> dict:
+        """ 围绕某条消息取一段（分两次查：它以前的 + 它以后的）。 """
+        if not msg_id.isdigit():
+            return {'messages': [], 'has_more': False, 'error': f'around 要的是 msg_id：{msg_id!r}'}
+        cursor = self.call(self._wechat.message_cursor(chat, int(msg_id)), timeout=RPC_TIMEOUT)
+        if not cursor:
+            return {'messages': [], 'has_more': False,
+                    'error': '被引消息不在 daemon 的缓存里（太久了）'}
+        half = max(20, limit // 2)
+        # before_id 不含它自己，所以 +1 才把它一起拿回来；after_id 本来就后开一位
+        older = self.call(self._wechat.messages(chat, limit=half, before_id=cursor + 1,
+                                                exclude_system=False))
+        newer = self.call(self._wechat.messages(chat, limit=half, after_id=cursor,
+                                                exclude_system=False))
+        return {'messages': self._rows(chat, [*older, *newer]), 'has_more': len(older) >= half}
+
+    def _rows(self, chat: str, raw: list) -> list[dict]:
+        """ daemon 原始消息 → 面板行（补显示名、滤掉不该进聊天的）。 """
         # daemon 的 sender_display_name 查不到时会拿 wxid 当名字，那不是名字。
         # 只对真正拿不到的那几个查（查到的会缓存），不是每条都查
         unknown = [m.sender for m in raw
@@ -464,18 +499,37 @@ class Admin:
                   if p is not None and p.patted_user]
         names = self.call(self._wechat.sender_names(chat, [*unknown, *patted])) \
             if unknown or patted else {}
-        rows = [row for row in (self._row(msg, names) for msg in raw) if row]
-        return {'messages': rows, 'has_more': len(raw) >= limit}
+        return [row for row in (self._row(msg, names) for msg in raw) if row]
+
+    def avatar(self, wxid: str) -> tuple[bytes, str]:
+        """ 一张头像的字节 + 扩展名。
+
+        缓存和下载都在 daemon（`get_headimg` 先读盘，没有再打 batchgetheadimg），
+        所以这里只是一次透传。没有这张图就抛——路由把它变成 404，
+        浏览器 `<img>` 接住后退回首字色块。头像缺失是常态，不是故障，故不写日志。
+        """
+        if not wxid:
+            raise ValueError('缺少 wxid')
+        return self.call(self._wechat.avatar(wxid), timeout=AVATAR_TIMEOUT)
+
+    @staticmethod
+    def _avatar_url(wxid: str) -> str:
+        """ 头像地址。没有 wxid 就空串（面板不画 `<img>`，直接画首字） """
+        return f'/api/avatar?wxid={quote(wxid, safe="")}' if wxid else ''
 
     def _row(self, msg, names: dict[str, str] | None = None) -> dict | None:
         kind = MessageKind.of(msg.msg_type)
         pat = getattr(msg, 'pat', None)
-        # 设备同步(51)/系统消息不该进聊天记录。daemon 的 exclude_system 只排 10000/10002，
-        # 所以取的时候不排、在这里自己滤；拍一拍虽然也是 10002，但那是社交信号，留下
-        if (kind in SYSTEM_KINDS and pat is None) or kind is MessageKind.OTHER:
+        # 设备同步(51) / 好友请求 / 未知类型不该进聊天记录
+        if kind in (MessageKind.FRIEND_REQUEST, MessageKind.HANDOFF) or kind is MessageKind.OTHER:
             return None
+        # 系统提示（10000 / 10002）要留：微信里它们是居中一行小灰字
+        # （「xx 撤回了一条消息」「xx 加入了群聊」），面板照它的样子显示
+        system = pat is not None or kind in SYSTEM_KINDS
         if pat is not None:
             text, media = self._render_pat(msg, names), None
+        elif system:
+            text, media = self._render_system(msg), None
         else:
             text, media = render(msg.msg_type, msg.content, msg.text)
         if not text:
@@ -487,7 +541,7 @@ class Admin:
                 text = media.placeholder
 
         # 引用拆成结构化的块，面板才能画成引用样式而不是一整句平铺文本
-        quote = _quote(msg.content, kind)
+        quote = _quote(msg.content, kind, getattr(msg, 'ref_svrid', 0) or 0)
         if quote:
             text = quote['content']
 
@@ -499,7 +553,13 @@ class Admin:
             'ts': msg.create_time,
             'sender': ('我' if msg.is_self else '') or (names or {}).get(msg.sender) \
                       or msg.sender_display_name or msg.sender,
+            # 头像同源地址（含 wxid）。浏览器自己去要，要不到 404 就退回首字色块——
+            # **不在这里预取**：头像是联系人维度，把它挂进消息接口的 RPC 路径上，
+            # 一旦卡住，整个消息列表跟着变成错误页，而它只是个装饰
+            'sender_head': self._avatar_url(msg.sender),
             'outgoing': bool(msg.is_self),
+            # 系统提示（拍一拍/撤回/入群…）：面板画成居中的一行小灰字，不是气泡
+            'system': system,
             'text': text,
             # 原始载荷（XML / 带 wxid 前缀的正文）：详情抽屉里要看它，渲染层丢掉的信息全在这
             'xml': msg.content,
@@ -524,6 +584,16 @@ class Admin:
         else:
             patted = (names or {}).get(pat.patted_user) or pat.patted_user
         return f'拍了拍 {patted}{pat.suffix or ""}'
+
+    def _render_system(self, msg) -> str:
+        """ 系统提示的一行文案（撤回 / 入群 / 其它 sysmsg）。
+
+        daemon 已经把 XML 收成了人话：撤回的 `clean_text` 就是微信自己给的
+        `"xx" 撤回了一条消息`，直接用它。抽不出文字就返回空——空表示「这条不值得显示」，
+        于是 `_row` 把它丢掉；绝不能把控制报文（`<op id=…>`）摆进聊天记录。
+        """
+        text = (msg.text or '').strip()
+        return '' if text.startswith('<') else text
 
     def media(self, msg_id: str) -> tuple[bytes, str]:
         """ 取一条消息的附件字节，返回 (data, content-type)。
@@ -808,7 +878,8 @@ class Admin:
                 limit = int((query.get('limit') or [MESSAGES_LIMIT])[0])
                 before = int((query.get('before') or ['0'])[0])
                 after = int((query.get('after') or ['0'])[0])
-                return self._json(handler, self.messages(chat, limit, before, after))
+                around = (query.get('around') or [''])[0]
+                return self._json(handler, self.messages(chat, limit, before, after, around))
             if route == '/api/events':
                 since = int((query.get('since') or ['0'])[0])
                 return self._json(handler, {'seq': bus.latest_seq(),
@@ -835,6 +906,18 @@ class Admin:
                 data, content_type = self.media((query.get('msg_id') or [''])[0])
                 return self._send_bytes(handler, data, content_type,
                                        cache='private, max-age=300')
+            if route == '/api/avatar':
+                # 没有这张图是常态（群里多数人不在联系人表里），不是故障：
+                # 404 + 缓存一天，浏览器不会为同一个人反复来问
+                try:
+                    data, ext = self.avatar((query.get('wxid') or [''])[0])
+                except Exception as e:  # noqa: BLE001
+                    logger.debug(f'取头像失败: {e}')
+                    return self._send_bytes(handler, b'', 'image/jpeg', code=404,
+                                            cache='private, max-age=86400')
+                return self._send_bytes(handler, data,
+                                       MEDIA_TYPES.get('.' + ext.lower(), 'image/jpeg'),
+                                       cache='private, max-age=86400')
             if route == '/api/config':
                 return self._json(handler, self.read_config())
             self._json(handler, {'error': 'not found'}, 404)
@@ -1051,6 +1134,9 @@ def _self_check() -> None:
     assert row['msg_id'] == '9202842881785760589' and isinstance(row['msg_id'], str), row
     assert row['status'] == Status.GATED and row['score'] == 45
     assert row['cursor'] == 12345 and not row['outgoing'] and row['sender'] == '张三'
+    # 头像：地址同源（浏览器自己去要，要不到 404 → 退回首字色块）
+    assert row['sender_head'] == '/api/avatar?wxid=wxid_a', row
+    assert admin._avatar_url('') == '', '没有 wxid 就不给地址，让前端直接画首字'
 
     # 回复进度挂在被回复的那条上
     bus.publish(Status.SENT, chat_id='g', reply_to=9202842881785760589, origin='bot', msg_id=7)
@@ -1062,8 +1148,15 @@ def _self_check() -> None:
 
     # 51（设备同步）绝不能出现在聊天记录里
     assert admin._row(msg(51, '<msg><op id="5"/></msg>')) is None
-    assert admin._row(msg(10000, '系统消息')) is None
     assert admin._row(msg(34, 'x')) is not None          # 语音有占位符，要显示
+
+    # 系统提示（10000/10002）要留，且带 system 标记——面板画成居中的一行小灰字，不是气泡
+    assert admin._row(msg(10000, '你已添加了张三'))['system'] is True
+    # 抽不出人话的控制报文（正文就是 XML）不留：不能把 `<op id=…>` 摆进聊天记录
+    assert admin._row(msg(10000, '<op id="5"/>')) is None
+    # 撕回：微信自己在 replacemsg 里给了文案，daemon 把它收进了 clean_text
+    revoked = admin._row(msg(10002, '<sysmsg type="revokemsg">', '"张三" 撕回了一条消息'))
+    assert revoked['system'] and revoked['text'] == '"张三" 撕回了一条消息', revoked
 
     # 拍一拍也是 10002，但是社交信号：要留下，而且把 wxid 渲染成人话
     patted = msg(10002, '<sysmsg type="pat">')
@@ -1072,6 +1165,8 @@ def _self_check() -> None:
     own_pat = msg(10002, '<sysmsg type="pat">', is_self=True)
     own_pat.pat = types.SimpleNamespace(patted_user='wxid_bot', suffix='')
     assert admin._row(own_pat, {})['text'] == '拍了拍 你'
+    # 普通消息不带 system 标记
+    assert admin._row(msg(1, 'hi'))['system'] is False
 
     # 表情 / 图片走占位符；有缓存描述时要补上
     emoji = admin._row(msg(47, '<msg><emoji md5="m" desc="ChEKB2RlZmF1bHQSBuWVp+WVpw==" /></msg>'))
@@ -1102,7 +1197,15 @@ def _self_check() -> None:
     # 以前直接把 refermsg 正文当文本，图片/表情的引用就会往面板上押一段 XML
     assert quoted['text'] == '直接用这个点进去对比', quoted
     assert quoted['quote'] == {'content': '直接用这个点进去对比', 'name': 'zzq',
-                               'text': '[链接] 和我一起测测'}, quoted
+                               'text': '[链接] 和我一起测测', 'ref_msg_id': ''}, quoted
+
+    # 点引用块要能跳到被引的那条：daemon 的 ref_svrid 是权威值，XML 里的 svrid 是兜底
+    referred = msg(49, '<msg><appmsg><title>嗯</title><type>57</type><refermsg>'
+                       '<type>1</type><svrid>999</svrid><chatusr>wxid_a</chatusr>'
+                       '<content>原话</content></refermsg></appmsg></msg>')
+    assert admin._row(referred)['quote']['ref_msg_id'] == '999'
+    referred.ref_svrid = 3159424424184903022
+    assert admin._row(referred)['quote']['ref_msg_id'] == '3159424424184903022'
 
     # 详情抽屉要能看原始 XML：行里带上没被渲染丢掉的载荷
     assert row['xml'] == '这个怎么弄啊'
@@ -1123,6 +1226,45 @@ def _self_check() -> None:
         raise AssertionError('非数字 msg_id 应该被拒')
     except ValueError:
         pass
+
+    # 头像接口：daemon 那边先读盘再打网络（缓存归它），bot 只转发字节
+    async def fake_avatar(wxid):
+        if wxid != 'wxid_a':
+            raise ValueError(f'{wxid} 没有头像')
+        return b'\x89PNG\r\n\x1a\n', 'png'
+
+    runtime.bot.wechat.avatar = fake_avatar
+    assert admin.avatar('wxid_a') == (b'\x89PNG\r\n\x1a\n', 'png')
+    try:
+        admin.avatar('')
+        raise AssertionError('空 wxid 应该被拒')
+    except ValueError:
+        pass
+    try:
+        admin.avatar('wxid_nobody')
+        raise AssertionError('没有头像时应该抛，路由好把它变成 404')
+    except ValueError:
+        pass
+
+    # 跨页定位：around 要把它自己也拿回来（before_id 不含自身，所以要 +1），前后都要有——
+    # 只有上文的话「被引的那句到底在说什么」还是看不全
+    windows: list[tuple[int, int, int]] = []
+
+    async def fake_messages(chat, limit, before_id=0, after_id=0, **kwargs):
+        windows.append((limit, before_id, after_id))
+        return [msg(1, f'第 {before_id}-{after_id} 条')]
+
+    async def fake_cursor(chat, svrid):
+        return 500 if svrid == 999 else 0
+
+    runtime.bot.wechat.messages = fake_messages
+    runtime.bot.wechat.message_cursor = fake_cursor
+    found = admin.messages('456@chatroom', limit=40, around='999')
+    assert windows == [(20, 501, 0), (20, 0, 500)], windows
+    assert len(found['messages']) == 2, found
+    # daemon 缓存里没有这条（引用太久了）：说清楚原因，别让面板白跑一趟
+    assert '缓存' in admin.messages('456@chatroom', around='888')['error']
+    assert 'msg_id' in admin.messages('456@chatroom', around='abc')['error']
 
     # 登录卡：二维码出 base64（面板直接塞 data: URL），轮询拿不到进行中的登录不能报 500
     qr = types.SimpleNamespace(uuid='u1', url='https://weixin.qq.com/x', expires_in=300, png=b'\x89PNG')

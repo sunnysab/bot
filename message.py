@@ -39,7 +39,7 @@ def _text(root: et.Element, path: str) -> str:
 
 def parse_reference_message(xml_data: str) -> dict:
     """ 解析引用消息，返回 `{content, sender, referred_message, referred_message_sender,
-    referred_message_type}`。
+    referred_message_type, referred_message_id}`。
 
     `referred_message` 是**原文**：被引的那条可能是图片 / 表情 / 链接 / 又一串引用，
     这时它是那段消息的 XML。渲染成人话是 `media.render_referred` 的事（解析器不碰
@@ -63,6 +63,9 @@ def parse_reference_message(xml_data: str) -> dict:
         'referred_message_sender': _text(root, './/refermsg/chatusr'),
         # 被引那条的 msg_type：图片 3 / 表情 47 / 链接 49 / 文本 1 …… 渲染时要它
         'referred_message_type': int(_text(root, './/refermsg/type') or 0),
+        # 被引那条的服务端 id（svrId）。面板点引用块跳过去就靠它。
+        # daemon 的 `ref_svrid` 是权威来源，这里是 XML 里还留着 svrid 的历史数据兜底
+        'referred_message_id': _text(root, './/refermsg/svrid'),
     }
 
 
@@ -79,6 +82,7 @@ if __name__ == '__main__':
     assert parsed['referred_message_sender'] == 'wxid_kf7zbyjjxs8r22', parsed
     assert parsed['referred_message'].startswith('<msg><appmsg><title>和我一起测测'), parsed
     assert parsed['referred_message_type'] == 49, parsed
+    assert parsed['referred_message_id'] == '3159424424184903022', parsed
 
     # daemon 在正文前拼了 sender 前缀的场景
     assert parse_reference_message('wxid_abc:\n' + sample)['content'] == '直接用这个点进去对比'
@@ -93,6 +97,7 @@ if __name__ == '__main__':
                 '<fromusername>wxid_6aob7w8khxa322</fromusername>')
     parsed = parse_reference_message(outbound)
     assert parsed['content'] == '在呢，看你们聊呢', parsed
+    assert parsed['referred_message_id'] == '4443715993374741156', parsed
     assert parsed['referred_message'] == '@雨墨蝉烟 咋不说话了', parsed
     assert parsed['referred_message_sender'] == 'wxid_kf7zbyjjxs8r22', parsed
     # 带 XML 声明的也要能解析
@@ -126,6 +131,8 @@ if __name__ == '__main__':
     # 缺字段的引用不能把整条消息带崩：字段取空串就行
     bare = parse_reference_message('<msg><appmsg><title>嗯</title><type>57</type></appmsg></msg>')
     assert bare['referred_message'] == '' and bare['referred_message_type'] == 0, bare
+    # 没有 svrid 时给空串：面板拿到空串就不做跳转，不能给它 None
+    assert bare['referred_message_id'] == '', bare
 
     # 不是引用：抛 ValueError（不是 AssertionError——`python -O` 下 assert 会消失）
     try:

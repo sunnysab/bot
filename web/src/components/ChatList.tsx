@@ -1,6 +1,7 @@
 import { useRef } from 'react';
 
 import type { Chat, DaemonInfo } from '../api';
+import { Avatar } from './Avatar';
 
 interface Props {
   chats: Chat[];
@@ -27,19 +28,22 @@ export function ChatList({
             key={c.chat_id} className={`chat ${c.chat_id === currentId ? 'on' : ''}`}
             onClick={() => onSelect(c)}
           >
-            <div className="n">{c.name}
-              <span style={{ display: 'flex', gap: 6, alignItems: 'center', flex: 'none' }}>
-                <em>{c.count || ''}</em>
-                <span
-                  className={`allow ${c.allowed ? 'on' : ''}`} title="允许回复"
-                  onClick={e => { e.stopPropagation(); onAllow(c.name, !c.allowed); }}
-                >{c.allowed ? '✓' : '✕'}</span>
-              </span>
-            </div>
-            <div className="l">
-              {c.allowed ? '' : <span className="tag">🔇不回</span>}
-              {c.focus && <span className="tag">🎯专注</span>}
-              {c.last}
+            <Avatar head={c.head} name={c.name} size={38} />
+            <div className="chat-body">
+              <div className="n">{c.name}
+                <span style={{ display: 'flex', gap: 6, alignItems: 'center', flex: 'none' }}>
+                  <em>{c.count || ''}</em>
+                  <span
+                    className={`allow ${c.allowed ? 'on' : ''}`} title="允许回复"
+                    onClick={e => { e.stopPropagation(); onAllow(c.name, !c.allowed); }}
+                  >{c.allowed ? '✓' : '✕'}</span>
+                </span>
+              </div>
+              <div className="l">
+                {c.allowed ? '' : <span className="tag">🔇不回</span>}
+                {c.focus && <span className="tag">🎯专注</span>}
+                {c.last}
+              </div>
             </div>
           </div>
         )) : <div className="empty">{whyNoChats(error, daemon)}</div>}

@@ -4,7 +4,7 @@ import { get, post } from '../../api';
 import type { ReplayRes, TraceView } from '../../api';
 import { usePoll } from '../../hooks';
 import { Chip } from '../Chip';
-import { Kv, Pre } from './parts';
+import { Kv, Pre, Xml } from './parts';
 
 interface Props {
   msgId: string | null;
@@ -51,7 +51,7 @@ export function Trace({ msgId, picked, xml, tick }: Props) {
       {xml && (
         <details className="xml">
           <summary>原始 XML</summary>
-          <Pre text={xml} />
+          <Xml text={xml} />
         </details>
       )}
 
