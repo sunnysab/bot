@@ -277,16 +277,19 @@ async function poll(){
   try{
     const {seq, events} = await get(`/api/events?since=${since}`);
     since = seq;
-    let stale = false;
+    let stale = false, touched = false;
     for(const e of events){
       // 出站事件靠 reply_to 挂在被回复的那条上（daemon 要发出去才有出站的身份）
       if(e.reply_to) patch(e.reply_to, e.status, e.detail, 'reply');
       if(e.msg_id) patch(e.msg_id, e.status, e.detail, 'own');
       if(e.chat_id === current && (e.status==='received' || e.status==='phone')) stale = true;
+      // 抽屉里画的「这条消息」的状态只会被它自己的事件改，别的消息刷屏不必重画
+      if(selected && (String(e.msg_id) === selected || String(e.reply_to) === selected)) touched = true;
     }
     if(stale && !reloading) loadNew();
     $('#seq').textContent = '事件 #' + seq;
-    if(selected) showPanel();          // 抽屉开着就跟着最新状态走
+    // 只在「这条消息有新事件」时重画；以前每秒重拉一次 /api/trace
+    if(selected && touched) showPanel();
   }catch(err){ $('#daemon').textContent = '管理后台断开'; }
 }
 
