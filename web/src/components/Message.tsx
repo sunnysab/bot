@@ -16,6 +16,8 @@ interface Props {
   /** 刚从别处跳过来的那条：闪一下，让人知道落在哪里 */
   flash: boolean;
   onPick: (msgId: string) => void;
+  /** 让 bot 站在这条当时的上下文里回它一句（气泡外侧 hover 出来的图标） */
+  onReply: (m: Msg) => Promise<void>;
   onZoom: (url: string) => void;
   /** 点引用块：跳得过去（包含现取一页）返回 true；返回 false 时气泡自己展开被引全文 */
   onJump: (msgId: string) => Promise<boolean>;
@@ -27,7 +29,7 @@ interface Props {
  * App 在合并事件时只替换变化的那几个 key，所以 `own`/`reply` 对没动的消息保持同一引用。
  */
 export const Message = memo(function Message(
-  { m, own, reply, selected, flash, onPick, onZoom, onJump }: Props,
+  { m, own, reply, selected, flash, onPick, onReply, onZoom, onJump }: Props,
 ) {
   const [open, setOpen] = useState(false);
   const row = useRef<HTMLDivElement>(null);
@@ -71,6 +73,16 @@ export const Message = memo(function Message(
           </div>
         )}
       </div>
+      {/* 回复图标：DOM 里排在气泡后面，`.row.out` 是 row-reverse，出站时它会自动落到左边外侧 */}
+      <button
+        className="act" type="button" title="让 bot 回复这条" aria-label="让 bot 回复这条"
+        onClick={e => { e.stopPropagation(); void onReply(m); }}
+      >
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+          <path d="M6.6 3.4 3 7l3.6 3.6V8.5c2.9 0 4.9 1 6.4 3.3-.4-3.6-2.7-6-6.4-6z"
+                fill="currentColor" />
+        </svg>
+      </button>
     </div>
   );
 });

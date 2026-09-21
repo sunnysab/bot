@@ -195,6 +195,12 @@ export default function App() {
     setSelected(msgId);
     setPanel('message');
   }, []);
+  /** 「回复这条」：让 bot 自己生成一句。生成要好几秒，进度看那条气泡上的状态章 */
+  const onReply = useCallback(async (m: Msg) => {
+    setNote('已让 bot 回这条…');
+    const r = await post('/api/reply', { chat: chatId, msg_id: m.msg_id });
+    if (r.error) setNote(`触发失败：${r.error}`);
+  }, [chatId]);
   const onZoom = useCallback((url: string) => setZoom(url), []);
   const onStick = useCallback((v: boolean) => { stick.current = v; }, []);
 
@@ -336,7 +342,7 @@ export default function App() {
           <Stream
             messages={messages} own={own} reply={reply} selected={selected} error={streamError}
             flash={jumpId} newCount={newCount} hasChat={!!chatId} box={box} scroll={scroll}
-            onPick={onPick} onZoom={onZoom} onJump={onJump}
+            onPick={onPick} onReply={onReply} onZoom={onZoom} onJump={onJump}
             onStick={onStick} onToBottom={toBottom}
           />
           <Composer chatName={chatName} onSend={send} />

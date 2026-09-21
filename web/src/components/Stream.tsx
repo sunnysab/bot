@@ -33,6 +33,7 @@ interface Props {
   box: RefObject<HTMLElement | null>;
   scroll: MutableRefObject<ScrollHint>;
   onPick: (msgId: string) => void;
+  onReply: (m: Msg) => Promise<void>;
   onZoom: (url: string) => void;
   onJump: (msgId: string) => Promise<boolean>;
   /** 报告「视口在不在底部」。App 靠它决定新消息要不要自动跟下去 */
@@ -46,7 +47,7 @@ interface Props {
  */
 export const Stream = memo(function Stream({
   messages, own, reply, selected, flash, error, hasChat, newCount, box, scroll,
-  onPick, onZoom, onJump, onStick, onToBottom,
+  onPick, onReply, onZoom, onJump, onStick, onToBottom,
 }: Props) {
   const [atBottom, setAtBottom] = useState(true);
 
@@ -96,7 +97,7 @@ export const Stream = memo(function Stream({
               <Message
                 key={node.msg_id} m={node} own={own[node.msg_id]} reply={reply[node.msg_id]}
                 selected={selected === node.msg_id} flash={flash === node.msg_id}
-                onPick={onPick} onZoom={onZoom} onJump={onJump}
+                onPick={onPick} onReply={onReply} onZoom={onZoom} onJump={onJump}
               />
             );
           })

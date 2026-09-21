@@ -18,7 +18,8 @@ const msg = (over: Partial<Msg>): Msg => ({
 const html = (m: Msg) =>
   renderToStaticMarkup(
     <Message m={m} selected={false} flash={false}
-             onPick={() => {}} onZoom={() => {}} onJump={() => Promise.resolve(false)} />,
+             onPick={() => {}} onReply={() => Promise.resolve()} onZoom={() => {}}
+             onJump={() => Promise.resolve(false)} />,
   );
 
 test('正文默认被转义，不再自己拼 HTML', () => {
@@ -59,6 +60,12 @@ test('系统提示画成居中一行，不是气泡（没有头像/气泡/状态
   expect(out).toContain('class="sysline"');
   expect(out).not.toContain('bubble');
   expect(out).not.toContain('av');
+});
+
+test('每条气泡旁边都有「让 bot 回复这条」图标，系统提示没有', () => {
+  const out = html(msg({ text: 'hi' }));
+  expect(out).toContain('title="让 bot 回复这条"');
+  expect(html(msg({ system: true, text: '拍了拍 我' }))).not.toContain('class="act"');
 });
 
 test('头像：有 URL 就画 img，没 URL 或不认就退成首字块', () => {
