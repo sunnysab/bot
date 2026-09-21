@@ -1428,8 +1428,8 @@ def _self_check() -> None:
 
         # 保存即生效：write_config 自己调 apply，面板不用再点一次「热重载」
         applied.clear()
-        admin.write_config({'agent_max_replies': '2'})
-        assert applied and applied[0].agent_max_replies == 2, applied
+        admin.write_config({'agent_max_replies': '3'})
+        assert applied and applied[0].agent_max_replies == 3, applied
         # 越界的数值当场拒，且一个字都不写
         try:
             admin.write_config({'reply_context_length': '0'})
