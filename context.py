@@ -52,7 +52,7 @@ def is_system_notice(msg: Message) -> bool:
     return getattr(msg, 'pat', None) is not None or MessageKind.of(msg.msg_type) in SYSTEM_KINDS
 
 
-def _format_time(t: int) -> str:
+def format_time(t: int) -> str:
     """ 绝对时间，如 '09-14 14:32:07'。
 
     用绝对时间而非相对时间：历史消息的文本必须跨轮稳定，否则前缀会变，
@@ -223,7 +223,7 @@ class ChatWindow:
         for record in self._history:
             who = '我' if record.is_self else record.sender
             body = record.text.replace('\n', ' ')
-            prefix = f'[{_format_time(record.t)}] ' if record.t else ''
+            prefix = f'[{format_time(record.t)}] ' if record.t else ''
             tag = f'{message_handle(record.msg_id)} ' if record.msg_id else ''
             lines.append(f'{prefix}{tag}{who}: {body}')
         return '\n'.join(lines)

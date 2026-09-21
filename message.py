@@ -37,9 +37,21 @@ def _text(root: et.Element, path: str) -> str:
     return (node.text or '').strip() if node is not None else ''
 
 
+def _int_or(text: str, default: int = 0) -> int:
+    """ 取一个数字字段，缺了或不是数字就返回默认值。 """
+    try:
+        return int(text)
+    except ValueError:
+        return default
+
+
 def parse_reference_message(xml_data: str) -> dict:
     """ 解析引用消息，返回 `{content, sender, referred_message, referred_message_sender,
-    referred_message_type, referred_message_id}`。
+    referred_message_sender_name, referred_message_time, referred_message_type,
+    referred_message_id}`。
+
+    `referred_message_sender_name` / `referred_message_time` 是**被引那条**的说话人昵称和
+    时间（引用滑出窗口后，渲染时要拿它补上「谁、什么时候说的」）。缺字段一律空串 / 0。
 
     `referred_message` 是**原文**：被引的那条可能是图片 / 表情 / 链接 / 又一串引用，
     这时它是那段消息的 XML。渲染成人话是 `media.render_referred` 的事（解析器不碰
@@ -61,6 +73,10 @@ def parse_reference_message(xml_data: str) -> dict:
         # 被引的那条：优先级 = refermsg 的正文 > 它的 title（链接/文件才只有 title）
         'referred_message': _text(root, './/refermsg/content') or _text(root, './/refermsg//title'),
         'referred_message_sender': _text(root, './/refermsg/chatusr'),
+        # 被引那条的说话人昵称 / 时间。引用滑出窗口后就只剩正文能看了，这两样是给
+        # 模型补上「谁、什么时候说的」用的——refermsg 里现成带着，不用回 daemon 取
+        'referred_message_sender_name': _text(root, './/refermsg/displayname'),
+        'referred_message_time': _int_or(_text(root, './/refermsg/createtime')),
         # 被引那条的 msg_type：图片 3 / 表情 47 / 链接 49 / 文本 1 …… 渲染时要它
         'referred_message_type': int(_text(root, './/refermsg/type') or 0),
         # 被引那条的服务端 id（svrId）。面板点引用块跳过去就靠它。
@@ -80,6 +96,8 @@ if __name__ == '__main__':
     assert parsed['content'] == '直接用这个点进去对比', parsed
     assert parsed['sender'] == 'wxid_sender', parsed
     assert parsed['referred_message_sender'] == 'wxid_kf7zbyjjxs8r22', parsed
+    assert parsed['referred_message_sender_name'] == 'zzq', parsed
+    assert parsed['referred_message_time'] == 0, parsed          # 这条没带 createtime
     assert parsed['referred_message'].startswith('<msg><appmsg><title>和我一起测测'), parsed
     assert parsed['referred_message_type'] == 49, parsed
     assert parsed['referred_message_id'] == '3159424424184903022', parsed
@@ -100,6 +118,8 @@ if __name__ == '__main__':
     assert parsed['referred_message_id'] == '4443715993374741156', parsed
     assert parsed['referred_message'] == '@雨墨蝉烟 咋不说话了', parsed
     assert parsed['referred_message_sender'] == 'wxid_kf7zbyjjxs8r22', parsed
+    assert parsed['referred_message_sender_name'] == 'zzq', parsed
+    assert parsed['referred_message_time'] == 1789868031, parsed
     # 带 XML 声明的也要能解析
     assert parse_reference_message('<?xml version="1.0"?>' + outbound)['content'] == '在呢，看你们聊呢'
 
@@ -131,8 +151,15 @@ if __name__ == '__main__':
     # 缺字段的引用不能把整条消息带崩：字段取空串就行
     bare = parse_reference_message('<msg><appmsg><title>嗯</title><type>57</type></appmsg></msg>')
     assert bare['referred_message'] == '' and bare['referred_message_type'] == 0, bare
+    # 昵称 / 时间缺了就是空串 / 0，不能把整条引用带崩
+    assert bare['referred_message_sender_name'] == '' and bare['referred_message_time'] == 0, bare
     # 没有 svrid 时给空串：面板拿到空串就不做跳转，不能给它 None
     assert bare['referred_message_id'] == '', bare
+    # createtime 不是数字也不能炸
+    bad_time = parse_reference_message('<msg><appmsg><title>嗯</title><type>57</type>'
+                                       '<refermsg><createtime>不是数字</createtime>'
+                                       '</refermsg></appmsg></msg>')
+    assert bad_time['referred_message_time'] == 0, bad_time
 
     # 不是引用：抛 ValueError（不是 AssertionError——`python -O` 下 assert 会消失）
     try:

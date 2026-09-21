@@ -145,8 +145,9 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
         # 图片带上短标签，好和内联给模型的附件对上
         self.assertTrue(window[1].text.startswith('[图片 #'), window[1].text)
         self.assertEqual(window[1].media_id, 102)
-        # 被引的那条渲染成人话：这里是条链接（内层 appmsg 没有 type）
-        self.assertEqual(window[2].text, '回复内容（引用前文的消息：[链接] 被引用的内容）')
+        # 被引的那条渲染成人话：这里是条链接（内层 appmsg 没有 type），
+        # 顺带带上是谁说的（refermsg 的 displayname）
+        self.assertEqual(window[2].text, '回复内容（引用 Alice：[链接] 被引用的内容）')
         self.assertEqual(window[2].media_id, 0)          # 链接不内联
         self.assertEqual([r.t for r in window], [200, 201, 202])
 

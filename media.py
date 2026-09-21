@@ -246,13 +246,28 @@ def render_referred(parsed: dict, handle: str = '') -> str:
     return add_handle(text, handle) if (handle and media is not None and media.describable) else text
 
 
+def _quote_label(parsed: dict) -> str:
+    """ 被引那条的「谁 + 什么时候」，如 `纸骃 09-20 09:33:51`。
+
+    被引的消息滑出窗口（或 daemon 没见过）时注解里只剩正文，模型不知道是谁、什么时候
+    说的——refermsg 里就带着 displayname / createtime，不用回 daemon 取。
+    缺了谁就少写一段；两样都没有返回空串。
+    """
+    from context import format_time  # context 依赖 media，只能在函数里导
+
+    who = (parsed.get('referred_message_sender_name') or '').strip()
+    when = parsed.get('referred_message_time') or 0
+    return ' '.join(part for part in (who, format_time(when) if when else '') if part)
+
+
 def parse_appmsg(content: str, quoted_handle: str = '', quoted_known: bool = False) -> str:
     """ appmsg（msg_type=49）→ 引用 / 链接 / 文件 / 小程序 / 合并转发的可读文本。
 
     `quoted_known`：被引的那条确定还在模型这一轮看得见的窗口里。是就只给短标签
     `（引用 #xxxx）`，正文让模型自己去那行读——既省掉重复贴一遍的 token，注解里也多出
     发送人和时间。否（滑出去了 / daemon 没见过 / 引用的是别的会话）就仍把原文贴出来，
-    一个指不到东西的标签比多贴几个字更糟。
+    并补上被引那条的「谁、什么时候」（见 `_quote_label`）：一个指不到东西的标签
+    比多贴几个字更糟。
 
     历史上这里只处理引用(type=57)，遇到链接会把原始 XML 漏进历史，故统一收敛到此处。
     """
@@ -270,7 +285,9 @@ def parse_appmsg(content: str, quoted_handle: str = '', quoted_known: bool = Fal
             note = f'（引用 {quoted_handle}）'
         else:
             quoted = render_referred(parsed, quoted_handle)
-            note = f'（引用前文的消息：{quoted}）' if quoted else '（引用了前文的消息）'
+            who = _quote_label(parsed)
+            heading = f'引用 {who}' if who else '引用前文的消息'
+            note = f'（{heading}：{quoted}）' if quoted else '（引用了前文的消息）'
         # 只引了个图、自己一个字没说：那这条记录就是那句注解
         return f'{parsed["content"]}{note}' if parsed['content'] else note
     if appmsg_type == '19':
@@ -389,6 +406,13 @@ if __name__ == '__main__':
     assert parse_appmsg(quote, '#4k2p0z', quoted_known=True) == '回复内容（引用 #4k2p0z）'
     # 不可见（没给标签 / 引用的是别的会话）→ 仍把原文贴出来
     assert parse_appmsg(quote, '', quoted_known=True) == '回复内容（引用前文的消息：[链接] 被引用的内容）'
+    # 滑出窗口的引用：正文照贴，另外补上「谁、什么时候说的」（refermsg 里现成带着）
+    labelled = ('<msg><appmsg><title>这也太好看了</title><type>57</type><refermsg>'
+                '<type>1</type><chatusr>wxid_bob</chatusr><displayname>纸骃</displayname>'
+                '<createtime>1789868031</createtime><content>周末去爬山不</content>'
+                '</refermsg></appmsg><fromusername>wxid_alice</fromusername></msg>')
+    assert parse_appmsg(labelled) == '这也太好看了（引用 纸骃 09-20 09:33:51：周末去爬山不）', \
+        parse_appmsg(labelled)
 
     # 被引的是图片 / 表情：refermsg 正文是它们的 XML（没有 title）。
     # 以前这两种是 AttributeError → 整条引用变成 `[引用消息]`
