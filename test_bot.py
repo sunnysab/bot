@@ -286,9 +286,11 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         calls = []
 
         async def sessions(count=10):
+            await asyncio.sleep(0.01)      # 真机这里是 RPC：不让出控制权就复现不了竞态
             return ['456@chatroom']
 
         async def fetch(contact, count=30):
+            await asyncio.sleep(0.01)
             calls.append(contact)
             window = ChatWindow()
             window.append('Alice', '在吗', 1)
@@ -296,7 +298,9 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
 
         self.bot._wechat.get_recent_sessions = sessions
         self.bot._wechat.fetch_history = fetch
-        await self.bot.load_context()
+        # on_ready 与 login_status 是几乎同时的两个回调，只顺序调测不出竞态：
+        # 两个协程都先过守卫再各自 await，历史就被 extend 两遍（窗口里每行出现两次）
+        await asyncio.gather(self.bot.load_context(), self.bot.load_context())
         await self.bot.load_context()
         self.assertEqual(calls, ['456@chatroom'])
         self.assertEqual(len(self._window()), 1)

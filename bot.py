@@ -100,6 +100,9 @@ class Bot:
         # 启动历史只加载一次：on_ready 和 login_status 各会触发一次，重复加载会让
         # 同一批消息在窗口里出现两遍，复读机会把每条都当成队形
         self._history_loaded = False
+        # 光有这个标志挡不住并发：on_ready 与 login_status 是几乎同时触发的两个回调，
+        # 都先过了检查再各自 await，同一批历史就被 extend 两遍。整段载入放锁里
+        self._history_lock = asyncio.Lock()
         self._keeper = keeper
         # 消息处理插件
         self._plugins = PluginManager()
@@ -315,36 +318,38 @@ class Bot:
         :param session_count: 加载的最近会话数量
         :param window_size: 每个会话加载的消息数量
         """
-        if self._history_loaded:  # on_ready 与 login_status 都会拉一次，第二次直接跳过
-            return
-        count_loaded = 0
-        try:
-            sessions = await self._wechat.get_recent_sessions(session_count)
-        except WeChatBotError as e:
-            # 会话过期时 daemon 让连不让查，on_ready 那一轮只能跳过；等扫码登录后
-            # register_login 会再调一次
-            logger.warning(f'daemon 尚未登录，先不加载历史上下文（{e}）')
-            return
-        for contact in sessions:
-            window = await self._wechat.fetch_history(contact, window_size)
-            count_loaded += len(window)
-            self._history.get_context(contact).extend(window)
-            self._schedule_history_media(window)
+        async with self._history_lock:
+            if self._history_loaded:  # on_ready 与 login_status 都会拉一次，第二次直接跳过
+                return
+            count_loaded = 0
+            try:
+                sessions = await self._wechat.get_recent_sessions(session_count)
+            except WeChatBotError as e:
+                # 会话过期时 daemon 让连不让查，on_ready 那一轮只能跳过；等扫码登录后
+                # register_login 会再调一次
+                logger.warning(f'daemon 尚未登录，先不加载历史上下文（{e}）')
+                return
+            for contact in sessions:
+                window = await self._wechat.fetch_history(contact, window_size)
+                count_loaded += len(window)
+                self._history.get_context(contact).extend(window)
+                self._schedule_history_media(window)
 
-        self._history_loaded = True
-        logger.info(f'{len(sessions)} sessions, {count_loaded} messages loaded.')
+            self._history_loaded = True
+            logger.info(f'{len(sessions)} sessions, {count_loaded} messages loaded.')
 
     def _schedule_history_media(self, window: ChatWindow) -> None:
-        """ 启动加载的历史媒体按会话限量补描述，避免一次烧太多识图调用。 """
+        """ 启动加载的历史媒体**全部**补描述，从新到旧。
+
+        以前按条数限量（describe_history_limit），窗口里剩下的图就永远只有 `[图片]`——
+        模型看得见这一行却没有内容，评论它、引用它都只能瞎编。并发上限
+        （describe_concurrency）已经挡住了打爆接口，刷图只会排队。
+        """
         if not self._describer:
             return
-        scheduled = 0
         for record in reversed(list(window)):
-            if scheduled >= self.describe_history_limit:
-                break
             if record.media and record.media.needs_description and record.download:
                 self._describer.schedule(record)
-                scheduled += 1
 
     def _typing_delay(self, text: str) -> float:
         """ 拟人打字延迟 = 随机思考时间 + 与字数成比例的时间（再乘随机抖动），单条最多 50 秒。 """

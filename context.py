@@ -135,6 +135,24 @@ class ChatWindow:
 
         history: list[SingleRecord] = history or []
         self._history = history[:max_history]
+        # 按 svrid 去重：daemon 重连重放、启动加载和实时推送叠在一起，都会把同一条消息塞两遍。
+        # 0 = 没有身份（自己刚发出去、测试造的），不去重
+        self._by_id: dict[int, SingleRecord] = {record.msg_id: record
+                                                for record in self._history if record.msg_id}
+
+    def _insert(self, record: SingleRecord) -> SingleRecord:
+        """ 把一条记录放进窗口；同 svrid 已经在里面就原样返回旧的。 """
+        if record.msg_id and record.msg_id in self._by_id:
+            return self._by_id[record.msg_id]
+        if len(self._history) >= self.max_history:
+            evicted = self._history.pop(0)
+            self._by_id.pop(evicted.msg_id, None)
+            if self._on_evict:
+                self._on_evict(evicted)  # 滑出窗口，交给中期记忆压缩
+        self._history.append(record)
+        if record.msg_id:
+            self._by_id[record.msg_id] = record
+        return record
 
     def append(self, sender: str, text: str, t: int = 0, media: Media | None = None,
                download: Callable[[], Awaitable[bytes]] | None = None, is_self: bool = False,
@@ -151,13 +169,8 @@ class ChatWindow:
         :param media_id: 要内联给模型的媒体的 svrid（见 SingleRecord）
         :param handle: 媒体在 transcript 里的短标签
         """
-        if len(self._history) >= self.max_history:
-            evicted = self._history.pop(0)
-            if self._on_evict:
-                self._on_evict(evicted)  # 滑出窗口，交给中期记忆压缩
         record = SingleRecord(sender, text, t, media, download, is_self, msg_id, media_id, handle)
-        self._history.append(record)
-        return record
+        return self._insert(record)
 
     def forget(self, record: SingleRecord) -> bool:
         """ 抹掉一条记录（撤回自己说过的话用）。
@@ -168,6 +181,7 @@ class ChatWindow:
         for index, item in enumerate(self._history):
             if item is record:
                 del self._history[index]
+                self._by_id.pop(item.msg_id, None)
                 return True
         return False
 
@@ -176,8 +190,9 @@ class ChatWindow:
         self._history.sort(key=lambda x: x.t)
 
     def extend(self, other: ChatWindow):
-        """ 扩展历史记录 """
-        self._history = (self._history + other._history)[-self.max_history:]
+        """ 扩展历史记录。同 svrid 的跳过——重放 / 重复加载都不能让一行出现两次。 """
+        for record in other._history:
+            self._insert(record)
         self.sort()
 
     def latest_n(self, n: int) -> ChatWindow:
@@ -330,4 +345,18 @@ if __name__ == '__main__':
     assert '我: 在' not in str(window)
     assert window.forget(kept) is True and len(window) == 1
     assert window.forget(kept) is False          # 删过的不再删
+
+    # 同一条消息塞两遍（daemon 重放 / 启动重复加载）只算一条，重放的那次把原记录还回去
+    once = ChatWindow()
+    first = once.append('张三', '在吗', 1000, msg_id=111)
+    assert once.append('张三', '在吗', 1000, msg_id=111) is first
+    assert len(once) == 1
+    # extend 同样按 svrid 去重；没有 svrid 的消息（自己发的、测试造的）不参与
+    other = ChatWindow()
+    other.append('张三', '在吗', 1000, msg_id=111)
+    other.append('张三', '又来了', 1000, msg_id=222)
+    other.append('我', '在', 1001, is_self=True)
+    once.extend(other)
+    assert len(once) == 3, [record.text for record in once]
+    assert str(once).count('在吗') == 1
     print('ok')
