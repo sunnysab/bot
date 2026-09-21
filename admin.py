@@ -294,6 +294,16 @@ class DecisionLog:
         self._conn.close()
 
 
+def _log_failure(future) -> None:
+    """ fire-and-forget 任务的兜底：没人取的话异常会在 future 被回收时静默消失。 """
+    try:
+        error = future.exception()
+    except BaseException as e:  # noqa: BLE001 —— 被取消也算没跑成，记一笔就够
+        error = e
+    if error is not None:
+        logger.warning(f'后台任务失败: {error}')
+
+
 class Admin:
     def __init__(self, runtime, host: str = '127.0.0.1', port: int = DEFAULT_PORT,
                  sidecar: str | Path = SIDECAR):
@@ -749,6 +759,24 @@ class Admin:
         # 走 Bot.enqueue：和机器人自己回复一样先写历史，模型才知道「我」说过这句
         self.runtime.bot.enqueue(chat, text, sender=sender, chat_name=chat)
 
+    def force_reply(self, chat: str, msg_id: str) -> dict:
+        """ 手动让 bot 回这条：站在那条消息当时的聊天记录视角生成一句再发。
+
+        一轮 LLM 要好几秒，HTTP 不能干等（call 会超时，超时了回复照样在跑，
+        面板却报错）——丢给事件循环就返回，进度看气泡上的状态章。
+        """
+        if not (chat and msg_id.isdigit()):
+            raise ValueError('chat 和 msg_id 都得给，msg_id 是 daemon 的整数 id')
+        self.dispatch(self.runtime.bot.force_reply(chat, int(msg_id)))
+        return {'triggered': msg_id}
+
+    def dispatch(self, coro) -> None:
+        """ 丢给 bot 的事件循环跑，**不等结果**（要等结果用 call）。 """
+        loop = self.runtime.loop
+        if loop is None:
+            raise RuntimeError('bot 的事件循环还没起来')
+        asyncio.run_coroutine_threadsafe(coro, loop).add_done_callback(_log_failure)
+
     def set_focus(self, chat: str, on: bool) -> dict:
         """ 手动进/出专注。手动进出不进冷却（FocusMode.enter/exit 本来就支持）。 """
         if not chat:
@@ -945,6 +973,9 @@ class Admin:
                 return self._json(handler, self.logout())
             if route == '/api/send':
                 return self._json(handler, self.send(payload.get('chat', ''), payload.get('text', '')))
+            if route == '/api/reply':
+                return self._json(handler, self.force_reply(payload.get('chat', ''),
+                                                         payload.get('msg_id', '')))
             if route == '/api/focus':
                 return self._json(handler, self.set_focus(payload.get('chat', ''),
                                                           bool(payload.get('on'))))
@@ -1226,6 +1257,24 @@ def _self_check() -> None:
         raise AssertionError('非数字 msg_id 应该被拒')
     except ValueError:
         pass
+
+    # 「手动回复这条」：丢进事件循环就返回（一轮 LLM 好几秒，HTTP 不能干等），
+    # 但参数校验必须在丢之前——面板传个垃圾不能变成 500
+    triggered: list[tuple] = []
+
+    async def fake_force(chat, svrid):
+        triggered.append((chat, svrid))
+
+    runtime.bot.force_reply = fake_force
+    admin.dispatch = lambda coro: asyncio.run(coro)
+    assert admin.force_reply('g', '3159424424184903022') == {'triggered': '3159424424184903022'}
+    assert triggered == [('g', 3159424424184903022)], triggered
+    for bad in (('', '1'), ('g', ''), ('g', '12abc')):
+        try:
+            admin.force_reply(*bad)
+            raise AssertionError(f'应该被拒: {bad}')
+        except ValueError:
+            pass
 
     # 头像接口：daemon 那边先读盘再打网络（缓存归它），bot 只转发字节
     async def fake_avatar(wxid):
