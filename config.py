@@ -56,6 +56,9 @@ class Config:
     # 走 Unix domain socket 时填写（如 /tmp/weixin-daemon.sock），否则留空走 TCP
     daemon_unix: str = ''
     deepseek_key: str = ''
+    # 联网搜索（Tavily）的 key。留空则回退读项目根的 tavily.key 文件（见 websearch.py）；
+    # 两处都没有就不挂 web_search 工具
+    tavily_key: str = ''
     deepseek_model: str = 'deepseek-flash'
     # 主模型的服务地址，可指向第三方 OpenAI 兼容服务（更便宜的代理/中转）
     deepseek_url: str = 'https://api.deepseek.com'
@@ -188,6 +191,10 @@ if __name__ == '__main__':
     # 自检：无环境变量时用默认值，有环境变量时覆盖
     base = Config.from_env()
     assert base.daemon_port == 9099 and base.send_interval == 1.0 and base.deepseek_key == '', base
+    assert base.tavily_key == '', base          # 默认空：key 走 tavily.key 文件
+    os.environ['TAVILY_KEY'] = 'tvly-x'
+    assert Config.from_env().tavily_key == 'tvly-x'
+    del os.environ['TAVILY_KEY']
     os.environ.update(DAEMON_PORT='9098', SEND_INTERVAL='2.5', DEEPSEEK_KEY='k')
     overridden = Config.from_env()
     assert overridden.daemon_port == 9098, overridden

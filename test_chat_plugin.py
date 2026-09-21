@@ -18,7 +18,7 @@ from moments import Moment, MomentStore
 from necessity import NECESSITY_THRESHOLD, SpeechLimiter
 from persona import Persona
 from personas import PersonaStore
-from plugin import REVOKE_PER_TURN, ChatPlugin, RepeatPlugin, ReplyPolicy, clean_reply
+from plugin import REVOKE_PER_TURN, WEB_SEARCH_PER_TURN, ChatPlugin, RepeatPlugin, ReplyPolicy, clean_reply
 from profiles import Profile, ProfileStore
 from reply_trace import TraceLogger
 from reply_trace import find as find_trace
@@ -873,6 +873,51 @@ class TestMessageSearchTool(unittest.IsolatedAsyncioTestCase):
         ai = ToolAi([AssistantTurn()])
         await ChatPlugin(ai, context_length=10).handle(proactive_ctx())
         self.assertNotIn('search_messages', ai.tools_seen[0])
+
+
+class TestWebSearchTool(unittest.IsolatedAsyncioTestCase):
+    """ 联网搜索：模型自己发起，结果回灌给它。 """
+
+    def setUp(self):
+        self.searched = []
+
+    async def search(self, query):
+        self.searched.append(query)
+        return '联网搜到的资料：\n综合回答：今天晴' if query == '天气' else '网上没搜到'
+
+    def plugin(self, turns, **kwargs):
+        self.ai = ToolAi(turns)
+        return ChatPlugin(self.ai, context_length=10, web_search=self.search,
+                          reply_mode='agent', **kwargs)
+
+    async def test_results_are_fed_back_and_the_turn_continues(self):
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('web_search', query='天气'),)),
+                              AssistantTurn(tool_calls=(_call('reply', text='今天晴'),))])
+        reply = await plugin.handle(proactive_ctx())
+
+        self.assertIn('web_search', self.ai.tools_seen[0])
+        self.assertEqual(self.searched, ['天气'])
+        # 搜到的东西要进下一轮的对话，否则搜了也白搜
+        self.assertIn('今天晴', json.dumps(self.ai.rounds[1], ensure_ascii=False))
+        self.assertEqual(reply.texts, ['今天晴'])
+
+    async def test_empty_query_does_not_touch_the_backend(self):
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('web_search'),)), AssistantTurn()])
+        await plugin.handle(proactive_ctx())
+        self.assertEqual(self.searched, [])
+        self.assertIn('没给搜索词', json.dumps(self.ai.rounds[1], ensure_ascii=False))
+
+    async def test_searches_are_capped_per_turn(self):
+        """ 一轮里模型看不见自己搜过几回，不能让它一个词反复搜。 """
+        calls = tuple(_call('web_search', query=f'词{i}') for i in range(WEB_SEARCH_PER_TURN + 1))
+        plugin = self.plugin([AssistantTurn(tool_calls=calls)])
+        await plugin.handle(proactive_ctx())
+        self.assertEqual(len(self.searched), WEB_SEARCH_PER_TURN)
+
+    async def test_tool_is_hidden_without_a_backend(self):
+        ai = ToolAi([AssistantTurn()])
+        await ChatPlugin(ai, context_length=10).handle(proactive_ctx())
+        self.assertNotIn('web_search', ai.tools_seen[0])
 
 
 class TestRefTool(unittest.IsolatedAsyncioTestCase):

@@ -42,6 +42,7 @@ from planner import PLAN_RESPONSE_FORMAT
 from plugin import ChatPlugin, EndProcessing, RepeatPlugin, ReplyPolicy
 from profiles import ProfileStore
 from reply_trace import TraceLogger
+from websearch import TavilySearch
 
 # 默认静音的会话。键是**显示名**——插件链是按显示名分发的（见 plugin.PluginManager）。
 # 只在名单文件还不存在时当种子用，以后以面板上改的为准
@@ -119,6 +120,7 @@ HOT_FIELDS = frozenset({
     'enable_planner', 'reply_mode', 'planner_url', 'planner_model', 'planner_key', 'planner_temperature',
     'planner_max_tokens', 'planner_thinking', 'planner_json_schema', 'enable_tools',
     'planner_rounds', 'request_timeout', 'trace_path',
+    'tavily_key',
 })
 # 构造期就定死的东西：路径 / 传输 / 识图 / 日志
 RESTART_FIELDS = frozenset({
@@ -222,6 +224,11 @@ class Runtime:
                               timeout=self.config.describe_timeout,
                               max_tokens=self.config.describe_max_tokens)
 
+    def _make_search(self) -> TavilySearch | None:
+        """ 联网搜索。没配 key（环境变量和 tavily.key 都没有）就不挂工具。 """
+        search = TavilySearch(self.config.tavily_key)
+        return search if search.ready else None
+
     def _make_policy(self) -> ReplyPolicy:
         config = self.config
         return ReplyPolicy(threshold=config.reply_necessity_threshold,
@@ -257,6 +264,7 @@ class Runtime:
                           reply_mode=config.reply_mode, revoke=self.bot.revoke,
                           member_lookup=self.bot.lookup_member,
                           message_search=self.bot.search_messages,
+                          web_search=self._make_search(),
                           pat=self.bot.pat,
                           agent_max_replies=config.agent_max_replies,
                           personas=self.personas,

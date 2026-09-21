@@ -84,11 +84,12 @@ ASSET_TYPES = {'.js': 'text/javascript; charset=utf-8', '.css': 'text/css; chars
                **MEDIA_TYPES}
 
 # 不回显的字段：表单里留空 = 保持原值
-SECRET_FIELDS = frozenset({'deepseek_key', 'planner_key'})
+SECRET_FIELDS = frozenset({'deepseek_key', 'planner_key', 'tavily_key'})
 
 # 面板上的分组。没列进来的字段会被自检抓出来（新加配置不能忘了放进面板）
 CONFIG_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ('模型', ('deepseek_key', 'deepseek_model', 'deepseek_url', 'describe_model', 'request_timeout')),
+    ('联网搜索', ('tavily_key',)),
     ('门控（值不值得让模型看一眼）', (
         'reply_necessity_threshold', 'reply_activity_window',
         'backoff_start_after', 'backoff_base_seconds', 'backoff_max_seconds',
