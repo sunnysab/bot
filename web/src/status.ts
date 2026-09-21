@@ -10,12 +10,14 @@ export const LABEL: Record<string, string> = {
   gated: '跳过·门控', backoff: '跳过·退避', rate_limited: '跳过·太频繁',
   deciding: '决策中', planner_silent: '不发言', planner_failed: '决策调用失败',
   expressing: '生成回复中', express_failed: '表达失败', empty_reply: '回复为空',
-  placeholder_blocked: '占位符已拦', queued: '已排队', typing: '输入中',
+  placeholder_blocked: '占位符已拦', manual: '手动触发',
+  queued: '已排队', typing: '输入中',
   sent: '已回复', dry_run: '演习回复', failed: '发送报错',
 };
 
 export const GROUP: Record<string, string> = {
-  received: 'pending', deciding: 'pending', expressing: 'pending', queued: 'pending', typing: 'pending',
+  received: 'pending', deciding: 'pending', expressing: 'pending', queued: 'pending',
+  typing: 'pending', manual: 'pending',
   sent: 'replied', phone: 'phone', dry_run: 'dry_run',
   stale: 'skipped', muted: 'skipped', gated: 'skipped', backoff: 'skipped',
   rate_limited: 'skipped',

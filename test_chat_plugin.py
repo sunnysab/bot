@@ -111,9 +111,9 @@ def sample_history():
     return window
 
 
-def make_ctx(msg, history=None):
+def make_ctx(msg, history=None, forced=False):
     history = history if history is not None else sample_history()
-    return MessageContext(msg=msg, history=history, self_name='Bot', contact='测试群')
+    return MessageContext(msg=msg, history=history, self_name='Bot', contact='测试群', forced=forced)
 
 
 def history_with(others: int, now: float) -> ChatWindow:
@@ -165,6 +165,14 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
         self.assertEqual(reply.texts, ['收到'])
         self.assertNotIn('【决策】', self.plugin.ai.reply_calls[0][1])
+
+    async def test_forced_reply_ignores_a_silent_plan(self):
+        """ 手动触发：决策者仍可说「不发言」，但人点了它，就得不说话也不算数。 """
+        self.plugin.ai = FakeAi(plan='{"speak": false, "analysis": "接不上"}')
+        reply = await self.plugin.handle(make_ctx(
+            make_msg(is_chatroom=True, content='大家好啊'), forced=True))
+        self.assertEqual(reply.texts, ['收到'])
+        self.assertEqual(len(self.plugin.ai.planner_calls), 1)
 
     async def test_plan_is_passed_to_expressor(self):
         await self.plugin.handle(proactive_ctx())
@@ -455,6 +463,15 @@ class TestReplyPolicy(unittest.TestCase):
 
     def test_quiet_group_is_silent(self):
         self.assertIsNone(self.policy.evaluate(self.ctx(content='大家好啊'), now=1000.0))
+
+    def test_forced_skips_the_gate_but_keeps_the_score(self):
+        """ 手动触发只跳过「拦不拦」：分数照算，面板要看得见「本来会被拦下」。 """
+        ctx = self.ctx(content='大家好啊')
+        ctx.forced = True
+        decision = self.policy.evaluate_detailed(ctx, now=1000.0, forced=True)
+        self.assertTrue(decision.allowed)
+        self.assertIsNotNone(decision.score_obj)
+        self.assertLess(decision.score, decision.threshold)
 
     def test_active_group_question_triggers(self):
         history = history_with(12, now=1000.0)

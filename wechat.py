@@ -472,9 +472,18 @@ class Wechat:
         """
         messages = await self._bot.get_messages(limit=count, contact=wxid, reverse=True,
                                                 query=query or None, exclude_system=True)
+        return await self.window_from(messages)
 
+    async def window_from(self, messages, names: dict[str, str] | None = None) -> ChatWindow:
+        """ daemon 原始消息 → 上下文窗口。fetch_history 和「手动回复这条」共用这一套渲染。
+
+        :param names: `{wxid: 显示名}`，补 daemon 没解析出来的发送者。daemon 对不在联系人表
+            里的人会直接把 wxid 当名字返回，现取的窗口得自己补一次
+        """
         result = ChatWindow()
         for msg in messages:
+            if names and msg.sender in names:
+                msg.sender_display_name = names[msg.sender]
             handle = message_handle(msg.msg_id)
             quoted = message_handle(msg.ref_svrid) if msg.ref_svrid else ''
             content, media = render(msg.msg_type, msg.content, msg.text,

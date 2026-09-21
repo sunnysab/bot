@@ -44,6 +44,7 @@ class Status:
     EXPRESS_FAILED = 'express_failed'      # 表达者调用失败
     EMPTY_REPLY = 'empty_reply'            # 清洗后为空
     PLACEHOLDER_BLOCKED = 'placeholder_blocked'
+    MANUAL = 'manual'                      # 管理后台手动让 bot 回这条（门控不算数）
     # 出站
     QUEUED = 'queued'
     TYPING = 'typing'
@@ -54,7 +55,7 @@ class Status:
     # 面板按这四组上色 / 过滤
     _GROUP = {
         RECEIVED: 'pending', DECIDING: 'pending', EXPRESSING: 'pending',
-        QUEUED: 'pending', TYPING: 'pending',
+        QUEUED: 'pending', TYPING: 'pending', MANUAL: 'pending',
         SENT: 'replied', PHONE: 'phone',
         STALE: 'skipped', MUTED: 'skipped',
         GATED: 'skipped', BACKOFF: 'skipped', RATE_LIMITED: 'skipped', PLANNER_SILENT: 'skipped',

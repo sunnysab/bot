@@ -278,6 +278,9 @@ class MessageContext:
     history: ChatWindow
     self_name: str
     contact: str
+    # 管理后台「手动回复这条」：跳过门控 / 退避 / 频率闸，而且必须开口。
+    # 人已经替你决定了要说，这里再拦一次就是把人的操作吞掉
+    forced: bool = False
 
     @property
     def kind(self) -> MessageKind:

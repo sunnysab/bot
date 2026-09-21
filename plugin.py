@@ -388,8 +388,13 @@ class ReplyPolicy:
         self.focus_score_bonus = focus_score_bonus
         self.speech = speech
 
-    def evaluate_detailed(self, ctx: MessageContext, now: float) -> GateDecision:
-        """ 门控 + 理由。面板要显示「跳过的原因」，所以不能再只给 None。 """
+    def evaluate_detailed(self, ctx: MessageContext, now: float,
+                          forced: bool = False) -> GateDecision:
+        """ 门控 + 理由。面板要显示「跳过的原因」，所以不能再只给 None。
+
+        `forced`（管理后台手动点了「回复这条」）只跳过**拦不拦**这一层：分数照算，
+        面板要看得见「本来会被拦下」；退避和频率闸也不记一笔，那是自动回复的节流。
+        """
         msg = ctx.msg
         activity = self._activity(ctx, now)
         result = score_necessity(NecessityInput(
@@ -401,6 +406,10 @@ class ReplyPolicy:
             self_replies=self._self_replies(ctx, now),
             recent_messages=self._recent_messages(ctx, now),
         ))
+        if forced:
+            return GateDecision(allowed=True, score=result.score, kind=result.kind,
+                                reasons=result.reasons, score_obj=result,
+                                threshold=self.threshold)
         # 专注模式：聊得正热就盯一会儿。**不再动分数**（focused 只用于跳过沉默退避
         # 和往 prompt 里加一句「可更主动」）——热群本来就有压力分，再加就成了热群必回
         if result.kind == 'proactive' and self.focus:
@@ -584,7 +593,9 @@ class ChatPlugin(Plugin):
         # 「文本/图片/表情/语音」，结果是引用（type=49）被当成「不支持的类型」没人回——
         # 而它的正文就是一句话；@ 上一篇文章也一样被吞。
         now = time.time()
-        decision = self.policy.evaluate_detailed(ctx, now)
+        decision = self.policy.evaluate_detailed(ctx, now, forced=ctx.forced)
+        if ctx.forced:
+            self._emit(ctx, Status.MANUAL, f'手动触发 · 必要性 {decision.score}/{decision.threshold}')
         if not decision.allowed:
             blocked = {'score': Status.GATED, 'rate': Status.RATE_LIMITED}.get(
                 decision.blocked_by, Status.BACKOFF)
@@ -597,9 +608,13 @@ class ChatPlugin(Plugin):
         # 这两块是「本轮」的事：专注状态和必须回应，都放请求正文，不进 system prompt
         if necessity.focused and self.policy.focus:
             blocks['focus'] = self.policy.focus.describe(ctx.contact)
-        must_speak = necessity.kind != 'proactive'      # 被点名 / 私聊：必须回
+        # 被点名 / 私聊：必须回。手动触发也一样——人点了「回复这条」，就不该回一句「我闭嘴」
+        must_speak = ctx.forced or necessity.kind != 'proactive'
         if must_speak:
-            blocks['must'] = f'这条点名了 {ctx.self_name}，必须给个回应，不能装没看见。'
+            # 手动触发别说成「点名」——模型会以为自己被 @ 了，去答上一个根本不存在的人
+            blocks['must'] = ('这轮是人手动挑出来让你回的，必须说点什么，不能装没看见。'
+                              if ctx.forced
+                              else f'这条点名了 {ctx.self_name}，必须给个回应，不能装没看见。')
         transcript = '以下聊天记录供你参考：\n\n' + str(history)
         # 窗口里的图一并取回来附给模型（新→旧、按媒体去重）。取不到就少一张，不影响回复
         images = await self._collect_images(history)

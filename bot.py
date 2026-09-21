@@ -494,10 +494,16 @@ class Bot:
         preview = sent.text if len(sent.text) <= 20 else sent.text[:20] + '…'
         return f'已撤回：「{preview}」'
 
-    async def _run_plugins(self, msg: Message, self_name: str, source: str) -> Reply:
-        """ 把当前消息交给该会话的插件链，收集要回复的文本和表情。 """
-        ctx = MessageContext(msg=msg, history=self._history.get_context(msg.reply_target),
-                             self_name=self_name, contact=source)
+    async def _run_plugins(self, msg: Message, self_name: str, source: str,
+                           history: ChatWindow | None = None,
+                           forced: bool = False) -> Reply:
+        """ 把当前消息交给该会话的插件链，收集要回复的文本和表情。
+
+        :param history: 这一轮看的上下文。默认是当前活窗口；手动回复传「截到那条为止」的窗口
+        :param forced: 管理后台手动触发（见 `force_reply`）
+        """
+        ctx = MessageContext(msg=msg, history=history or self._history.get_context(msg.reply_target),
+                             self_name=self_name, contact=source, forced=forced)
         texts: list[str] = []
         emoji = None
         verbatim = False
@@ -555,19 +561,26 @@ class Bot:
             if self._turns.get(contact) is asyncio.current_task():
                 self._turns.pop(contact, None)
 
-    async def _reply_once(self, msg: Message, self_name: str, source: str) -> None:
-        """ 跑一轮插件链并把回复写历史 + 入队。 """
-        response = await self._run_plugins(msg, self_name, source)
+    async def _reply_once(self, msg: Message, self_name: str, source: str,
+                          forced: bool = False, history: ChatWindow | None = None) -> None:
+        """ 跑一轮插件链并把回复写历史 + 入队。
+
+        :param forced: 管理后台手动触发：不走「必不必须回」那套，而且一定引用被点的那条
+        :param history: 见 `_run_plugins`
+        """
+        response = await self._run_plugins(msg, self_name, source, history=history, forced=forced)
         if not response.texts and not response.emoji:
             logger.debug('no response to send.')
             # 插件链什么都没说，而且这一轮也没留下别的埋点（语音消息、或该会话静音），
-            # 补一条，否则面板上这条消息会永远停在「已接收」
+            # 补一条，否则面板上这条消息会永远停在「已接收 / 手动触发」
             latest = bus.status_of(msg.msg_id)
-            if latest is not None and latest.status == Status.RECEIVED:
-                # 走到这里只剩一种正常情况：该会话被 EndProcessing 静音。
-                # 其余路径（门控/决策/表达）都会自己发一条状态。
-                bus.publish(Status.MUTED, chat_id=msg.reply_target, chat_name=source,
-                            msg_id=msg.msg_id, detail='该会话已静音')
+            if latest is not None and latest.status in (Status.RECEIVED, Status.MANUAL):
+                # 自动回复走到这里只剩一种正常情况：该会话被 EndProcessing 静音。
+                # 手动触发多一种：这一轮真没生成出东西来
+                muted = self.is_muted(source)
+                bus.publish(Status.MUTED if muted else Status.EMPTY_REPLY,
+                            chat_id=msg.reply_target, chat_name=source, msg_id=msg.msg_id,
+                            detail='该会话已静音' if muted else '这一轮没生成任何回复')
             return  # 没有回复内容
 
         # 交给全局发送队列统一限流和拟人延迟，避免阻塞消息接收循环
@@ -583,7 +596,9 @@ class Bot:
         notice = is_system_notice(msg)
         if notice:
             logger.info(f'系统通知不引用（msg_id={msg.msg_id}）: {msg.sender_name}: {msg.content[:30]}')
-        ref_svrid = 0 if (response.verbatim or notice or not self.quote_replies) else response.ref
+        # 手动触发一定引用「这条」——人点的就是「回它」；开关和模型的挑法都是自动回复的事
+        ref = msg.msg_id if forced else (response.ref if self.quote_replies else 0)
+        ref_svrid = 0 if (response.verbatim or notice) else ref
         for text in texts:
             self.enqueue(msg.reply_target, text, sender=self_name,
                          reply_to=msg.msg_id, chat_name=source, verbatim=response.verbatim,
@@ -592,6 +607,70 @@ class Bot:
             self.enqueue(msg.reply_target, sender=self_name, reply_to=msg.msg_id,
                          chat_name=source, emoji=response.emoji)
         logger.debug(f'{len(texts)} responses queued.')
+
+    async def force_reply(self, chat: str, msg_id: int) -> None:
+        """ 管理后台「手动回复这条」：让 bot 站在**那条消息当时**的聊天记录视角回它一句。
+
+        门控 / 退避 / 频率闸一律跳过（人已经替你决定了要说），决策和表达照走——
+        人设、画像、群用语都还在，变的只是「上下文到哪儿为止」。
+
+        调用方不等结果：一轮 LLM 要好几秒，HTTP 干等只会超时（回复却已经在跑了）。
+        """
+        context = await self._context_at(chat, msg_id)
+        if context is None:
+            bus.publish(Status.MANUAL, chat_id=chat, msg_id=str(msg_id),
+                        detail='这条已经不在 daemon 的缓存里，拼不出当时的聊天记录')
+            return
+        window, msg = context
+        self_name = await self._wechat.get_display_name(self.wxid, chat)
+        source = await self._wechat.get_display_name(chat)
+        await self._reply_once(msg, self_name, source, forced=True, history=window)
+
+    async def _context_at(self, chat: str, svrid: int):
+        """ 某条消息那一刻的上下文：`(截到它为止的窗口, 那条 Message)`。取不到返回 None。
+
+        优先用**活窗口**——那正是模型当时看到的那份（图已经带描述、名字已经解析过），
+        截到它为止就行。滑出去了才回 daemon 现取一段以它结尾的历史：那份是冷的
+        （没见过图就只有占位符），但上下文仍然对得上「当时」。
+        """
+        handle = message_handle(svrid)
+        live = self._history.get_context(chat)
+        record = live.find_by_handle(handle)
+        # 那条消息本身仍要 daemon 的原始载荷（msg_type / is_chatroom / ref_svrid），
+        # 活窗口里的单条记录没带这些
+        cursor = await self._wechat.message_cursor(chat, svrid)
+        if not cursor:
+            return None
+        raw = await self._wechat.messages(chat, limit=1, before_id=cursor + 1, exclude_system=False)
+        if not raw:
+            return None
+        msg = raw[-1]
+        if record is None:
+            older = await self._wechat.messages(chat, limit=live.max_history,
+                                                before_id=cursor + 1, exclude_system=False)
+            window = await self._wechat.window_from(older, names=await self._names(chat, older))
+            record = window.find_by_handle(handle)
+            if record is None:
+                return None
+        else:
+            records = list(live)
+            window = ChatWindow(records[:records.index(record) + 1])
+        # 正文用记录里那份：那才是模型当时的视角（图带描述、引用带注解）
+        msg.content = msg.clean_text = record.text
+        msg.sender_display_name = record.sender
+        return window, msg
+
+    async def _names(self, chat: str, messages: list[Message]) -> dict[str, str]:
+        """ 补 daemon 没解析出来的发送者名（它拿 wxid 当名字返回）。 """
+        unknown = [m.sender for m in messages
+                   if not m.is_self and m.sender and m.sender_display_name == m.sender]
+        if not unknown:
+            return {}
+        try:
+            return await self._wechat.sender_names(chat, unknown)
+        except Exception as e:  # noqa: BLE001 —— 名字差一点不影响回复，不要因此不跑
+            logger.debug(f'补显示名失败（{chat}）: {e}')
+            return {}
 
     async def _render_pat(self, msg: Message, pat: PatContent) -> str:
         """ 拍一拍 → 历史里的一行（前缀的发送者由记录本身带上）。

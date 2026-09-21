@@ -14,6 +14,7 @@ from context import ChatWindow, message_handle
 from emojis import Emoji, EmojiLibrary
 from media import Media, render
 from plugin import EndProcessing, Plugin, RepeatPlugin, Reply
+from wechat import Wechat
 
 # daemon 回的 server_id：真实量级是 19 位，故意用超过 JS 安全整数 2^53 的值
 DAEMON_MSG_ID = 4212345678901234567
@@ -39,6 +40,7 @@ class FakeWechat:
         self.voices: list[int] = []                     # 请求过转写的语音 msg_id
         self.transcript = None                          # 非 None = 转写成功，返回这段文本
         self.pats: list[tuple[str, str]] = []           # (会话, 被拍者 wxid)
+        self.daemon_messages: list = []                 # 「手动回复这条」现取上下文时的 daemon 库
 
     async def send_pat(self, to, target=None):
         self.pats.append((to, target or to))
@@ -115,6 +117,26 @@ class FakeWechat:
     async def get_display_name(self, wxid, chatroom=''):
         return self.names.get(wxid, wxid)
 
+    async def sender_names(self, chat, senders):
+        return {sender: self.names.get(sender, sender) for sender in senders}
+
+    # 「手动回复这条」要的那几面：按 svrid 反查游标、按游标取一段、装成上下文窗口。
+    # 游标就是 1-based 下标，`before_id` 和真 daemon 一样是**不含**它自己（`id < before_id`）
+    async def message_cursor(self, chat, svrid):
+        for index, msg in enumerate(self.daemon_messages):
+            if msg.msg_id == svrid:
+                return index + 1
+        return 0
+
+    async def messages(self, chat, limit=300, exclude_system=True, before_id=0, after_id=0):
+        rows = [msg for index, msg in enumerate(self.daemon_messages, start=1)
+                if (not before_id or index < before_id)
+                and (not after_id or index > after_id)]
+        return rows[-limit:] if limit else rows
+
+    async def window_from(self, messages, names=None):
+        return await Wechat.window_from(self, messages, names)
+
 
 class FakePlugin(Plugin):
     def __init__(self, texts=None, stop=False, emoji=None, at='', ref=0):
@@ -155,6 +177,83 @@ def make_sticker(md5='a' * 32, cdnurl='http://cdn/x', aeskey='key'):
     return (f'<msg><emoji fromusername="wxid_alice" md5="{md5}" len="348401" '
             f'cdnurl="{cdnurl}" encrypturl="{cdnurl}" aeskey="{aeskey}" width="300" height="300" '
             f'desc="ChEKB2RlZmF1bHQSBuaRiuWAkg==" /></msg>')
+
+
+class CapturePlugin(Plugin):
+    """ 把这一轮的上下文原样留下来，供断言。 """
+
+    def __init__(self, texts=('收到',)):
+        self.texts = list(texts)
+        self.ctx = None
+
+    async def handle(self, ctx):
+        self.ctx = ctx
+        return Reply(texts=self.texts)
+
+
+class TestForceReply(unittest.IsolatedAsyncioTestCase):
+    """ 「手动回复这条」：让 bot 站在那条消息**当时**的聊天记录视角回它一句。 """
+
+    async def asyncSetUp(self):
+        events.bus.reset()
+        self.bot = Bot('127.0.0.1', 9999, x_delay=0, send_interval=0)
+        self.bot._wechat = FakeWechat()
+        await self.bot.outbox.start()
+
+    async def asyncTearDown(self):
+        await self.bot.outbox.stop()
+
+    def _window(self):
+        return self.bot._history.get_context('456@chatroom')
+
+    async def test_replies_from_the_transcript_as_of_that_message(self):
+        """ 上下文截到被点的那条为止，不是拿「现在」的最新几十条当背景。 """
+        window = self._window()
+        window.append('Alice', '昨天说了啥', 100, msg_id=11)
+        window.append('Bob', '约饭', 200, msg_id=22)
+        window.append('Alice', '今天呢', 300, msg_id=33)
+        self.bot._wechat.daemon_messages = [make_msg('昨天说了啥', msg_id=11, create_time=100),
+                                            make_msg('约饭', msg_id=22, create_time=200),
+                                            make_msg('今天呢', msg_id=33, create_time=300)]
+        capture = CapturePlugin()
+        self.bot.set_default_plugin(capture)
+
+        await self.bot.force_reply('456@chatroom', 22)
+        await asyncio.sleep(0.05)
+
+        self.assertTrue(capture.ctx.forced)
+        self.assertEqual([r.text for r in capture.ctx.history], ['昨天说了啥', '约饭'])
+        self.assertEqual(capture.ctx.msg.content, '约饭')
+        # 门控不算数：没回是因为人点了它，不是因为分数够
+        self.assertEqual(self.bot._wechat.sent, [('456@chatroom', '收到')])
+        self.assertEqual(self.bot._wechat.refs, [22])      # 「回复这条」就该引用这条
+
+    async def test_falls_back_to_daemon_when_it_slid_out_of_the_window(self):
+        """ 被点的那条已经滑出活窗口：现取一段以它结尾的历史，仍然是「那时」的视角。 """
+        self._window().append('Alice', '最新的那条', 900, msg_id=99)
+        self.bot._wechat.names['wxid_alice'] = 'Alice'
+        self.bot._wechat.daemon_messages = [make_msg('第一句', msg_id=11, create_time=100),
+                                            make_msg('第二句', msg_id=22, create_time=200),
+                                            make_msg('最新的那条', msg_id=99, create_time=900)]
+        capture = CapturePlugin()
+        self.bot.set_default_plugin(capture)
+
+        await self.bot.force_reply('456@chatroom', 22)
+        await asyncio.sleep(0.05)
+
+        self.assertEqual([r.text for r in capture.ctx.history], ['第一句', '第二句'])
+        self.assertEqual(capture.ctx.msg.content, '第二句')
+        self.assertEqual(self.bot._wechat.refs, [22])
+
+    async def test_missing_target_only_leaves_a_note(self):
+        """ daemon 缓存里没有这条：面板上留一句解释，不能静默什么都不做。 """
+        self.bot.set_default_plugin(CapturePlugin())
+        await self.bot.force_reply('456@chatroom', 12345)
+
+        self.assertEqual(self.bot._wechat.sent, [])
+        note = events.bus.status_of(12345)
+        self.assertEqual(note.status, events.Status.MANUAL)
+        self.assertIn('缓存', note.detail)
 
 
 class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
