@@ -66,7 +66,8 @@ class Bot:
 
     def __init__(self, host: str, port: int, unix_path: str = '', dry_run: bool = False,
                  x_delay: float = 0, send_interval: float = 1.0,
-                 describer: MediaDescriber | None = None, describe_history_limit: int = 3,
+                 describer: MediaDescriber | None = None,
+                 describe_wait: float = 15.0,
                  keeper: MomentKeeper | None = None, emojis: EmojiLibrary | None = None,
                  emoji_path: str = '', emoji_describer=None, typo_rate: float = 0.0,
                  quote_replies: bool = False, rng: random.Random | None = None):
@@ -79,7 +80,9 @@ class Bot:
         @param x_delay: 每条消息回复的延迟时间系数（将根据消息长度乘此系数，再叠加随机抖动）
         @param send_interval: 全局最小发送间隔（秒），用于规避风控
         @param describer: 媒体描述器，后台把图片/表情含义写回历史；为 None 则不做识图
-        @param describe_history_limit: 启动加载历史时，每个会话最多补描述多少条媒体
+        @param describe_wait: 决策前最多等识图多久（秒）。图片消息一到，识图是后台跑的，
+            模型常常先看到 [图片] 占位符就照着想象评论。>0 时先等这一轮要用的图识别完，
+            等到点还没好就照旧（占位符）；0 = 不等
         @param keeper: 中期记忆：消息滑出上下文窗口时压缩成回想；为 None 则不记
         @param emojis: 本地表情库：收到的表情顺手存下，以后能原样发回去；为 None 则不偷
         @param emoji_path: 表情库落盘位置；留空则不落盘（重启就没了）
@@ -108,7 +111,7 @@ class Bot:
         self._plugins = PluginManager()
         # 媒体识图（可选）
         self._describer = describer
-        self.describe_history_limit = describe_history_limit
+        self.describe_wait = describe_wait
         # 表情库：群里收到的表情带完整下载信息，存下来就能原样发回去
         self.emojis = emojis
         self.emoji_path = emoji_path
@@ -557,6 +560,7 @@ class Bot:
             while (block := self._blocks.pop(contact, None)) is not None:
                 msg, self_name, source = self._pick_trigger(block)
                 try:
+                    await self._wait_media(contact, block)
                     await self._reply_once(msg, self_name, source)
                 except Exception as e:  # 一轮报错不能把整个会话的回复循环带死
                     logger.error(f'回复处理失败（{contact}）: {e}', exc_info=True)
@@ -565,6 +569,44 @@ class Bot:
             # 不让出事件循环，所以不会丢掉刚要进来的消息
             if self._turns.get(contact) is asyncio.current_task():
                 self._turns.pop(contact, None)
+
+    async def _wait_media(self, contact: str, block: list[tuple[Message, str, str]]) -> None:
+        """ 决策前等**这一轮要用的图**识别完（describe_wait > 0 时）。
+
+        等的是这一块消息自带的图、它们引用的那条、以及触发消息前面紧邻的那条带图消息——
+        对方常常先发图、再补一句「这张怎么样」，那是两条消息。
+
+        等到点就走，**不取消**识图：它跑完会写回记录，下一轮照样看得到。历史加载进来的
+        老图不在这一步等（启动时已全量排队），否则每一轮都要陪着它们一起慢。
+        """
+        if self._describer is None or self.describe_wait <= 0:
+            return
+        window = list(self._history.get_context(contact))
+        by_id = {record.msg_id: record for record in window}
+        index_of = {record.msg_id: index for index, record in enumerate(window)}
+        wanted: list[SingleRecord] = []
+        seen: set[int] = set()
+
+        def take(record: SingleRecord | None) -> None:
+            if record is not None and record.msg_id not in seen and self._describer.pending(record):
+                seen.add(record.msg_id)
+                wanted.append(record)
+
+        for message, _, _ in block:
+            take(by_id.get(getattr(message, 'msg_id', 0)))
+            take(by_id.get(getattr(message, 'ref_svrid', 0)))
+            index = index_of.get(getattr(message, 'msg_id', 0))
+            if index is None:
+                continue
+            for earlier in reversed(window[:index]):      # 图在前、问句在后
+                if earlier.media is not None:
+                    take(earlier)
+                    break
+        if not wanted:
+            return
+        started = time.perf_counter()
+        await asyncio.gather(*(self._describer.wait(record, self.describe_wait) for record in wanted))
+        logger.info(f'等识图 {time.perf_counter() - started:.1f}s（{len(wanted)} 张，{contact}）')
 
     async def _reply_once(self, msg: Message, self_name: str, source: str,
                           forced: bool = False, history: ChatWindow | None = None) -> None:

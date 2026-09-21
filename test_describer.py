@@ -1,6 +1,7 @@
 """ MediaDescriber 自检：持久化缓存、并发合流、超时、回写历史记录。 """
 
 import asyncio
+import time
 import unittest
 
 from ai import IMAGE_PROMPT_VERSION
@@ -102,26 +103,82 @@ class TestMediaDescriber(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.ai.calls, 0)
         self.assertEqual(record.text, '[表情：摊倒]')
 
-    async def test_download_failure_keeps_placeholder(self):
-        record = SingleRecord('Alice', '[图片]', 1, media=Media('image', 'md5-5'))
+    async def test_download_failure_keeps_placeholder_and_caches_the_failure(self):
+        """ 取不到字节：保留占位符，并记负缓存——消息过期、daemon 说缺参数的图
+        不该每次重启都从头等一遍 describe_timeout。 """
+        calls = []
 
         async def broken():
-            raise RuntimeError('daemon down')
+            calls.append(1)
+            raise RuntimeError("缺少 'msg_id', 'url', 'path' 或 'filename' 参数")
 
-        record.download = broken
-        self.describer.schedule(record)
+        first = SingleRecord('Alice', '[图片]', 1, media=Media('image', 'md5-5'), download=broken)
+        self.describer.schedule(first)
         await self.describer.join()
+        self.assertEqual(first.text, '[图片]')
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(self.cache.blocked('md5-5', IMAGE_PROMPT_VERSION, time.time()))
 
-        self.assertEqual(record.text, '[图片]')
+        second = SingleRecord('Alice', '[图片]', 2, media=Media('image', 'md5-5'), download=broken)
+        self.describer.schedule(second)
+        await self.describer.join()
+        self.assertEqual(len(calls), 1)                 # 负缓存挡在下载之前
+        self.assertEqual(second.text, '[图片]')
 
-    async def test_timeout_keeps_placeholder(self):
+    async def test_timeout_keeps_placeholder_and_caches_the_failure(self):
         ai = FakeAi(delay=0.2)
-        describer = MediaDescriber(ai, MediaCache(':memory:'), model='test', timeout=0.02)
+        cache = MediaCache(':memory:')
+        describer = MediaDescriber(ai, cache, model='test', timeout=0.02)
         try:
             record, _ = make_record('md5-6')
             describer.schedule(record)
             await describer.join()
             self.assertEqual(record.text, '[图片]')
+            self.assertTrue(cache.blocked('md5-6', IMAGE_PROMPT_VERSION, time.time()))
+
+            other, _ = make_record('md5-6')
+            describer.schedule(other)
+            await describer.join()
+            self.assertEqual(ai.calls, 1)               # 超时进负缓存，没有第二次调用
+        finally:
+            await describer.stop()
+
+    async def test_description_wins_over_negative_cache(self):
+        """ 已经有描述的图不该被历史失败记录挡住。 """
+        self.cache.put('md5-12', 'image', '缓存里的猫', 'test', version=IMAGE_PROMPT_VERSION)
+        self.cache.note_failure('md5-12', 'image', IMAGE_PROMPT_VERSION, time.time() + 3600)
+        record, msg = make_record('md5-12')
+        self.describer.schedule(record)
+        await self.describer.join()
+
+        self.assertEqual(record.text, '[图片：缓存里的猫]')
+        self.assertEqual(msg.downloads, 0)
+
+    async def test_wait_returns_when_description_ready(self):
+        """ describe_wait 用：等到了就返回 True，记录已经写回描述。 """
+        ai = FakeAi(delay=0.05)
+        describer = MediaDescriber(ai, MediaCache(':memory:'), model='test', timeout=1.0)
+        try:
+            record, _ = make_record('md5-8')
+            self.assertFalse(describer.pending(record))        # 还没 schedule
+            describer.schedule(record)
+            self.assertTrue(describer.pending(record))
+            self.assertTrue(await describer.wait(record, 1.0))
+            self.assertEqual(record.text, '[图片：一只橘猫]')
+            self.assertFalse(describer.pending(record))        # 完成后不再挂着
+        finally:
+            await describer.stop()
+
+    async def test_wait_timeout_leaves_describe_running(self):
+        """ 等到点就走，但**不取消**识图：它跑完照样写回，下一轮看得到。 """
+        ai = FakeAi(delay=0.05)
+        describer = MediaDescriber(ai, MediaCache(':memory:'), model='test', timeout=1.0)
+        try:
+            record, _ = make_record('md5-9')
+            describer.schedule(record)
+            self.assertFalse(await describer.wait(record, 0.001))
+            await describer.join()
+            self.assertEqual(record.text, '[图片：一只橘猫]')
         finally:
             await describer.stop()
 

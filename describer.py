@@ -17,6 +17,15 @@ from context import SingleRecord
 from emojis import EMOJI_DESCRIBE_PROMPT, Emoji, EmojiLibrary, parse_description
 from media import Media, add_handle
 
+# 失败后的冷却期。取不到字节（消息过期 / daemon 说缺参数）短期不会变好，挡久一点；
+# 限流、超时、空回复这些是临时的，过几分钟值得再试
+FAIL_TTL_GONE = 24 * 60 * 60.0
+FAIL_TTL_RETRY = 300.0
+
+
+class MediaUnavailable(Exception):
+    """ 拿不到这张图的字节（消息太老、daemon 报缺 msg_id/url/path）。 """
+
 
 class MediaCache:
     """ md5 -> 描述 的持久化缓存。 """
@@ -33,6 +42,9 @@ class MediaCache:
         columns = {row[1] for row in self._conn.execute('PRAGMA table_info(media)').fetchall()}
         if 'version' not in columns:
             self._conn.execute('ALTER TABLE media ADD COLUMN version TEXT DEFAULT ""')
+        # 负缓存：这张图上次以失败告终，blocked_until 之前不再下载 / 调模型
+        if 'blocked_until' not in columns:
+            self._conn.execute('ALTER TABLE media ADD COLUMN blocked_until INTEGER DEFAULT 0')
         self._conn.commit()
 
     def get(self, md5: str, version: str | None = None) -> str | None:
@@ -51,6 +63,27 @@ class MediaCache:
                 'INSERT OR REPLACE INTO media (md5, kind, description, model, updated_at, version) '
                 'VALUES (?, ?, ?, ?, ?, ?)',
                 (md5, kind, description, model, int(time.time()), version))
+            self._conn.commit()
+
+    def blocked(self, md5: str, version: str, now: float) -> bool:
+        """ 这张图上次失败且还没到重试时间：别再下载 / 调模型。 """
+        with self._lock:
+            row = self._conn.execute('SELECT blocked_until FROM media WHERE md5 = ? AND version = ?',
+                                     (md5, version)).fetchone()
+        return bool(row and row[0] and row[0] > now)
+
+    def note_failure(self, md5: str, kind: str, version: str, until: float) -> None:
+        """ 记一次失败：`until` 之前不重试。
+
+        否则消息太老、取不到字节的图，**每次重启都会再试一遍**（单张就要等满
+        describe_timeout），白占着识图的并发。UPSERT 而不是 REPLACE：已经有描述的
+        行不能被这次失败清掉。
+        """
+        with self._lock:
+            self._conn.execute(
+                'INSERT INTO media (md5, kind, version, blocked_until, updated_at) VALUES (?, ?, ?, ?, ?) '
+                'ON CONFLICT(md5) DO UPDATE SET blocked_until = excluded.blocked_until',
+                (md5, kind, version, int(until), int(time.time())))
             self._conn.commit()
 
     def items(self) -> list[tuple[str, str, str, int]]:
@@ -83,7 +116,14 @@ class MediaDescriber:
         self._sem = asyncio.Semaphore(concurrency)
         self._inflight: dict[str, asyncio.Task] = {}
         self._tasks: set[asyncio.Task] = set()
+        # 按记录索引的识图任务，给「决策前等一等」用（bot.describe_wait）
+        self._pending: dict[int, asyncio.Task] = {}
         self._warned: set[str] = set()
+
+    @staticmethod
+    def _key(record: SingleRecord) -> int:
+        """ 等待用的键：svrid 优先；没身份（自己发的 / 测试造的）就用对象 id。 """
+        return record.msg_id or id(record)
 
     def schedule(self, record: SingleRecord) -> None:
         """ 只处理需要 vision 的媒体（无 desc 且有下载入口）。 """
@@ -92,7 +132,26 @@ class MediaDescriber:
             return
         task = asyncio.create_task(self._apply(media, record))
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        key = self._key(record)
+        self._pending[key] = task
+        task.add_done_callback(lambda done: (self._tasks.discard(done), self._pending.pop(key, None)))
+
+    def pending(self, record: SingleRecord) -> bool:
+        """ 这条记录的识图还在跑吗。 """
+        return self._key(record) in self._pending
+
+    async def wait(self, record: SingleRecord, timeout: float) -> bool:
+        """ 最多等 timeout 秒，等这条记录的识图落地。超时返回 False，但**不取消**它——
+        后台跑完照样写回记录，下一轮看得到。
+        """
+        task = self._pending.get(self._key(record))
+        if task is None:
+            return True
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout)
+            return True
+        except TimeoutError:
+            return False
 
     async def join(self) -> None:
         """ 等待所有在途描述完成（测试用）。 """
@@ -107,16 +166,35 @@ class MediaDescriber:
         self._cache.close()
 
     async def _apply(self, media: Media, record: SingleRecord) -> None:
-        version = IMAGE_PROMPT_VERSION if media.kind == 'image' else ''
+        version = self._version(media)
+        description = self._cache.get(media.md5, version)
+        if description is None and self._cache.blocked(media.md5, version, time.time()):
+            logger.debug(f'跳过（上次失败，还没到重试时间）md5={media.md5}')
+            return
         try:
-            description = self._cache.get(media.md5, version) or await self._describe_once(media, record.download)
+            description = description or await self._describe_once(media, record.download)
+        except MediaUnavailable as e:
+            self._retry_later(media, version, FAIL_TTL_GONE)
+            self._warn_once(f'{media.kind}:gone', f'取不到媒体字节 md5={media.md5}: {e}')
+            return
         except Exception as e:
+            self._retry_later(media, version, FAIL_TTL_RETRY)
             self._warn_once(f'{media.kind}:{e}', f'描述媒体失败 md5={media.md5}: {e}')
             return
-        if description:
-            label = '图片' if media.kind == 'image' else '表情'
-            # handle 不能丢：内联图片靠它把附件和这行对上
-            record.text = add_handle(f'[{label}：{description}]', record.handle)
+        if not description:
+            self._retry_later(media, version, FAIL_TTL_RETRY)
+            return
+        label = '图片' if media.kind == 'image' else '表情'
+        # handle 不能丢：内联图片靠它把附件和这行对上
+        record.text = add_handle(f'[{label}：{description}]', record.handle)
+
+    @staticmethod
+    def _version(media: Media) -> str:
+        return IMAGE_PROMPT_VERSION if media.kind == 'image' else ''
+
+    def _retry_later(self, media: Media, version: str, ttl: float) -> None:
+        """ 记负缓存：ttl 秒内不再碰这张图。 """
+        self._cache.note_failure(media.md5, media.kind, version, time.time() + ttl)
 
     def _warn_once(self, key: str, message: str) -> None:
         """ 同一类失败只警告一次。
@@ -141,7 +219,9 @@ class MediaDescriber:
                 try:
                     return await asyncio.wait_for(self._download_and_describe(media, download), self._timeout)
                 except TimeoutError:
+                    # 超时也要记一笔：否则下一轮/下次重启又会把这张图从头等一遍
                     logger.warning(f'描述媒体超时 md5={media.md5}')
+                    self._retry_later(media, self._version(media), FAIL_TTL_RETRY)
                     return None
 
         task = asyncio.create_task(fetch())
@@ -152,17 +232,19 @@ class MediaDescriber:
             self._inflight.pop(media.md5, None)
 
     async def _download_and_describe(self, media: Media, download) -> str | None:
-        image = await download()
+        try:
+            image = await download()
+        except Exception as e:  # noqa: BLE001 —— 取字节失败和模型失败要分开算冷却期
+            raise MediaUnavailable(str(e)) from e
         if not image:
-            return None
+            raise MediaUnavailable('下载结果为空')
         if media.kind == 'image':
             description = await self._ai.describe(image, max_tokens=self._image_max_tokens or self._max_tokens,
                                                   prompt=IMAGE_DESCRIBE_PROMPT, model=self._model)
         else:
             description = await self._ai.describe(image, max_tokens=self._max_tokens, model=self._model)
         if description:
-            version = IMAGE_PROMPT_VERSION if media.kind == 'image' else ''
-            self._cache.put(media.md5, media.kind, description, self._model, version)
+            self._cache.put(media.md5, media.kind, description, self._model, self._version(media))
         return description
 
 

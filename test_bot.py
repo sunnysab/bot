@@ -305,6 +305,20 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, ['456@chatroom'])
         self.assertEqual(len(self._window()), 1)
 
+    async def test_turn_waits_for_image_before_replying(self):
+        """ describe_wait 开了之后：进插件链之前先等识图，不等模型对着 [图片] 瞎评。 """
+        self.bot._describer = FakeDescriber()
+        self.bot.describe_wait = 5.0
+        picture = self._window().append('Alice', '[图片]', 1, media=Media('image', 'md5-1'),
+                                        download=lambda: None, msg_id=7)
+        self.bot._describer.schedule(picture)
+        self.bot.set_default_plugin(FakePlugin(texts=['嗯']))
+
+        await self.bot.on_message(make_msg())
+        await asyncio.sleep(0.05)
+
+        self.assertEqual([record for record, _ in self.bot._describer.waited], [picture])
+
     async def test_status_events_trace_a_reply(self):
         """ 一条消息从接收到已发送，事件流要串得起来——面板的气泡状态全靠它。 """
         events.bus.reset()
@@ -911,29 +925,75 @@ class TestRevoke(unittest.IsolatedAsyncioTestCase):
 class FakeDescriber:
     def __init__(self):
         self.scheduled = []
+        self.waited = []              # (record, timeout)：_wait_media 等过谁
+        self.pending_ids = set()      # 置位的记录算「还在识别」
 
     def schedule(self, record):
         self.scheduled.append(record)
+        # 行为对齐真实 describer：不需要描述的媒体（纯文本消息）不算在途
+        if record.media is not None and record.media.needs_description:
+            self.pending_ids.add(id(record))
+
+    def pending(self, record):
+        return id(record) in self.pending_ids
+
+    async def wait(self, record, timeout):
+        self.waited.append((record, timeout))
+        self.pending_ids.discard(id(record))
+        return True
 
 
 class TestHistoryMediaScheduling(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.bot = Bot('127.0.0.1', 9999, describe_history_limit=2)
+        self.bot = Bot('127.0.0.1', 9999)
         self.bot._describer = FakeDescriber()
 
-    def test_only_newest_media_up_to_limit(self):
+    def test_all_media_in_window_get_scheduled(self):
+        """ 窗口里的图全部补描述（从新到旧）：漏下的那些永远只有 [图片]，模型只能瞎编。 """
         window = ChatWindow()
         for i in range(5):
             window.append('Alice', '[图片]', i, media=Media('image', f'md5-{i}'), download=lambda: None)
         self.bot._schedule_history_media(window)
 
-        self.assertEqual([r.t for r in self.bot._describer.scheduled], [4, 3])
+        self.assertEqual([r.t for r in self.bot._describer.scheduled], [4, 3, 2, 1, 0])
 
     def test_no_describer_is_noop(self):
         self.bot._describer = None
         window = ChatWindow()
         window.append('Alice', '[图片]', 1, media=Media('image', 'md5-x'), download=lambda: None)
         self.bot._schedule_history_media(window)  # 不报错即可
+
+    async def test_wait_media_waits_for_records_in_the_block(self):
+        """ 这一轮的图先等识别完：块里消息自己的图、以及它前面紧邻的那条带图消息
+        （对方常常先发图、再补一句「这张怎么样」，那是两条消息）。 """
+        self.bot.describe_wait = 5.0
+        window = self.bot._history.get_context('456@chatroom')
+        picture = window.append('Alice', '[图片]', 1, media=Media('image', 'md5-1'),
+                                download=lambda: None, msg_id=7)
+        window.append('Bob', '这张怎么样', 2, msg_id=8)
+        self.bot._describer.schedule(picture)          # 只有图需要 vision
+        block = [(types.SimpleNamespace(msg_id=8, ref_svrid=0), 'Bob', 'g')]
+
+        await self.bot._wait_media('456@chatroom', block)
+        self.assertEqual([record for record, _ in self.bot._describer.waited], [picture])
+
+    async def test_wait_media_is_noop_when_disabled_or_nothing_pending(self):
+        window = self.bot._history.get_context('456@chatroom')
+        picture = window.append('Alice', '[图片]', 1, media=Media('image', 'md5-2'),
+                                download=lambda: None, msg_id=9)
+        block = [(types.SimpleNamespace(msg_id=9, ref_svrid=0), 'Alice', 'g')]
+
+        self.bot.describe_wait = 0.0
+        await self.bot._wait_media('456@chatroom', block)       # 关着：不等
+        self.assertEqual(self.bot._describer.waited, [])
+
+        self.bot.describe_wait = 5.0
+        await self.bot._wait_media('456@chatroom', block)       # 开着但图没在识别
+        self.assertEqual(self.bot._describer.waited, [])
+
+        self.bot._describer.schedule(picture)
+        await self.bot._wait_media('456@chatroom', block)
+        self.assertEqual([record for record, _ in self.bot._describer.waited], [picture])
 
 
 class TestPayloadRender(unittest.TestCase):

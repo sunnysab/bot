@@ -69,8 +69,9 @@ class Config:
     media_cache_path: str = 'media_cache.db'
     describe_concurrency: int = 2
     # 单张图的下载+识图超时。中转实测一张普通照片要 ~45s（250 个输出 token 就花了
-    # 40 多秒，慢在中转/上游排队而不是 token 速率），30s 会把结果整条丢掉
-    describe_timeout: float = 90.0
+    # 40 多秒，慢在中转/上游排队而不是 token 速率），30s 会把结果整条丢掉；
+    # 120s 给排队留余量（真超时会进负缓存，不会每轮都从头等）
+    describe_timeout: float = 120.0
     # 识图的生成上限（不是上下文）。**thinking 模型会先推理再回答，推理也算在这个上限里**——
     # 实测（deepseek-v4.1-flash，识图 prompt + 9094 字节真表情图）：
     #   64 → finish=length，reasoning=64，content 空
@@ -82,7 +83,10 @@ class Config:
     # 图片描述的生成上限。新 prompt 把输出限在 12 行（约 150~450 token），1024 够用；
     # 也不能给大：Kimi-K2.5 在 4096 下会退化成「六个核桃×N」死循环（实测）
     describe_image_max_tokens: int = 1024
-    describe_history_limit: int = 3
+    # 决策前最多等识图多久（秒）。图片消息一到，识图是后台跑的，模型常常先看到
+    # [图片] 占位符，就照着自己的想象评论这张图。>0 时这一轮先等**本轮要用的图**
+    # 识别完（实测单张 3~5s + 下载），等到点还没好才照旧用占位符；0 = 不等
+    describe_wait: float = 15.0
     # 内联给模型的图片：窗口里的图按需取字节、附在请求里。这是本轮最费 token 的一块，
     # 留个开关能随时关掉
     image_inline: bool = True
@@ -201,6 +205,7 @@ if __name__ == '__main__':
     assert base.describe_max_tokens == 1024, base     # thinking 模型的推理也算进生成预算
     assert base.describe_image_max_tokens == 1024, base  # 输出限 12 行，给它就够
     assert base.describe_model == '', base               # 默认跟主模型；要换识图模型才设
+    assert base.describe_wait == 15.0, base              # 默认等这一轮要用的图，等到点就放行
     assert base.image_inline is True and base.image_shrink_target == 1024 * 1024, base
     assert base.reply_mode == 'agent', base           # 默认单段式；two_stage 留作对照
     assert base.quote_replies is True, base            # 真机验过，引用回复默认开

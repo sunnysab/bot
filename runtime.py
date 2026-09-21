@@ -20,7 +20,7 @@ import asyncio
 import json
 import os
 import sys
-from collections.abc import Iterable
+from collections.abc import Awaitable, Iterable
 from dataclasses import fields
 from pathlib import Path
 
@@ -110,6 +110,7 @@ HOT_FIELDS = frozenset({
     'deepseek_key', 'deepseek_model', 'deepseek_url', 'send_interval',
     'reply_necessity_threshold', 'reply_activity_window',
     'reply_context_length', 'agent_max_replies', 'focus_score_bonus',
+    'describe_wait',
     'reply_min_gap', 'reply_rate_window', 'reply_rate_max',
     'enable_focus', 'focus_enter_activity', 'focus_idle_seconds', 'focus_max_seconds',
     'backoff_start_after', 'backoff_base_seconds', 'backoff_max_seconds', 'backoff_bypass_messages',
@@ -123,7 +124,7 @@ HOT_FIELDS = frozenset({
 RESTART_FIELDS = frozenset({
     'daemon_host', 'daemon_port', 'daemon_unix', 'admin_port', 'log_path', 'log_level',
     'describe_media', 'describe_model', 'media_cache_path', 'describe_concurrency', 'describe_timeout',
-    'describe_max_tokens', 'describe_image_max_tokens', 'describe_history_limit',
+    'describe_max_tokens', 'describe_image_max_tokens',
     'image_inline', 'image_shrink_threshold', 'image_shrink_target', 'image_fetch_timeout',
     'image_cache_dir',
     'profile_path', 'habit_path', 'moment_path', 'emoji_path', 'scope_path', 'moment_batch',
@@ -172,12 +173,21 @@ class Runtime:
             self.emoji_describer.on_update = self.bot.save_emojis
         self.chat_plugin = self._make_chat_plugin()
         self._install_plugins()
-        self.bot.register_ready(lambda _bot: self.bot.load_context())
+        self.bot.register_ready(self._load_history)
         # 未登录时 on_ready 撞 401（连得上但查不了），真正拉历史要等 daemon 广播
         # login_status。两个都注册：启动已登录时走前者，扫码重登走后者
-        self.bot.register_login(self.bot.load_context)
+        self.bot.register_login(self._load_history)
         if config.dry_run:
             logger.warning('演习模式：全链路照跑，但不真的发消息')
+
+    def _load_history(self, *_args) -> Awaitable[None]:
+        """ 启动 / 重登后载入历史。
+
+        条数跟模型窗口（reply_context_length）对齐：只载 30 条的话，模型该看到的
+        前半段是空的，那些图也就永远没机会被描述。ready 回调会塞一个 bot 参数进来，
+        用 *_args 吞掉（login 回调不带参）。
+        """
+        return self.bot.load_context(window_size=self.config.reply_context_length)
 
     # ---------- 构造 ----------
 
@@ -185,7 +195,7 @@ class Runtime:
         config = self.config
         return Bot(config.daemon_host, config.daemon_port, unix_path=config.daemon_unix, x_delay=0.5,
                    send_interval=config.send_interval, describer=self.describer,
-                   describe_history_limit=config.describe_history_limit,
+                   describe_wait=config.describe_wait,
                    keeper=MomentKeeper(self.ai, self.memories, batch=config.moment_batch),
                    emojis=self.emojis, emoji_path=config.emoji_path,
                    emoji_describer=self.emoji_describer, typo_rate=config.typo_rate,
@@ -304,6 +314,7 @@ class Runtime:
         self.chat_plugin = self._make_chat_plugin()
         self._install_plugins()
         self.bot.typo_rate = config.typo_rate
+        self.bot.describe_wait = config.describe_wait
         self.bot.quote_replies = config.quote_replies
         self.bot.dry_run = config.dry_run
         self.bot.wechat.dry_run = config.dry_run

@@ -103,11 +103,11 @@ CONFIG_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
                 'planner_rounds')),
     ('出站', ('send_interval', 'typo_rate', 'dry_run')),
     ('图片内联', ('image_inline', 'image_shrink_threshold', 'image_shrink_target',
-                'image_fetch_timeout', 'image_cache_dir')),
+                'image_fetch_timeout', 'image_cache_dir', 'describe_wait')),
     ('观测', ('trace_path',)),
     ('改了要重启进程', ('daemon_host', 'daemon_port', 'daemon_unix', 'admin_port', 'log_path', 'log_level',
                     'describe_media', 'media_cache_path', 'describe_concurrency', 'describe_timeout',
-                    'describe_max_tokens', 'describe_image_max_tokens', 'describe_history_limit',
+                    'describe_max_tokens', 'describe_image_max_tokens',
                     'profile_path', 'habit_path',
                     'moment_path', 'emoji_path', 'scope_path', 'moment_batch', 'persona_path')),
 )
@@ -123,6 +123,7 @@ RANGES: dict[str, tuple[float, float]] = {
     'reply_necessity_threshold': (0, 200),
     'reply_activity_window': (10, 3600),
     'style_probability': (0.0, 1.0),
+    'describe_wait': (0.0, 60.0),          # 等识图的上限：再久也不如先聊别的
     'typo_rate': (0.0, 1.0),
     'send_interval': (0.0, 60.0),
     'request_timeout': (1.0, 600.0),

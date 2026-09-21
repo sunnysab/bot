@@ -5,6 +5,7 @@
 而是先造出运行状态，再热重载，然后检查那些状态有没有被顺手清掉。
 """
 
+import asyncio
 import tempfile
 import unittest
 from dataclasses import replace
@@ -73,6 +74,18 @@ class TestRuntimeReload(unittest.TestCase):
         self.assertIs(self.runtime.chat_plugin.policy.focus, self.runtime.focus)
         self.assertIs(self.runtime.chat_plugin.policy.backoff, self.runtime.backoff)
         self.assertIs(self.runtime.chat_plugin.emoji_policy, self.runtime.emoji_policy)
+
+    def test_history_load_matches_model_window(self):
+        """ 启动载入的条数要跟模型窗口（reply_context_length）对齐：载 30 条的话，
+        模型该看到的前半段是空的，里面的图也就永远没机会被描述。 """
+        calls = []
+
+        async def fake_load(window_size=0):
+            calls.append(window_size)
+
+        self.runtime.bot.load_context = fake_load
+        asyncio.run(self.runtime._load_history())
+        self.assertEqual(calls, [self.runtime.config.reply_context_length])
 
     def test_apply_reports_fields_that_need_a_process_restart(self):
         stale = self.runtime.apply(replace(self.runtime.config, daemon_port=1234, typo_rate=0.0))
