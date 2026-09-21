@@ -201,7 +201,8 @@ class Runtime:
                    keeper=MomentKeeper(self.ai, self.memories, batch=config.moment_batch),
                    emojis=self.emojis, emoji_path=config.emoji_path,
                    emoji_describer=self.emoji_describer, typo_rate=config.typo_rate,
-                   quote_replies=config.quote_replies, dry_run=config.dry_run)
+                   quote_replies=config.quote_replies, dry_run=config.dry_run,
+                   visible_history=config.reply_context_length)
 
     def _make_describer(self) -> MediaDescriber | None:
         if not self.config.describe_media:

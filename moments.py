@@ -23,7 +23,7 @@ from pathlib import Path
 from loguru import logger
 
 from ai import AiProvider
-from context import ChatWindow, SingleRecord, _format_time
+from context import ChatWindow, SingleRecord, format_minute
 
 # 压缩用的提示词：强调「不许编」，因为记忆失真比没有记忆更糟
 SUMMARY_PROMPT = '''请把下面这段群聊压缩成一条「聊天回想」，供以后回忆。
@@ -92,7 +92,7 @@ class Moment:
     cues: tuple[str, ...] = ()
 
     def render(self) -> str:
-        return f'（{_format_time(self.t_end)}）{self.summary}'
+        return f'（{format_minute(self.t_end)}）{self.summary}'
 
 
 def parse_summary(raw: str) -> tuple[str, tuple[str, ...]]:

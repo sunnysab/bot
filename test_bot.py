@@ -792,7 +792,8 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(image_record.media_id, 555)
         self.assertEqual(quote_record.media_id, 555)          # 引用图落到同一张
         self.assertEqual(quote_record.handle, image_record.handle)
-        self.assertIn(f'[图片 {image_record.handle}]', quote_record.text)
+        # 被引那条还在窗口里 → 注解只写标签；附件仍按同一个标签挂上去
+        self.assertIn(f'（引用 {image_record.handle}）', quote_record.text)
 
     async def test_the_model_gets_the_quoted_image(self):
         """ 端到端：入站图片 → 引用它并 @ 机器人 → 这一轮模型拿到的是真图，不是 `[图片]`。 """

@@ -70,7 +70,8 @@ class Bot:
                  describe_wait: float = 15.0,
                  keeper: MomentKeeper | None = None, emojis: EmojiLibrary | None = None,
                  emoji_path: str = '', emoji_describer=None, typo_rate: float = 0.0,
-                 quote_replies: bool = False, rng: random.Random | None = None):
+                 quote_replies: bool = False, visible_history: int = 0,
+                 rng: random.Random | None = None):
         """ 初始化机器人
 
         @param host: weixin-rs daemon 服务器地址
@@ -90,6 +91,9 @@ class Bot:
         @param typo_rate: 出站文本抖错别字的概率（0 为关闭）
         @param quote_replies: 允许模型引用（微信的「回复某条」）。关掉就一律不引；
             模型自己选引哪条（reply / speak 的 ref），没选就不引——它不一定是在回谁
+        @param visible_history: 模型一轮能看到的历史条数（= reply_context_length）。
+            被引的那条还落在这个范围里时，引用注解只写 `（引用 #xxxx）`；滑出去了
+            就退回把原文贴出来。0 = 不设限（整窗口）
         @param rng: 错别字用的随机源，测试时可注入
         """
         async def callback(msg: Message) -> None:
@@ -118,6 +122,7 @@ class Bot:
         self.emoji_describer = emoji_describer
         self.typo_rate = typo_rate
         self.quote_replies = quote_replies
+        self._visible_history = visible_history
         # 运行计数：面板的统计卡要看（拍的那些常数到底撞了多少次）
         self.typo_count = 0
         self.emoji_count = 0
@@ -749,10 +754,14 @@ class Bot:
         logger.debug(msg)
 
         # 非文本消息的正文换成可读标记：图片/表情/位置/视频/语音/链接/文件/引用。
-        # handle 是内联图片的短标签（`#4k2p`）；引用图用被引那条的 svrid 生成，
+        # handle 是内联图片的短标签（`#4k2p0z`）；引用图用被引那条的 svrid 生成，
         # 这样原文那行和引用注解里会落在同一个标签上
         handle = message_handle(msg.msg_id)
         quoted_handle = message_handle(msg.ref_svrid) if msg.ref_svrid else ''
+        # 被引的那条还在模型这一轮看得见的范围里，引用注解才敢只写 `（引用 #xxxx）`；
+        # 滑出去了就把原文贴出来——指不到东西的标签比多贴几个字更糟
+        quoted_known = self._history.get_context(msg.reply_target).shows(
+            msg.ref_svrid, self._visible_history)
         # 拍一拍走 10002（`<sysmsg type="pat">`），不是一种 msg_type，得单独看 parsed 内容。
         # 假消息（测试 / 离线工具）没有 `pat`，所以用 getattr
         pat = getattr(msg, 'pat', None)
@@ -760,7 +769,8 @@ class Bot:
             text, media = await self._render_pat(msg, pat), None
         else:
             text, media = render(msg.msg_type, msg.content, msg.text,
-                                 handle=handle, quoted_handle=quoted_handle)
+                                 handle=handle, quoted_handle=quoted_handle,
+                                 quoted_known=quoted_known)
         # 要内联给模型的图从哪来：自己有图就是它自己，引用图就跟到 ref_svrid 上。
         # **必须在下面改写 msg.content 之前调**——link_media 要读引用消息里的原始 XML
         media_id, download = self._wechat.link_media(msg, media)

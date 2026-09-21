@@ -486,8 +486,10 @@ class Wechat:
                 msg.sender_display_name = names[msg.sender]
             handle = message_handle(msg.msg_id)
             quoted = message_handle(msg.ref_svrid) if msg.ref_svrid else ''
+            # 被引那条已经在这个窗口里（按时间序在它前面），注解就只留短标签
             content, media = render(msg.msg_type, msg.content, msg.text,
-                                     handle=handle, quoted_handle=quoted)
+                                     handle=handle, quoted_handle=quoted,
+                                     quoted_known=result.shows(msg.ref_svrid))
             # 不知道为什么有的消息还是 xml 格式的，这里直接过滤掉吧
             if not content or content.startswith('<'):
                 continue

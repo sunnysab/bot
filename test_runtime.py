@@ -68,6 +68,8 @@ class TestRuntimeReload(unittest.TestCase):
         # 插件链换了（不重建的话配置改了不生效）
         self.assertIsNot(self.runtime.chat_plugin, old_plugin)
         self.assertEqual(self.runtime.bot.typo_rate, 0.0)
+        # 引用注解的可见范围得跟模型窗口对齐，不然会写出模型看不见的 `（引用 #xxxx）`
+        self.assertEqual(self.runtime.bot._visible_history, self.runtime.config.reply_context_length)
         self.assertEqual(self.runtime.chat_plugin.policy.threshold,
                          self.runtime.config.reply_necessity_threshold)
         # 共享对象确实传下去了，不是新造的一个

@@ -198,7 +198,7 @@ def strip_sender(text: str) -> str:
 
 
 def add_handle(text: str, handle: str) -> str:
-    """ 把短标签塞进媒体占位符：`[图片]` → `[图片 #4k2p]`。
+    """ 把短标签塞进媒体占位符：`[图片]` → `[图片 #4k2p0z]`。
 
     只认图片/表情——只有这两种会被内联给模型，别的占位符没标签可对。
     """
@@ -246,8 +246,13 @@ def render_referred(parsed: dict, handle: str = '') -> str:
     return add_handle(text, handle) if (handle and media is not None and media.describable) else text
 
 
-def parse_appmsg(content: str, quoted_handle: str = '') -> str:
+def parse_appmsg(content: str, quoted_handle: str = '', quoted_known: bool = False) -> str:
     """ appmsg（msg_type=49）→ 引用 / 链接 / 文件 / 小程序 / 合并转发的可读文本。
+
+    `quoted_known`：被引的那条确定还在模型这一轮看得见的窗口里。是就只给短标签
+    `（引用 #xxxx）`，正文让模型自己去那行读——既省掉重复贴一遍的 token，注解里也多出
+    发送人和时间。否（滑出去了 / daemon 没见过 / 引用的是别的会话）就仍把原文贴出来，
+    一个指不到东西的标签比多贴几个字更糟。
 
     历史上这里只处理引用(type=57)，遇到链接会把原始 XML 漏进历史，故统一收敛到此处。
     """
@@ -261,8 +266,11 @@ def parse_appmsg(content: str, quoted_handle: str = '') -> str:
             parsed = parse_reference_message(content)
         except Exception:  # noqa: BLE001 —— XML 不规整时退回占位符，不能让历史里漏 XML
             return '[引用消息]'
-        quoted = render_referred(parsed, quoted_handle)
-        note = f'（引用前文的消息：{quoted}）' if quoted else '（引用了前文的消息）'
+        if quoted_known and quoted_handle:
+            note = f'（引用 {quoted_handle}）'
+        else:
+            quoted = render_referred(parsed, quoted_handle)
+            note = f'（引用前文的消息：{quoted}）' if quoted else '（引用了前文的消息）'
         # 只引了个图、自己一个字没说：那这条记录就是那句注解
         return f'{parsed["content"]}{note}' if parsed['content'] else note
     if appmsg_type == '19':
@@ -279,12 +287,13 @@ def parse_appmsg(content: str, quoted_handle: str = '') -> str:
 
 
 def render(msg_type: int, content: str, text: str, handle: str = '',
-           quoted_handle: str = '') -> tuple[str, Media | None]:
+           quoted_handle: str = '', quoted_known: bool = False) -> tuple[str, Media | None]:
     """ 把一条消息渲染成历史记录文本（+ 可选媒体描述）。
 
     统一 live 与 history 两条路径的载荷处理，避免一边丢弃一边漏 XML。
     handle / quoted_handle 是内联图片用的短标签：自己的图落在自己的占位符上，
     引用图落在引用注解里的那个占位符上——两处用同一个 svrid 生成的标签。
+    quoted_known 见 `parse_appmsg`：被引那条还在可见窗口里时，注解只留标签。
     """
     from context import SYSTEM_KINDS, MessageKind
 
@@ -295,7 +304,7 @@ def render(msg_type: int, content: str, text: str, handle: str = '',
     if kind is MessageKind.TEXT:
         return text, None
     if kind is MessageKind.APPMSG:
-        return parse_appmsg(content, quoted_handle), None
+        return parse_appmsg(content, quoted_handle, quoted_known), None
     if kind in (MessageKind.IMAGE, MessageKind.EMOJI):
         media = parse_media(content)
         if media:
@@ -376,6 +385,10 @@ if __name__ == '__main__':
              '<content>&lt;msg&gt;&lt;appmsg&gt;&lt;title&gt;被引用的内容&lt;/title&gt;'
              '&lt;/appmsg&gt;&lt;/msg&gt;</content></refermsg></appmsg></msg>')
     assert parse_appmsg(quote) == '回复内容（引用前文的消息：[链接] 被引用的内容）', parse_appmsg(quote)
+    # 被引那条还在模型看得见的窗口里 → 注解只留短标签，正文让它自己去那行读
+    assert parse_appmsg(quote, '#4k2p0z', quoted_known=True) == '回复内容（引用 #4k2p0z）'
+    # 不可见（没给标签 / 引用的是别的会话）→ 仍把原文贴出来
+    assert parse_appmsg(quote, '', quoted_known=True) == '回复内容（引用前文的消息：[链接] 被引用的内容）'
 
     # 被引的是图片 / 表情：refermsg 正文是它们的 XML（没有 title）。
     # 以前这两种是 AttributeError → 整条引用变成 `[引用消息]`

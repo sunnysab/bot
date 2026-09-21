@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -52,30 +53,40 @@ def is_system_notice(msg: Message) -> bool:
 
 
 def _format_time(t: int) -> str:
-    """ 绝对时间，如 '09-14 14:32'。
+    """ 绝对时间，如 '09-14 14:32:07'。
 
     用绝对时间而非相对时间：历史消息的文本必须跨轮稳定，否则前缀会变，
     击穿 KV cache 的前缀复用，每轮都要重新计算全部 token。
+    带秒：同一分钟里谁先谁后模型能排出来，「刚刚」「刚才」才有依据。
     """
+    return datetime.fromtimestamp(t).strftime('%m-%d %H:%M:%S')
+
+
+def format_minute(t: int) -> str:
+    """ 分钟粒度的绝对时间，如 '09-14 14:32'。中期记忆摘要用——秒是噪声。 """
     return datetime.fromtimestamp(t).strftime('%m-%d %H:%M')
 
 
 _HANDLE_DIGITS = '0123456789abcdefghijklmnopqrstuvwxyz'
+_HANDLE_LENGTH = 6
 
 
 def message_handle(svrid: int) -> str:
-    """ 一条消息给模型看的短标签，如 `#4k2p`。
+    """ 一条消息给模型看的短标签，如 `#4k2p0z`。
 
-    只用来把附带的图片和聊天记录里的那一行对上，**不做查找键**——查找一律用完整
-    svrid。4 位 base36，同一窗口里撞了也不致命（顶多两条媒体共用标签）。
+    取 svrid 的 sha1 摘要（前 8 字节）的末 6 位 36 进制，**不是 svrid 本身的低位**：
+    低位可能是连续计数器，相邻消息会拿到相邻标签，撞车就变成结构性问题而不是概率问题。
+    6 位 base36 ≈ 31 bit，一个 60 条的窗口里几乎撞不了；所以它够格当引用键——
+    `（引用 #xxxx）` 的注解、模型回复时的 `ref` 参数都靠它。
     """
     if not svrid:
         return ''
-    n, out = int(svrid), ''
-    while n:
+    n = int.from_bytes(hashlib.sha1(str(svrid).encode()).digest()[:8], 'big')
+    out = ''
+    for _ in range(_HANDLE_LENGTH):
         n, rest = divmod(n, 36)
         out = _HANDLE_DIGITS[rest] + out
-    return '#' + out[-4:].rjust(4, '0')
+    return '#' + out
 
 
 class SingleRecord:
@@ -94,7 +105,7 @@ class SingleRecord:
         :param is_self: 是否为机器人自己发的消息，transcript 里标记为「我」
         :param msg_id: 这条消息在 daemon 里的 64 位 svrid
         :param media_id: 要内联给模型的媒体的 svrid（自己有图=msg_id，引用图=ref_svrid），0=没有
-        :param handle: 媒体在 transcript 里的短标签（`#4k2p`），没有可内联媒体时为空
+        :param handle: 媒体在 transcript 里的短标签（`#4k2p0z`），没有可内联媒体时为空
         """
         self.sender = sender
         self.text = text
@@ -204,7 +215,7 @@ class ChatWindow:
     def __str__(self):
         """ 渲染给模型看的 transcript。
 
-        每条带绝对时间（如 [09-14 14:32]）、消息短标签（`#4k2p`，回复时用它指定引用哪条）
+        每条带绝对时间（如 [09-14 14:32:07]）、消息短标签（`#4k2p0z`，回复时用它指定引用哪条）
         和「我」标记：模型据此判断消息时间、以及自己说过什么。
         历史行的文本跨轮不变，保住 KV cache 前缀。
         """
@@ -218,7 +229,7 @@ class ChatWindow:
         return '\n'.join(lines)
 
     def find_by_handle(self, handle: str) -> SingleRecord | None:
-        """ 按 transcript 里的短标签（`#4k2p`）找一条记录，用于「引用哪条」。
+        """ 按 transcript 里的短标签（`#4k2p0z`）找一条记录，用于「引用哪条」。
 
         找不到、或标签撞了（同一窗口多条命中）都返回 None——引用错了比不引用更糟。
         """
@@ -228,6 +239,18 @@ class ChatWindow:
         hits = [record for record in self._history
                 if record.msg_id and message_handle(record.msg_id)[1:] == target]
         return hits[0] if len(hits) == 1 else None
+
+    def shows(self, svrid: int, visible: int = 0) -> bool:
+        """ 这条 svrid 会出现在模型这一轮看到的 transcript 里吗。
+
+        transcript 是 `latest_n(visible)`，且当前这条还没进窗口，所以被引的那条得落在
+        现有记录的最后 `visible - 1` 条里，写成 `（引用 #xxxx）` 模型才找得到它。
+        `visible <= 0` = 不设限（整个窗口）。
+        """
+        if not svrid:
+            return False
+        tail = self._history if visible <= 0 else self._history[-(visible - 1):]
+        return any(record.msg_id == svrid for record in tail)
 
     def __len__(self):
         return len(self._history)
@@ -326,16 +349,20 @@ if __name__ == '__main__':
     window.append('Bot', '在', 1060, is_self=True)
     window.append('张三', '帮我看看', 4600)
     lines = str(window).split('\n')
-    assert lines[0] == f'[01-01 08:16] {message_handle(111)} 张三: 在吗', lines
+    assert lines[0] == f'[01-01 08:16:40] {message_handle(111)} 张三: 在吗', lines
     assert lines[1].endswith('我: 在'), lines                      # 自己那条没有 svrid，不打标签
-    assert all(re.match(r'\[\d\d-\d\d \d\d:\d\d\] ', line) for line in lines), lines
+    assert all(re.match(r'\[\d\d-\d\d \d\d:\d\d:\d\d\] ', line) for line in lines), lines
     # 引用哪条：按标签找回原消息；撞了 / 找不到就返回 None
     assert window.find_by_handle(message_handle(111)).text == '在吗'
     assert window.find_by_handle('#nope') is None and window.find_by_handle('') is None
+    # `（引用 #xxxx）` 只在被引那条还落在可见范围里时才给。窗口里 3 条，
+    # 模型看到 4 条（含当前这条）时 111 还在，只看到 3 条时就滑出去了
+    assert window.shows(111, 4) and window.shows(111) and not window.shows(111, 3)
+    assert not window.shows(0) and not window.shows(999)
 
-    # 短标签：4 位、稳定、0 是「没有」
+    # 短标签：6 位、稳定、0 是「没有」
     assert message_handle(0) == '' and message_handle(5677413158710008087).startswith('#')
-    assert len(message_handle(5677413158710008087)) == 5
+    assert len(message_handle(5677413158710008087)) == 7
     assert message_handle(1) != message_handle(2)
     assert message_handle(5677413158710008087) == message_handle(5677413158710008087)
 
