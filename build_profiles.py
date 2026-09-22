@@ -16,7 +16,7 @@ import json
 import re
 from collections import Counter, defaultdict
 from collections.abc import Collection, Iterable, Iterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from profiles import normalize_name
@@ -209,7 +209,7 @@ def build(path: str | Path) -> dict:
     ordered = dict(sorted(people.items(), key=lambda item: -item[1]['text_count']))
     return {
         'version': 1,
-        'generated_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+        'generated_at': datetime.now(UTC).isoformat(timespec='seconds'),
         'source': Path(path).name,
         'chat': chat,
         'people': ordered,

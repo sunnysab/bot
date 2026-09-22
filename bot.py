@@ -2,7 +2,6 @@ import asyncio
 import random
 import time
 from dataclasses import dataclass
-from typing import TypeVar
 
 from loguru import logger
 from weixin_bot import PatContent, WeChatBotError
@@ -34,10 +33,7 @@ STALE_MESSAGE_SECONDS = 300.0  # 比这更旧的消息只当上下文：daemon �
 REVOKE_WINDOW_SECONDS = 120.0  # daemon 只认 2 分钟内的撤回，超了不必白跑一次 RPC
 SENT_KEEP = 10                 # 每个会话最多记这么多条自己的出站，只用来撤回
 
-T = TypeVar('T')
-
-
-def _aslist(x: T | list[T]) -> list[T]:
+def _aslist[T](x: T | list[T]) -> list[T]:
     """ 把「单个对象或列表」统一成列表。 """
     return x if isinstance(x, list) else [x]
 

@@ -176,7 +176,7 @@ class Config:
     log_level: str = 'DEBUG'
 
     @classmethod
-    def from_env(cls) -> 'Config':
+    def from_env(cls) -> Config:
         """ 环境变量名 = 字段名大写；布尔按 '0/false/no' 为假解析。 """
         values = {}
         for f in fields(cls):

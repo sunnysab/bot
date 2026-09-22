@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from build_profiles import (
@@ -79,7 +79,7 @@ def build(path: str | Path) -> dict:
 
     return {
         'version': 1,
-        'generated_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+        'generated_at': datetime.now(UTC).isoformat(timespec='seconds'),
         'source': Path(path).name,
         'chat': chat,
         'habits': habits,

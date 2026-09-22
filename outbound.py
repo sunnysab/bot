@@ -34,7 +34,7 @@ class Outbound:
     chat_name: str = ''
     # 这条出站对应历史里的哪条记录。撤回成功后要抹掉它，否则模型下一轮
     # 还看得见自己已经撤回的话（见 Bot.revoke）
-    record: 'SingleRecord | None' = None
+    record: SingleRecord | None = None
     # 引用回复的目标（被引消息的 64 位 svrId）；0 = 不引用
     ref_svrid: int = 0
     # 要 @ 的群成员 wxid，多个用逗号分隔；空 = 不 @
