@@ -35,11 +35,14 @@ class FakeMsg:
         return self.data
 
 
-def make_record(md5='md5-1', kind='image', description=None, data=b'raw'):
-    """ 构造一条带媒体下载入口的历史记录。 """
+def make_record(md5='md5-1', kind='image', description=None, data=b'raw', t=1):
+    """ 构造一条带媒体下载入口的历史记录。
+
+    `t=1` = 两天前的老消息（默认，按已失效处理）；传 `int(time.time())` 就是刚发的。
+    """
     msg = FakeMsg(data)
     media = Media(kind, md5, description)
-    record = SingleRecord('Alice', media.placeholder, 1, media=media,
+    record = SingleRecord('Alice', media.placeholder, t, media=media,
                           download=msg.get_media_bytes if media.needs_description else None)
     return record, msg
 
@@ -104,7 +107,7 @@ class TestMediaDescriber(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record.text, '[表情：摊倒]')
 
     async def test_download_failure_keeps_placeholder_and_caches_the_failure(self):
-        """ 取不到字节：保留占位符，并记负缓存——消息过期、daemon 说缺参数的图
+        """ 老消息取不到字节：保留占位符，并记 24 小时负缓存——图早被服务端回收了，
         不该每次重启都从头等一遍 describe_timeout。 """
         calls = []
 
@@ -117,13 +120,50 @@ class TestMediaDescriber(unittest.IsolatedAsyncioTestCase):
         await self.describer.join()
         self.assertEqual(first.text, '[图片]')
         self.assertEqual(len(calls), 1)
-        self.assertTrue(self.cache.blocked('md5-5', IMAGE_PROMPT_VERSION, time.time()))
+
+        now = time.time()
+        self.assertTrue(self.cache.blocked('md5-5', IMAGE_PROMPT_VERSION, now + 23 * 3600))
+        self.assertFalse(self.cache.blocked('md5-5', IMAGE_PROMPT_VERSION, now + 25 * 3600))
 
         second = SingleRecord('Alice', '[图片]', 2, media=Media('image', 'md5-5'), download=broken)
         self.describer.schedule(second)
         await self.describer.join()
         self.assertEqual(len(calls), 1)                 # 负缓存挡在下载之前
         self.assertEqual(second.text, '[图片]')
+
+    async def test_fresh_image_failure_is_a_short_cooldown_not_a_day(self):
+        """ 刚发的图取不到字节是这一侧的问题（RPC 报错、daemon 刚重启），不能当
+        「图过期」静默一天：短冷却，而且下一轮还会再试。 """
+        calls = []
+
+        async def broken():
+            calls.append(1)
+            raise RuntimeError('[404] 未知操作: get_media_bytes')
+
+        record = SingleRecord('Alice', '[图片]', int(time.time()),
+                              media=Media('image', 'md5-13'), download=broken)
+        self.describer.schedule(record)
+        await self.describer.join()
+        self.assertEqual(record.text, '[图片]')
+
+        now = time.time()
+        self.assertTrue(self.cache.blocked('md5-13', IMAGE_PROMPT_VERSION, now + 60))
+        self.assertFalse(self.cache.blocked('md5-13', IMAGE_PROMPT_VERSION, now + 3600))
+
+        # 同一张图在这 5 分钟里还是挡着：短冷却也是冷却
+        again = SingleRecord('Alice', '[图片]', int(time.time()),
+                             media=Media('image', 'md5-13'), download=broken)
+        self.describer.schedule(again)
+        await self.describer.join()
+        self.assertEqual(len(calls), 1)
+
+        # 冷却期一过（缓存里那条负缓存已经过期）就该真的重试，而不是等满一天
+        self.cache.note_failure('md5-13', 'image', IMAGE_PROMPT_VERSION, now - 1)
+        later = SingleRecord('Alice', '[图片]', int(time.time()),
+                             media=Media('image', 'md5-13'), download=broken)
+        self.describer.schedule(later)
+        await self.describer.join()
+        self.assertEqual(len(calls), 2)
 
     async def test_timeout_keeps_placeholder_and_caches_the_failure(self):
         ai = FakeAi(delay=0.2)

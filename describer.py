@@ -17,14 +17,20 @@ from context import SingleRecord
 from emojis import EMOJI_DESCRIBE_PROMPT, Emoji, EmojiLibrary, parse_description
 from media import Media, add_handle
 
-# 失败后的冷却期。取不到字节（消息过期 / daemon 说缺参数）短期不会变好，挡久一点；
-# 限流、超时、空回复这些是临时的，过几分钟值得再试
+# 失败后的冷却期，两种含义不同（见 `MediaDescriber._retry_ttl`）：
+# 「图没了」挡一天，「这次没取到」几分钟后再试
 FAIL_TTL_GONE = 24 * 60 * 60.0
 FAIL_TTL_RETRY = 300.0
+# 消息比这还旧：还取不到就当服务端已经把那个 blob 回收了（图片原图通常留几天）
+GONE_AGE = 2 * 24 * 60 * 60.0
 
 
 class MediaUnavailable(Exception):
-    """ 拿不到这张图的字节（消息太老、daemon 报缺 msg_id/url/path）。 """
+    """ 从源头拿不到这张图的字节：消息太老、daemon 报错、下载结果为空。
+
+    只说明**这一次**没拿到，不代表图没了——是「已失效」还是「临时故障」看消息多老，
+    由 `MediaDescriber._retry_ttl` 定。别拿这个异常直接当过期处理。
+    """
 
 
 class MediaCache:
@@ -174,8 +180,10 @@ class MediaDescriber:
         try:
             description = description or await self._describe_once(media, record.download)
         except MediaUnavailable as e:
-            self._retry_later(media, version, FAIL_TTL_GONE)
-            self._warn_once(f'{media.kind}:gone', f'取不到媒体字节 md5={media.md5}: {e}')
+            ttl = self._retry_ttl(record)
+            self._retry_later(media, version, ttl)
+            when = '图已失效' if ttl == FAIL_TTL_GONE else '过一会儿重试'
+            self._warn_once(f'{media.kind}:gone', f'取不到媒体字节（{when}）md5={media.md5}: {e}')
             return
         except Exception as e:
             self._retry_later(media, version, FAIL_TTL_RETRY)
@@ -191,6 +199,20 @@ class MediaDescriber:
     @staticmethod
     def _version(media: Media) -> str:
         return IMAGE_PROMPT_VERSION if media.kind == 'image' else ''
+
+    @staticmethod
+    def _retry_ttl(record: SingleRecord) -> float:
+        """ 取字节失败后隔多久再试一次。
+
+        失败一天不理，只有在「图真的没了」时才成立；而图真没了必然是因为旧——服务端
+        早把那个 blob 回收了。新消息取不到字节是这一侧的问题（RPC 报错、daemon 刚重启、
+        网络抖），该短冷却重试：既不能让一次接口故障伪装成「图过期」静默一整天，
+        也不能替用户把窗口里刚发的一张图默默丢掉。
+
+        `record.t` 缺失（0）时按新消息算——宁可多试一次，也别默认放弃。
+        """
+        age = time.time() - record.t if record.t else 0.0
+        return FAIL_TTL_GONE if age > GONE_AGE else FAIL_TTL_RETRY
 
     def _retry_later(self, media: Media, version: str, ttl: float) -> None:
         """ 记负缓存：ttl 秒内不再碰这张图。 """
