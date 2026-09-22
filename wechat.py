@@ -2,6 +2,7 @@ import asyncio
 import base64
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -235,8 +236,8 @@ class Wechat:
 
         自己去重的原因：同一张图会被两条路各要一次——当前轮把它内联给模型看，
         后台给它补一条写进历史的描述——两边几乎同时发生。daemon 那边同一张图确实只下
-        一次（`fetch_image_original` 先查缓存再拿锁），但省掉的是两次 RPC 往返、
-        以及一次几百 KB 的 base64 搬运。
+        一次（`fetch_image_original` 先查缓存再拿锁），但省掉的是两次往返、
+        以及一次几百 KB 的字节搬运。
 
         失败不进缓存：网络抖动、daemon 刚重启都会失败，下次再试一次就好。
         """
@@ -252,13 +253,13 @@ class Wechat:
         return await task
 
     async def _fetch_media(self, msg_id: int) -> tuple[bytes, str]:
-        """ 真正问 daemon 要一次字节。 """
-        data = await self._bot.call('get_media_bytes', {'msg_id': msg_id})
-        payload = data if isinstance(data, dict) else {}
-        encoded = payload.get('data_base64')
-        if not encoded:
+        """ 真正问 daemon 要一次字节：分块下载流，扩展名从元数据的 filename 里取。 """
+        stream = await self._bot.open_download(msg_id=msg_id)
+        meta = await stream.open()
+        data = b''.join([chunk async for chunk in stream.chunks()])
+        if not data:
             raise ValueError(f'daemon 没返回附件内容（msg_id={msg_id}）')
-        return base64.b64decode(encoded), str(payload.get('ext') or '')
+        return data, Path(str(meta.get('filename') or '')).suffix.lstrip('.').lower()
 
     def _finish_media(self, msg_id: int, task: asyncio.Task) -> None:
         """ 下载结束：成功就留在内存里（有上限），失败什么都不记。 """
@@ -274,17 +275,15 @@ class Wechat:
     async def media_bytes(self, msg: Message) -> bytes:
         """ 取一条消息附件的原始字节（识图用）。
 
-        **不走 SDK 的 `msg.get_media_bytes()`**：那条路走 PKT_DL_OPEN 分块流，
-        而 daemon 的 DL_OPEN 分支按 `DaemonRequest`（action + params）解包，SDK 只塞了
-        params，解不出就被 `unwrap_or_default()` 吞掉，最后报 400「缺少 msg_id」——
-        报错和真实原因（图片的 XML 里没有 cdnurl）完全无关，查半天。
+        走 SDK 的分块下载流（`PKT_DL_OPEN`，见 `_fetch_media`）。曾经这里绕开它去调
+        普通 RPC，因为当时 SDK 只往 DL_OPEN 塞 params、daemon 按 `DaemonRequest`
+        （action + params）解包，解不出就被 `unwrap_or_default()` 吞掉，最后报
+        400「缺少 msg_id」；那个 RPC 后来也随 base64 一起被 daemon 删了（现在只剩
+        `download_media` 给元数据）。SDK 现在发的是完整的 `{action, params}` 信封。
 
         图片现在拿到的是**原图**：入站图片的 XML 里只有缩略图 blob（实测 376/376
         `cdnmidimgurl == cdnthumburl`），daemon 会先走 getmsgimg 取原图，取不到
-        （服务端已回收，`-352`）才回退缩略图，并在响应里标 `original: false`。
-
-        这里走普通 RPC 的 `get_media_bytes`（形状是对的），拿 base64 再解回来，
-        失败时的报错就是 daemon 的原始报错。
+        （服务端已回收，`-352`）才回退缩略图。
         """
         raw, _ = await self.media_bytes_by_id(msg.msg_id)
         return raw

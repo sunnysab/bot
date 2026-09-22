@@ -95,10 +95,29 @@ class FakeBot:
         return {'sent': True}
 
 
+class FakeStream:
+    """ SDK `DownloadStream` 的最小替身：`open()` 给元数据，`chunks()` 给字节。 """
+
+    def __init__(self, payload: dict):
+        self.payload = payload
+
+    async def open(self) -> dict:
+        if 'error' in self.payload:
+            raise WeChatBotError(self.payload.get('code', -1), self.payload['error'])
+        return {'filename': self.payload.get('filename', ''),
+                'size': len(self.payload.get('data', b''))}
+
+    async def chunks(self):
+        data = self.payload.get('data', b'')
+        for start in range(0, len(data), 2):    # 故意切碎：拼接逻辑也得测到
+            yield data[start:start + 2]
+
+
 class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
-    async def _call(self, action, params):
-        self.calls.append((action, params))
-        return self.reply
+    async def _download(self, **kwargs):
+        self.calls.append(('open_download', kwargs))
+        return FakeStream(self.reply)
+
     def setUp(self):
         self.wechat = Wechat('127.0.0.1', 9999)
         self.wechat._bot = FakeBot()  # type: ignore[assignment]
@@ -228,45 +247,33 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await self.wechat.avatar('wxid_ghost')
 
-    async def test_media_bytes_goes_through_plain_rpc(self):
-        """ 附件走普通 RPC `get_media_bytes`，不走坏的 DL_OPEN 分块流。
-
-        分块流那条路：daemon 的 DL_OPEN 分支按 DaemonRequest（action + params）解包，
-        而 SDK 只塞了 params，解不出就被 unwrap_or_default() 吞掉，最后报 400
-        「缺少 msg_id」——那个报错和真实原因（图片没有 cdnurl）完全无关。
-        """
-        import base64
-
-        self.wechat._bot.call = self._call
+    async def test_media_bytes_goes_through_download_stream(self):
+        """ 附件走 SDK 的分块下载流，字节拼回来，扩展名从 filename 里取。 """
+        self.wechat._bot.open_download = self._download
         self.calls: list[tuple[str, dict]] = []
-        self.reply = {'filename': 'msg_1.jpg', 'size': 4, 'ext': 'jpg',
-                      'data_base64': base64.b64encode(b'\xff\xd8\xff\xe0').decode()}
+        self.reply = {'filename': 'msg_1.jpg', 'data': b'\xff\xd8\xff\xe0'}
         raw = await self.wechat.media_bytes(make_message(msg_id=777))
         self.assertEqual(raw, b'\xff\xd8\xff\xe0')
-        self.assertEqual(self.calls, [('get_media_bytes', {'msg_id': 777})])
+        self.assertEqual(self.calls, [('open_download', {'msg_id': 777})])
 
         # daemon 说没内容时要报得诚实，而不是拿一个空字节流充数
-        self.reply = {'filename': 'x', 'size': 0}
+        self.reply = {'filename': 'x', 'data': b''}
         with self.assertRaises(ValueError):
             await self.wechat.media_bytes(make_message(msg_id=778))
 
     async def test_media_bytes_by_id_returns_ext(self):
         """ 面板要的是 (字节, 扩展名)，附件仍由 daemon 保管。 """
-        import base64
-
-        self.wechat._bot.call = self._call
+        self.wechat._bot.open_download = self._download
         self.calls: list[tuple[str, dict]] = []
-        self.reply = {'ext': 'gif', 'data_base64': base64.b64encode(b'GIF89a').decode()}
+        self.reply = {'filename': 'sticker.GIF', 'data': b'GIF89a'}
         data, ext = await self.wechat.media_bytes_by_id(999)
         self.assertEqual((data, ext), (b'GIF89a', 'gif'))
 
     async def test_same_msg_id_is_fetched_once(self):
         """ 同一张图只问 daemon 一次：当前轮内联给模型、后台补描述，是两条路各要一次。 """
-        import base64
-
-        self.wechat._bot.call = self._call
+        self.wechat._bot.open_download = self._download
         self.calls: list[tuple[str, dict]] = []
-        self.reply = {'ext': 'jpg', 'data_base64': base64.b64encode(b'jpeg').decode()}
+        self.reply = {'filename': 'a.jpg', 'data': b'jpeg'}
         first = await self.wechat.media_bytes_by_id(7)
         second = await self.wechat.media_bytes_by_id(7)
         self.assertEqual(first, second)
@@ -276,23 +283,21 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.calls), 2)
 
     async def test_concurrent_requests_for_one_image_are_merged(self):
-        """ 两边几乎同时要：单飞，合流成一次 RPC（daemon 的 CDN 回退不持锁）。 """
-        import base64
-
-        self.wechat._bot.call = self._call
+        """ 两边几乎同时要：单飞，合流成一次下载（daemon 的 CDN 回退不持锁）。 """
+        self.wechat._bot.open_download = self._download
         self.calls: list[tuple[str, dict]] = []
-        self.reply = {'ext': 'jpg', 'data_base64': base64.b64encode(b'jpeg').decode()}
+        self.reply = {'filename': 'a.jpg', 'data': b'jpeg'}
         results = await asyncio.gather(*(self.wechat.media_bytes_by_id(7) for _ in range(5)))
         self.assertTrue(all(item == results[0] for item in results))
         self.assertEqual(len(self.calls), 1)
 
     async def test_a_failed_fetch_is_not_cached(self):
         """ 失败不进内存缓存：网络抖动、daemon 刚重启都会失败，下次要还能再试。 """
-        self.wechat._bot.call = self._call
+        self.wechat._bot.open_download = self._download
         self.calls: list[tuple[str, dict]] = []
-        self.reply = {'filename': 'x', 'size': 0}      # 没有 data_base64
+        self.reply = {'error': '下载消息 7 附件失败: 媒体不存在', 'code': 500}
         for _ in range(2):
-            with self.assertRaises(ValueError):
+            with self.assertRaises(WeChatBotError):
                 await self.wechat.media_bytes_by_id(7)
         self.assertEqual(len(self.calls), 2)
 
