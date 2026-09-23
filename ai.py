@@ -68,6 +68,39 @@ class Usage:
 usage = Usage()
 
 
+def reason_of(error: Exception) -> str:
+    """ 一次模型调用失败的原因，压成一句能贴到面板 / 日志上的话。
+
+    只报错误码不够用。2026-09-23 那次面板上显示的是「agent 选择不发言」，翻日志才知道
+    是「面板上换过的 key 没生效，旧 key 的周用量早超了」——「限流/用量超了」和
+    「key 无效」得一眼分得开，才不用每次去翻异常原文。
+    """
+    if isinstance(error, TimeoutError):          # wait_for 超时、上游自己超时
+        return '调用超时：模型没在限时内返回'
+    detail = _error_message(error) or ' '.join(str(error).split())[:160] or error.__class__.__name__
+    status = getattr(error, 'status_code', None)
+    if status == 429:
+        return f'被限流（用量或频率超了）：{detail}'
+    if status in (401, 403):
+        return f'key 无效或没权限：{detail}'
+    if status and status >= 500:
+        return f'上游服务出错（HTTP {status}）：{detail}'
+    if status:
+        return f'接口返回 HTTP {status}：{detail}'
+    if error.__class__.__name__ in ('APIConnectionError', 'APITimeoutError'):
+        return f'连不上模型服务（网络或地址不对）：{detail}'
+    return detail
+
+
+def _error_message(error: Exception) -> str:
+    """ 供应商的真实说明在 body 里；openai 把壳（`Error code: 429 - {...}`）拼进了异常消息。 """
+    body = getattr(error, 'body', None)
+    inner = body.get('error', body) if isinstance(body, dict) else None
+    if isinstance(inner, dict) and inner.get('message'):
+        return ' '.join(str(inner['message']).split())
+    return ''
+
+
 class AiProvider:
     """ 聊天机器人 """
 
@@ -334,6 +367,20 @@ def _self_check() -> None:
 
     async def _ok():
         return ('行', False)
+
+    # 失败分类：限流 / key / 超时 / 上游 / 认不出（认不出的也必须能看懂）
+    class Boom(Exception):
+        def __init__(self, status=None, body=None):
+            self.status_code, self.body = status, body
+            super().__init__(f'Error code: {status} - {body}')
+
+    limited = Boom(429, {'error': {'message': "You've reached   your weekly\nlimit"}})
+    assert reason_of(limited) == '被限流（用量或频率超了）：You\'ve reached your weekly limit', reason_of(limited)
+    assert reason_of(Boom(401, {'error': {'message': 'invalid api key'}})).startswith('key 无效'), 'key'
+    assert '超时' in reason_of(TimeoutError())
+    assert '上游' in reason_of(Boom(503, None))          # 没有 body 也要能说清楚
+    assert reason_of(ValueError('bad json')) == 'bad json'
+    assert reason_of(Exception()) == 'Exception'        # 什么都不说的异常也得有名字
 
     import asyncio
     asyncio.run(retry_check())

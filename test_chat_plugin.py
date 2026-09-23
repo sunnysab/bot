@@ -10,6 +10,7 @@ from pathlib import Path
 
 from context import ChatWindow, MessageContext, message_handle
 from emojis import Emoji
+from events import bus
 from focus import FocusMode
 from habits import Habit, HabitStore
 from images import ImageStore
@@ -224,6 +225,29 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
         self.assertEqual(reply.texts, [])
         self.assertTrue(reply.stop)
+
+    async def test_expressor_failure_says_why(self):
+        """ 表达者挂了不能只在面板上写「表达失败」：限流 / key 失效要一眼看得到。 """
+        class Boom(FakeAi):
+            async def chat(self, prompt, message):
+                if PLANNER_MARK in prompt:
+                    return await super().chat(prompt, message)
+                raise RuntimeError('被限流（用量或频率超了）：weekly limit')
+
+        plugin = ChatPlugin(Boom(), context_length=10)
+        seen: list[tuple[str, str]] = []
+
+        def record(event):
+            seen.append((event.status, event.detail))
+
+        bus.subscribe(record)
+        try:
+            reply = await plugin.handle(proactive_ctx())
+        finally:
+            bus.unsubscribe(record)
+
+        self.assertEqual(reply.texts, [])
+        self.assertIn(('express_failed', '被限流（用量或频率超了）：weekly limit'), seen)
 
     async def test_alternate_style_uses_own_expression(self):
         import random
@@ -1194,15 +1218,32 @@ class TestAgentMode(unittest.IsolatedAsyncioTestCase):
         bare = await plugin._agent_prompt(proactive_ctx(), ('reply',))
         self.assertNotIn('search_emoji', bare)
 
-    async def test_model_failure_still_silences_cleanly(self):
+    async def test_model_failure_is_reported_as_an_error_not_silence(self):
+        """ 调不通和「模型决定不说话」都是空回复，面板上必须分得开。
+
+        不然 429 / 超时会被当成模型的选择，看面板的人只看到一句「不发言」，
+        根本不知道接口根本没调通。
+        """
         class Boom(ToolAi):
             async def chat_tools(self, prompt, messages, tools):
-                raise RuntimeError('网络挂了')
+                raise RuntimeError('429 用量超了')
 
         plugin = ChatPlugin(Boom([]), context_length=10, reply_mode='agent')
-        reply = await plugin.handle(proactive_ctx())
+        seen: list[tuple[str, str]] = []
+
+        def record(event):
+            seen.append((event.status, event.detail))
+
+        bus.subscribe(record)
+        try:
+            reply = await plugin.handle(proactive_ctx())
+        finally:
+            bus.unsubscribe(record)
+
         self.assertEqual(reply.texts, [])
         self.assertTrue(reply.stop)
+        self.assertIn(('planner_failed', '429 用量超了'), seen)
+        self.assertNotIn('planner_silent', [status for status, _ in seen])
 
 
 class TestCleanReply(unittest.TestCase):

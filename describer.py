@@ -12,7 +12,7 @@ from dataclasses import replace
 
 from loguru import logger
 
-from ai import IMAGE_DESCRIBE_PROMPT, IMAGE_PROMPT_VERSION, AiProvider
+from ai import IMAGE_DESCRIBE_PROMPT, IMAGE_PROMPT_VERSION, AiProvider, reason_of
 from context import SingleRecord
 from emojis import EMOJI_DESCRIBE_PROMPT, Emoji, EmojiLibrary, parse_description
 from media import Media, add_handle
@@ -187,7 +187,9 @@ class MediaDescriber:
             return
         except Exception as e:
             self._retry_later(media, version, FAIL_TTL_RETRY)
-            self._warn_once(f'{media.kind}:{e}', f'描述媒体失败 md5={media.md5}: {e}')
+            why = reason_of(e)
+            # 用分类结果当告警键：限流时那几十张图只报一次，不是每张一条
+            self._warn_once(f'{media.kind}:{why}', f'描述媒体失败 md5={media.md5}：{why}')
             return
         if not description:
             self._retry_later(media, version, FAIL_TTL_RETRY)
@@ -331,7 +333,7 @@ class EmojiDescriber:
                     self._ai.describe(image, max_tokens=self._max_tokens,
                                       prompt=EMOJI_DESCRIBE_PROMPT, model=self._model), self._timeout)
         except Exception as e:
-            logger.warning(f'补表情场景失败 md5={emoji.md5}: {e}')
+            logger.warning(f'补表情场景失败 md5={emoji.md5}：{reason_of(e)}')
             return
         current = self._library.get(emoji.md5)
         desc, scene = parse_description(text or '')

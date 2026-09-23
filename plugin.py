@@ -11,7 +11,7 @@ from typing import override
 
 from loguru import logger
 
-from ai import AiProvider
+from ai import AiProvider, reason_of
 from context import ChatWindow, MessageContext, SingleRecord, message_handle
 from emojis import FACE_CATALOG, Emoji, EmojiPolicy, filter_faces
 from events import Status, bus
@@ -649,15 +649,20 @@ class ChatPlugin(Plugin):
         emoji: Emoji | None = None
         at = ''
         ref = 0
+        # 这一轮所有被吞掉的接口失败都记在这里（按时间序），面板要那个原因
+        errors: list[str] = []
         if self.enable_planner:
             self._emit(ctx, Status.DECIDING, f'{necessity.kind} · 分数 {necessity.score}')
             if self._tools_ready:
-                decided, emoji, at, ref, tool_log = await self._plan_with_tools(ctx, blocks, transcript, images)
+                decided, emoji, at, ref, tool_log = await self._plan_with_tools(
+                    ctx, blocks, transcript, images, errors)
             else:
-                decided, tool_log = await self._plan(ctx, necessity, blocks, transcript, images), ''
+                decided = await self._plan(ctx, necessity, blocks, transcript, images, errors)
+                tool_log = ''
             # 决策本身没跑通（超时/报错）：不算「不发言」，照走表达者
             if decided is None:
-                self._emit(ctx, Status.PLANNER_FAILED, '决策调用失败，直接表达')
+                self._emit(ctx, Status.PLANNER_FAILED,
+                           _brief(errors[-1], 160) if errors else '决策调用失败，直接表达')
             # 必须回应的场景忽略「不发言」，但采纳它挑的表情——
             # 被 @ 时配个表情本来就是最自然的
             if decided is not None and not decided.speak and not must_speak:
@@ -670,12 +675,13 @@ class ChatPlugin(Plugin):
                 plan = f'{plan}\n【工具】\n{tool_log}' if plan else f'【工具】\n{tool_log}'
 
         self._emit(ctx, Status.EXPRESSING)
-        response = await self._express(ctx, blocks, transcript, images, plan)
+        response = await self._express(ctx, blocks, transcript, images, plan, errors)
         latency_ms = self._elapsed(started)
         self._trace(ctx, necessity, transcript, response, latency_ms, plan)
         if response is None:
-            self._emit(ctx, Status.EXPRESS_FAILED, '表达者调用失败')
-            return self._silent(ctx, now, emoji=emoji)
+            self._emit(ctx, Status.EXPRESS_FAILED,
+                       _brief(errors[-1], 160) if errors else '表达者调用失败')
+            return self._failed(emoji)
 
         # 模型常顺手带上「昵称：」前缀或引号包裹，不能直接漏到群里（见 _clean）
         texts = self._clean(response, ctx)
@@ -701,6 +707,13 @@ class ChatPlugin(Plugin):
     def _silent(self, ctx: MessageContext, now: float, emoji: Emoji | None = None) -> Reply:
         """ 这一轮没说话（最多只发了个表情），记一笔给连续沉默退避用。 """
         self.policy.record(ctx, spoke=emoji is not None, now=now)
+        return Reply(stop=True, emoji=emoji)
+
+    @staticmethod
+    def _failed(emoji: Emoji | None = None) -> Reply:
+        """ 接口没调通。和 _silent 只差**不记账**：连续沉默退避是给模型的判断留的，
+        接口挂掉不该让它越退越久（挂十分钟就退到上限，恢复后还要白等一大截）。
+        """
         return Reply(stop=True, emoji=emoji)
 
     def _emoji_tools(self, state: dict) -> list:
@@ -857,7 +870,7 @@ class ChatPlugin(Plugin):
         return tools
 
     async def _plan_with_tools(self, ctx: MessageContext, blocks: dict[str, str], transcript: str,
-                               images: list[tuple[str, bytes]]) \
+                               images: list[tuple[str, bytes]], errors: list[str]) \
             -> tuple[Plan | None, Emoji | None, str, int, str]:
         """ 带工具的决策循环（两段式）。返回（决策, 选中的表情, 要 @ 的人, 引用的消息 svrid, 工具记录）。
 
@@ -880,7 +893,7 @@ class ChatPlugin(Plugin):
                      'content': self._build_message(self._compose(ctx, blocks, transcript), images)}]
         analysis = ''
         for _ in range(max(1, self.planner_rounds)):
-            turn = await self._ask_tools(prompt, messages, toolbox.schema(), ctx)
+            turn = await self._ask_tools(prompt, messages, toolbox.schema(), ctx, errors)
             if turn is None:
                 return None, None, '', 0, toolbox.render_calls()      # 这次没拿到决策
             analysis = turn.content or turn.reasoning or analysis
@@ -904,12 +917,16 @@ class ChatPlugin(Plugin):
         return plan, emoji, state['at'], state['ref'], log
 
     async def _reply_agent(self, ctx: MessageContext, blocks: dict[str, str], transcript: str,
-                           images: list[tuple[str, bytes]], must_speak: bool) \
+                           images: list[tuple[str, bytes]], must_speak: bool,
+                           errors: list[str]) \
             -> tuple[list[str], Emoji | None, str, int, str]:
         """ 单段式：模型自己判断、自己写台词，回话就是一次 `reply` 调用。
 
         与 _plan_with_tools 只差终点动作：那边调 speak（只说意图），这边调 reply（原话）。
         表情工具、查历史工具、撤回工具、循环骨架完全一致。
+
+        errors 是出参：模型压根没调通时往里记一条原因。调用方靠它把「模型说不发言」
+        和「接口报错」分开——两者都是空回复，但面板上不能显示成同一件事。
         """
         state: dict = {'candidates': [], 'picked': [], 'at': '', 'ref': 0, 'pat': ''}
         replies: list[str] = []
@@ -933,7 +950,7 @@ class ChatPlugin(Plugin):
                      'content': self._build_message(self._compose(ctx, blocks, transcript), images)}]
         forced = False
         for _ in range(max(1, self.planner_rounds)):
-            turn = await self._ask_tools(prompt, messages, toolbox.schema(), ctx)
+            turn = await self._ask_tools(prompt, messages, toolbox.schema(), ctx, errors)
             if turn is None:
                 break
             if not turn.tool_calls:
@@ -963,23 +980,36 @@ class ChatPlugin(Plugin):
         """ agent 模式的一轮：决策和表达在同一次调用里完成，没有表达者这一步。 """
         self._emit(ctx, Status.DECIDING, f'{necessity.kind} · agent')
         started = time.perf_counter()
-        texts, emoji, at, ref, tool_log = await self._reply_agent(ctx, blocks, transcript, images, must_speak)
+        errors: list[str] = []
+        texts, emoji, at, ref, tool_log = await self._reply_agent(
+            ctx, blocks, transcript, images, must_speak, errors)
         self._trace(ctx, necessity, transcript, texts or None, self._elapsed(started), tool_log)
         cleaned = self._clean(texts, ctx)
         if not cleaned:
-            self._emit(ctx, Status.PLANNER_SILENT, 'agent 选择不发言')
-            return self._silent(ctx, now, emoji=emoji)
+            # 本轮空回复有两种来源：模型真的决定不开口，或者接口压根没调通。
+            # 后者以前一律写成「选择不发言」，429 / 超时在面板上看着像模型的意思
+            if not errors:
+                self._emit(ctx, Status.PLANNER_SILENT, 'agent 选择不发言')
+                return self._silent(ctx, now, emoji=emoji)
+            self._emit(ctx, Status.PLANNER_FAILED, _brief(errors[-1], 160))
+            return self._failed(emoji)
         self.policy.record(ctx, spoke=True, now=now)
         return Reply(texts=cleaned, emoji=emoji, at=at, ref=ref)
 
     async def _ask_tools(self, prompt: str, messages: list[dict], tools: list[dict],
-                         ctx: MessageContext) -> AssistantTurn | None:
-        """ 调一轮工具。超时或报错只当这次没结果，不能让一次 API 抽风拖死消息处理链。 """
+                         ctx: MessageContext, errors: list[str] | None = None) -> AssistantTurn | None:
+        """ 调一轮工具。超时或报错只当这次没结果，不能让一次 API 抽风拖死消息处理链。
+
+        errors 给了就把失败原因记进去（见 _reply_agent）。
+        """
         try:
             return await asyncio.wait_for(
                 self.planner_ai.chat_tools(prompt.strip(), messages, tools), self.timeout)
         except Exception as e:
-            logger.warning(f'决策工具调用失败（{ctx.contact}）: {e}')
+            why = reason_of(e)
+            logger.warning(f'决策工具调用失败（{ctx.contact}）：{why}')
+            if errors is not None:
+                errors.append(why)
             return None
 
     def _context_blocks(self, ctx: MessageContext, history: ChatWindow) -> dict[str, str]:
@@ -1040,17 +1070,19 @@ class ChatPlugin(Plugin):
         return [text for text in (clean_reply(x, names) for x in texts or ()) if text]
 
     async def _plan(self, ctx: MessageContext, necessity: NecessityScore, blocks: dict[str, str],
-                    transcript: str, images: list[tuple[str, bytes]]) -> Plan | None:
+                    transcript: str, images: list[tuple[str, bytes]],
+                    errors: list[str]) -> Plan | None:
         """ 单轮 JSON 决策。后端不支持工具时走这条。 """
         raw = await self._ask(await self._planner_prompt(ctx), self._compose(ctx, blocks, transcript),
-                              ctx, images, ai=self.planner_ai)
+                              ctx, images, ai=self.planner_ai, errors=errors)
         if not raw:
             return None
         # ai.chat 返回的是按行切好的列表，决策是一整块 JSON，拼回去再解析
         return Plan.parse('\n'.join(raw))
 
     async def _express(self, ctx: MessageContext, blocks: dict[str, str], transcript: str,
-                       images: list[tuple[str, bytes]], plan: str) -> list[str] | None:
+                       images: list[tuple[str, bytes]], plan: str,
+                       errors: list[str]) -> list[str] | None:
         """ 跑表达者。先把「本轮要回哪条」摆明，再给决策；没决策也不会跑偏到旧话题。 """
         persona = self.persona_for(ctx.contact)
         prompt = await self.replyer_template.render_async(
@@ -1059,17 +1091,24 @@ class ChatPlugin(Plugin):
             faces=FACE_CATALOG)
         message = self._compose(ctx, blocks, transcript, plan=plan,
                                 alternate=persona.maybe_alternate(self.rng))
-        return await self._ask(prompt, message, ctx, images)
+        return await self._ask(prompt, message, ctx, images, errors=errors)
 
     async def _ask(self, prompt: str, message: str, ctx: MessageContext,
-                   images: list[tuple[str, bytes]], ai: AiProvider | None = None) -> list[str] | None:
-        """ 调模型。超时或报错只当这次没结果——不能让一次 API 抽风拖死消息处理链。 """
+                   images: list[tuple[str, bytes]], ai: AiProvider | None = None,
+                   errors: list[str] | None = None) -> list[str] | None:
+        """ 调模型。超时或报错只当这次没结果——不能让一次 API 抽风拖死消息处理链。
+
+        errors 给了就往里记一条原因：面板上「表达失败」和「被限流」是两回事。
+        """
         provider = ai or self.ai
         try:
             return await asyncio.wait_for(
                 provider.chat(prompt.strip(), self._build_message(message, images)), self.timeout)
         except Exception as e:
-            logger.warning(f'调用模型失败（{ctx.contact}）: {e}')
+            why = reason_of(e)
+            logger.warning(f'调用模型失败（{ctx.contact}）：{why}')
+            if errors is not None:
+                errors.append(why)
             return None
 
     @staticmethod
@@ -1082,7 +1121,7 @@ class ChatPlugin(Plugin):
         try:
             return await asyncio.wait_for((ai or self.ai).chat(prompt.strip(), message), self.timeout)
         except Exception as e:
-            logger.warning(f'调用模型失败（重放）: {e}')
+            logger.warning(f'调用模型失败（重放）：{reason_of(e)}')
             return None
 
     async def replay(self, transcript: str, plan: str = '', self_name: str = '',
