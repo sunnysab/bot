@@ -827,9 +827,9 @@ class TestToolLoop(unittest.IsolatedAsyncioTestCase):
 
     async def test_loop_stops_at_max_rounds(self):
         endless = AssistantTurn(tool_calls=(_call('search_emoji', keyword='无语'),))
-        plugin = self.plugin([endless, endless, endless, endless], search={'无语': [_emoji()]})
+        plugin = self.plugin([endless] * 6, search={'无语': [_emoji()]})
         reply = await plugin.handle(proactive_ctx())
-        self.assertEqual(len(self.ai.rounds), 3)      # planner_rounds 默认 3
+        self.assertEqual(len(self.ai.rounds), 5)      # planner_rounds 默认 5
         self.assertTrue(reply.stop)
 
     async def test_send_tool_is_hidden_without_a_searcher(self):
@@ -1226,12 +1226,55 @@ class TestAgentMode(unittest.IsolatedAsyncioTestCase):
         # reply 终止本轮：不再多跑一轮去确认，一次调用就够
         self.assertEqual(len(self.ai.rounds), 1)
 
-    async def test_second_reply_in_one_turn_is_refused(self):
-        """ 一轮只说一条：同一轮里的第二个 reply 被拒，顺手治刷屏。 """
-        plugin = self.plugin([AssistantTurn(tool_calls=(
-            _call('reply', text='第一条'), _call('reply', text='第二条')))])
+    async def test_replies_over_the_cap_are_refused(self):
+        """ 上限是防刷屏的闸门：超出的那条被拒，剩下的下轮再说。 """
+        calls = tuple(_call('reply', text=f'第{i}条') for i in range(1, 4))
+        plugin = self.plugin([AssistantTurn(tool_calls=calls)], agent_max_replies=2)
         reply = await plugin.handle(proactive_ctx())
-        self.assertEqual(reply.texts, ['第一条'])
+        self.assertEqual(reply.texts, ['第1条', '第2条'])
+
+    async def test_plan_before_reply_puts_intent_and_style_next_to_the_line(self):
+        """ 先 plan 再 reply：意图和表达风格写进上下文，台词在**下一次**生成里写。
+
+        风格规则在 system prompt 最上面，离写台词隔了一百多行；plan 的回执把它再贴一遍，
+        模型写这一句的时候眼前就是它——这是 agent 模式比两段式生硬的主要修法。
+        """
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('plan', intent='顺着接一句吐槽',
+                                                              emotion='无奈'),)),
+                              AssistantTurn(tool_calls=(_call('reply', text='那就不干 躺着吧'),))])
+        reply = await plugin.handle(proactive_ctx())
+
+        self.assertEqual(reply.texts, ['那就不干 躺着吧'])
+        self.assertEqual(len(self.ai.rounds), 2)                # plan 一轮 + reply 一轮
+        carried = json.dumps(self.ai.rounds[1], ensure_ascii=False)
+        self.assertIn('想表达「顺着接一句吐槽」', carried)
+        self.assertIn('情绪「无奈」', carried)
+        self.assertIn('像微信打字', carried)                      # 人设里的表达风格也带上了
+        self.assertIn('现在把这一句写出来', carried)
+
+    async def test_reply_without_a_plan_still_goes_out(self):
+        """ 提示词要求先 plan，但不硬拦：没 plan 就是少一条留痕，不能因此不回。 """
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('reply', text='在'),))])
+        reply = await plugin.handle(proactive_ctx())
+        self.assertEqual(reply.texts, ['在'])
+
+    async def test_empty_intent_tells_it_to_say_what_it_means(self):
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('plan', intent=''),)),
+                              AssistantTurn(tool_calls=(_call('reply', text='在'),))])
+        reply = await plugin.handle(proactive_ctx())
+        self.assertEqual(reply.texts, ['在'])
+        self.assertIn('intent 是空的', json.dumps(self.ai.rounds[1], ensure_ascii=False))
+
+    async def test_plan_is_agent_only(self):
+        """ 两段式自己就有决策者，别再给它一个 plan。 """
+        agent = self.plugin([AssistantTurn()])
+        await agent.handle(proactive_ctx())
+        self.assertIn('plan', self.ai.tools_seen[0])
+
+        ai = ToolAi([])
+        two_stage = ChatPlugin(ai, context_length=10)
+        await two_stage.handle(proactive_ctx())
+        self.assertNotIn('plan', ai.tools_seen[0])
 
     async def test_sticker_reaches_the_model_in_a_hot_group(self):
         """ 表情消息不再被入口挡掉（历史里的 `[表情：…]` 自带语义）。 """

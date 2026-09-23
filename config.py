@@ -177,7 +177,7 @@ class Config:
     planner_temperature: float = 0.3
     planner_max_tokens: int = 1024   # 生成上限，不是上下文；thinking 模型会先吐 reasoning，给够即可
     enable_tools: bool = True        # 决策者是否用工具调用（搜表情等）；关掉退回单轮 JSON
-    planner_rounds: int = 3          # 决策循环最多几轮：搜一轮、发一轮就够
+    planner_rounds: int = 5          # 决策循环最多几轮：搜两次 + 先想一步 + 写台词就够
     # 开 thinking：判断质量更好，但慢很多（中位 3.2s、最坏 8s）
     planner_thinking: bool = True
     # 用 json_schema 强制输出合法 JSON。注意：开 schema 会压掉 thinking

@@ -90,6 +90,17 @@ SEND_EMOJI = ToolSpec(
     parameters={'type': 'object',
                 'properties': {'index': {'type': 'integer', 'description': '候选里的序号，从 1 开始'}},
                 'required': ['index']})
+# 先想一步再开口。这一轮的价值不在「多问了一次模型」，而在**意图和情绪先写进上下文**，
+# 并且把表达风格再贴到生成点前面——风格规则在 system prompt 最上面，离写台词隔了一百多行。
+PLAN = ToolSpec(
+    name='plan',
+    description='开口之前先把这一句想清楚：intent 是你想表达什么（一句话，不是台词），'
+                'emotion 是什么情绪。调完之后**立刻**用 reply 把台词写出来。'
+                '没打算说话就别调它。',
+    parameters={'type': 'object',
+                'properties': {'intent': {'type': 'string', 'description': '这一句想表达什么'},
+                               'emotion': {'type': 'string', 'description': '什么情绪，如 无奈/想笑/认真'}},
+                'required': ['intent']})
 SPEAK = ToolSpec(
     name='speak',
     description='让机器人用文字说一句。intent 是你想表达什么，不是台词本身——'
@@ -106,8 +117,9 @@ SPEAK = ToolSpec(
 REPLY = ToolSpec(
     name='reply',
     description='用机器人的身份在群里说一句。text 就是要发出去的原话本身（不是意图、不是转述），'
-                '写法像微信打字；能把意思揉进一条里就别拆，确实有两层意思时才在同一轮里再调一次，'
-                '最多两条，别把一句话拆成两条。调完本轮就结束，什么都不调就是这一轮不发言。'
+                '写法像微信打字；**开口前先调一次 plan**（见它的说明），再回来写台词。'
+                '能把意思揉进一条里就别拆；这一块里好几个人在找你时，一人一条、各填各自的 ref，'
+                '别把一句话拆成两条。调完本轮就结束，什么都不调就是这一轮不发言。'
                 'ref：这句在回哪一条——填聊天记录里那行的 #标签（如 #4k2p0z），'
                 '发出的消息会引用那一条；**答谁就引谁**，没在回具体某条就别填。'
                 'at：要 @ 的群友昵称，默认别填。',
@@ -576,7 +588,7 @@ class ChatPlugin(Plugin):
                  tracer: TraceLogger | None = None, enable_planner: bool = True,
                  planner_ai: AiProvider | None = None,
                  emoji_search: EmojiSearch | None = None, enable_tools: bool = True,
-                 planner_rounds: int = 3, emoji_policy: EmojiPolicy | None = None,
+                 planner_rounds: int = 5, emoji_policy: EmojiPolicy | None = None,
                  reply_mode: str = 'two_stage', revoke: Revoke | None = None,
                  timeout: float = 60.0, rng: random.Random | None = None,
                  agent_max_replies: int = 1, personas: PersonaStore | None = None,
@@ -930,9 +942,31 @@ class ChatPlugin(Plugin):
         return record.msg_id, (f'（这条会引用 {message_handle(record.msg_id)} —— '
                                f'{who}: {_brief(record.text, 40)}。）')
 
+    def _plan_tool(self, ctx: MessageContext):
+        """ `plan` 的执行器。它什么都不发，只把「想说什么」和表达风格写回上下文。
+
+        台词是**下一次**生成才写的，所以这条回执正好压在生成点前一条消息里：模型写这一句
+        的时候，眼前就是「想表达 X／情绪 Y」和风格要求。
+        """
+        async def make_plan(arguments: dict) -> ToolResult:
+            intent = arg_str(arguments, 'intent')
+            if not intent:
+                return ToolResult('intent 是空的：先说清楚这一句要表达什么。')
+            emotion = arg_str(arguments, 'emotion')
+            tone = f'／情绪「{emotion}」' if emotion else ''
+            persona = self.persona_for(ctx.contact)
+            return ToolResult(
+                f'记下了：想表达「{intent}」{tone}。现在把这一句写出来（reply）。\n'
+                f'风格：{persona.reply_style}\n'
+                '只写台词本身：不加前缀、引号、解释，不换行，句尾不加句号。')
+
+        return make_plan
+
     def _tools(self, state: dict, terminal: ToolSpec, handler, ctx: MessageContext) -> list:
-        """ 一轮的完整工具集：表情对 + 终点动作（speak / reply）+ 查历史 + 联网 +（可选）撤回。 """
+        """ 一轮的完整工具集：表情对 +（agent）先想一步 + 终点动作 + 查历史 + 联网 +（可选）撤回。 """
         tools = self._emoji_tools(state)
+        if terminal is REPLY:
+            tools.append((PLAN, self._plan_tool(ctx)))
         tools.append((terminal, handler))
         tools.extend(self._message_tools(ctx))
         tools.extend(self._web_tools())
