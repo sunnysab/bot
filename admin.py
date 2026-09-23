@@ -163,8 +163,11 @@ def _validate_prompt(text: str) -> None:
     最后表现成「机器人突然不说话」——查起来要翻半天。
     StrictUndefined：默认的 Undefined 会把拼错的变量名渲染成空串，验不出来。
     """
+    # 变量要和插件真正传进来的那份**对齐**：少了任何一个，面板上就存不下这个提示词
+    # （每次保存都报「模板有问题」，而线上渲染其实好好的）。faces / max_replies 就是这么漏的
     context = {'behavior_style': '', 'self_name': '', 'contact': '', 'is_group': True,
-               'aliases': (), 'tools': (), 'identity': '', 'reply_style': ''}
+               'aliases': (), 'tools': (), 'identity': '', 'reply_style': '',
+               'faces': '', 'max_replies': 2}
     try:
         Template(text, undefined=StrictUndefined).render(**context)
     except (TemplateSyntaxError, UndefinedError) as e:
@@ -1463,6 +1466,9 @@ def _self_check() -> None:
     assert not (HOT_FIELDS & RESTART_FIELDS), HOT_FIELDS & RESTART_FIELDS
     # 提示词校验：语法错 / 变量名拼错都要拦下来（不拦的话热重载后每轮都抛，
     # 而消息链把异常吞掉，表现成「机器人突然不说话」）
+    # 三个真模板都要拿假上下文渲一遍：漏一个变量就等于面板上存不下它
+    for _name, _path in PROMPTS.items():
+        _validate_prompt(_path.read_text(encoding='utf-8'))
     _validate_prompt('你好 {{ self_name }}，{{ behavior_style }}')
     for bad in ('{% if tools %}没有 endif', '{{ behaviour_style }}', '{% for x in %}'):
         try:
