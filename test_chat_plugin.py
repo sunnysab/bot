@@ -196,7 +196,7 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         history = sample_history()
         history.append('Bob', '[表情 #a1b2c3：猫咪瞪大双眼一脸震惊]', 2, msg_id=99)
         ctx = make_ctx(make_msg(content='震惊啥'), history)
-        note = self.plugin._resolve_ref({'ref': message_handle(99)}, {}, ctx)
+        _, note = self.plugin._resolve_ref({'ref': message_handle(99)}, ctx)
         self.assertIn('猫咪瞪大双眼', note)
         self.assertIn('Bob', note)
 
@@ -1012,21 +1012,21 @@ class TestRefTool(unittest.IsolatedAsyncioTestCase):
         handle = message_handle(self.SVRID)
         plugin = self.plugin([AssistantTurn(tool_calls=(_call('reply', text='这熊猫', ref=handle),))])
         reply = await plugin.handle(self.ctx())
-        self.assertEqual(reply.ref, self.SVRID)
+        self.assertEqual(reply.lines[0].ref, self.SVRID)
 
     async def test_ref_is_optional(self):
         plugin = self.plugin([AssistantTurn(tool_calls=(_call('reply', text='在'),))])
         reply = await plugin.handle(self.ctx())
-        self.assertEqual(reply.ref, 0)
+        self.assertEqual(reply.lines[0].ref, 0)
 
     async def test_unknown_handle_still_sends_the_text(self):
         """ 标签对不上就不引用，但话照发——引错了比不引更糟，不回更糟。 """
         plugin = self.plugin([AssistantTurn(tool_calls=(_call('reply', text='在', ref='#nope'),))])
         reply = await plugin.handle(self.ctx())
-        self.assertEqual(reply.ref, 0)
+        self.assertEqual(reply.lines[0].ref, 0)
         self.assertEqual(reply.texts, ['在'])
         # 回执说清楚为什么没引，模型下轮能看到
-        note = ChatPlugin._resolve_ref({'ref': '#nope'}, {'ref': 0}, self.ctx())
+        _, note = ChatPlugin._resolve_ref({'ref': '#nope'}, self.ctx())
         self.assertIn('没有「#nope」', note)
 
     async def test_two_stage_speak_carries_the_ref(self):
@@ -1034,7 +1034,7 @@ class TestRefTool(unittest.IsolatedAsyncioTestCase):
         ai = ToolAi([AssistantTurn(tool_calls=(_call('speak', intent='附和', ref=handle),))])
         plugin = ChatPlugin(ai, context_length=10)
         reply = await plugin.handle(self.ctx())
-        self.assertEqual(reply.ref, self.SVRID)
+        self.assertEqual(reply.lines[0].ref, self.SVRID)
 
 
 class TestAtTool(unittest.IsolatedAsyncioTestCase):
@@ -1058,20 +1058,20 @@ class TestAtTool(unittest.IsolatedAsyncioTestCase):
         plugin = self.plugin([AssistantTurn(tool_calls=(_call('reply', text='你问他去', at='张三'),))])
         reply = await plugin.handle(proactive_ctx())
         self.assertEqual(self.looked, [('456@chatroom', '张三')])
-        self.assertEqual(reply.at, 'wxid_zhang')
+        self.assertEqual(reply.lines[0].at, 'wxid_zhang')
         self.assertEqual(reply.texts, ['你问他去'])
 
     async def test_at_is_optional(self):
         plugin = self.plugin([AssistantTurn(tool_calls=(_call('reply', text='在'),))])
         reply = await plugin.handle(proactive_ctx())
         self.assertEqual(self.looked, [])
-        self.assertEqual(reply.at, '')
+        self.assertEqual(reply.lines[0].at, '')
 
     async def test_unknown_name_still_sends_the_text(self):
         """ @ 不到人不是不发这条消息的理由。 """
         plugin = self.plugin([AssistantTurn(tool_calls=(_call('reply', text='在', at='查无此人'),))])
         reply = await plugin.handle(proactive_ctx())
-        self.assertEqual(reply.at, '')
+        self.assertEqual(reply.lines[0].at, '')
         self.assertEqual(reply.texts, ['在'])
 
     async def test_private_chat_cannot_at(self):
@@ -1080,33 +1080,44 @@ class TestAtTool(unittest.IsolatedAsyncioTestCase):
         ctx.msg.is_chatroom = False
         reply = await plugin.handle(ctx)
         self.assertEqual(self.looked, [])
-        self.assertEqual(reply.at, '')
+        self.assertEqual(reply.lines[0].at, '')
 
-    async def test_only_the_first_at_of_a_turn_counts(self):
-        calls = (_call('reply', text='在', at='张三'), _call('reply', text='再来一句', at='李四'))
-        plugin = self.plugin([AssistantTurn(tool_calls=calls)], agent_max_replies=2)
+    async def test_each_reply_carries_its_own_at(self):
+        """ 一轮里回两个人：两条各 @ 各的。
+
+        以前 at 是「一轮一份」，第二条会把第一条的目标盖掉——两条都 @ 最后那个人。
+        """
+        members = {'张三': 'wxid_zhang', '李四': 'wxid_li'}
+
+        async def lookup(chat, name):
+            self.looked.append((chat, name))
+            return members.get(name, '')
+
+        calls = (_call('reply', text='在', at='张三'), _call('reply', text='来了', at='李四'))
+        self.ai = ToolAi([AssistantTurn(tool_calls=calls)])
+        plugin = ChatPlugin(self.ai, context_length=10, member_lookup=lookup,
+                            reply_mode='agent', agent_max_replies=2)
         reply = await plugin.handle(proactive_ctx())
-        self.assertEqual(reply.at, 'wxid_zhang')
-        # 同一个名字不用查两遍，也不能把 @ 换到别人身上
-        self.assertEqual(self.looked, [('456@chatroom', '张三')])
+        self.assertEqual([line.at for line in reply.lines], ['wxid_zhang', 'wxid_li'])
+        self.assertEqual(reply.texts, ['在', '来了'])
 
     async def test_notes_tell_the_model_what_happened(self):
         """ 工具回执要说清楚 @ 成没成——模型看不到自己在群里发出去的样子。 """
         plugin = self.plugin([])
         ctx = proactive_ctx()
-        state: dict = {'at': ''}
-        self.assertIn('这条会 @张三', await plugin._resolve_at({'at': '张三'}, state, ctx))
-        self.assertEqual(state['at'], 'wxid_zhang')
-        self.assertIn('已经 @ 过别人', await plugin._resolve_at({'at': '李四'}, state, ctx))
-        self.assertIn('没找到叫', await plugin._resolve_at({'at': '查无此人'}, {'at': ''}, ctx))
-        self.assertEqual(await plugin._resolve_at({}, {'at': ''}, ctx), '')
+        wxid, note = await plugin._resolve_at({'at': '张三'}, ctx)
+        self.assertEqual(wxid, 'wxid_zhang')
+        self.assertIn('这条会 @张三', note)
+        _, missing = await plugin._resolve_at({'at': '查无此人'}, ctx)
+        self.assertIn('没找到叫', missing)
+        self.assertEqual(await plugin._resolve_at({}, ctx), ('', ''))
 
     async def test_two_stage_speak_carries_the_at_too(self):
         """ 两段式也不能是个只会写提示词的空壳。 """
         ai = ToolAi([AssistantTurn(tool_calls=(_call('speak', intent='问他', at='张三'),))])
         plugin = ChatPlugin(ai, context_length=10, member_lookup=self.lookup)
         reply = await plugin.handle(proactive_ctx())
-        self.assertEqual(reply.at, 'wxid_zhang')
+        self.assertEqual(reply.lines[0].at, 'wxid_zhang')
         self.assertEqual(reply.texts, ['收到'])
 
 

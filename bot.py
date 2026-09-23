@@ -21,7 +21,7 @@ from events import Status, bus
 from media import is_placeholder, render
 from moments import MomentKeeper
 from outbound import Outbound, OutboundQueue
-from plugin import EndProcessing, Plugin, PluginManager, Reply
+from plugin import EndProcessing, Outgoing, Plugin, PluginManager, Reply
 from typos import apply_typos
 from wechat import Message, Wechat
 
@@ -537,21 +537,16 @@ class Bot:
         ctx = MessageContext(msg=msg, history=history or self._history.get_context(msg.reply_target),
                              self_name=self_name, contact=source, forced=forced,
                              fresh=fresh or (msg,))
-        texts: list[str] = []
+        lines: list[Outgoing] = []
         emoji = None
-        verbatim = False
-        at = ''
-        ref = 0
         for plugin in self._plugins.get_plugins_for_contact(source):
             reply = await plugin.handle(ctx) or Reply()
-            texts.extend(reply.texts)
+            # 各条自带 @ / 引用目标，拼起来就行（以前是 at/ref 各挑一个，一轮只能一个目标）
+            lines.extend(reply.lines)
             emoji = emoji or reply.emoji
-            verbatim = verbatim or reply.verbatim
-            at = at or reply.at
-            ref = ref or reply.ref
             if reply.stop:
                 break
-        return Reply(texts=texts, emoji=emoji, verbatim=verbatim, at=at, ref=ref)
+        return Reply(lines=lines, emoji=emoji)
 
     def _schedule_turn(self, msg: Message, self_name: str, source: str) -> None:
         """ 把这条消息排进它所在会话的「当前这一块」，交由后台任务回复。
@@ -645,7 +640,7 @@ class Bot:
         """
         response = await self._run_plugins(msg, self_name, source, history=history, forced=forced,
                                            fresh=fresh)
-        if not response.texts and not response.emoji:
+        if not response.lines and not response.emoji:
             logger.debug('no response to send.')
             # 插件链什么都没说，而且这一轮也没留下别的埋点（语音消息、或该会话静音），
             # 补一条，否则面板上这条消息会永远停在「已接收 / 手动触发」
@@ -660,29 +655,29 @@ class Bot:
             return  # 没有回复内容
 
         # 交给全局发送队列统一限流和拟人延迟，避免阻塞消息接收循环
-        texts = [text for text in response.texts if not is_placeholder(text)]
-        if len(texts) != len(response.texts):
-            logger.warning(f'拦下 {len(response.texts) - len(texts)} 条媒体占位符，不往群里发：{response.texts}')
+        lines = [line for line in response.lines if not is_placeholder(line.text)]
+        if len(lines) != len(response.lines):
+            logger.warning(f'拦下 {len(response.lines) - len(lines)} 条媒体占位符，不往群里发：'
+                           f'{response.texts}')
             bus.publish(Status.PLACEHOLDER_BLOCKED, chat_id=msg.reply_target, chat_name=source,
                         msg_id=msg.msg_id,
-                        detail=f'拦下 {len(response.texts) - len(texts)} 条媒体占位符')
+                        detail=f'拦下 {len(response.lines) - len(lines)} 条媒体占位符')
         # 引用哪条听模型的：reply / speak 的 ref 已经在插件里解成了 svrId；
         # 没选就不引——它不一定是在回谁。复读机是跟队形，系统通知（拍一拍）
         # 引用框会贴出「拍了拍 你」，两者都按「不该引」处理
         notice = is_system_notice(msg)
         if notice:
             logger.info(f'系统通知不引用（msg_id={msg.msg_id}）: {msg.sender_name}: {msg.content[:30]}')
-        # 手动触发一定引用「这条」——人点的就是「回它」；开关和模型的挑法都是自动回复的事
-        ref = msg.msg_id if forced else (response.ref if self.quote_replies else 0)
-        ref_svrid = 0 if (response.verbatim or notice) else ref
-        for text in texts:
-            self.enqueue(msg.reply_target, text, sender=self_name,
-                         reply_to=msg.msg_id, chat_name=source, verbatim=response.verbatim,
-                         ref_svrid=ref_svrid, at_list=response.at)
+        for line in lines:
+            # 手动触发一定引用「这条」——人点的就是「回它」；开关和模型的挑法都是自动回复的事
+            ref = msg.msg_id if forced else (line.ref if self.quote_replies else 0)
+            self.enqueue(msg.reply_target, line.text, sender=self_name,
+                         reply_to=msg.msg_id, chat_name=source, verbatim=line.verbatim,
+                         ref_svrid=0 if (line.verbatim or notice) else ref, at_list=line.at)
         if response.emoji:
             self.enqueue(msg.reply_target, sender=self_name, reply_to=msg.msg_id,
                          chat_name=source, emoji=response.emoji)
-        logger.debug(f'{len(texts)} responses queued.')
+        logger.debug(f'{len(lines)} responses queued.')
 
     async def force_reply(self, chat: str, msg_id: int) -> None:
         """ 管理后台「手动回复这条」：让 bot 站在**那条消息当时**的聊天记录视角回它一句。

@@ -13,7 +13,7 @@ from bot import EMOJI_LOCAL_ENOUGH, Bot
 from context import ChatWindow, message_handle
 from emojis import Emoji, EmojiLibrary
 from media import Media, render
-from plugin import EndProcessing, Plugin, RepeatPlugin, Reply
+from plugin import EndProcessing, Outgoing, Plugin, RepeatPlugin, Reply
 from wechat import Wechat
 
 # daemon 回的 server_id：真实量级是 19 位，故意用超过 JS 安全整数 2^53 的值
@@ -156,8 +156,8 @@ class FakePlugin(Plugin):
         self.ref = ref
 
     async def handle(self, ctx):
-        return Reply(texts=list(self.texts), stop=self._stop, emoji=self.emoji, at=self.at,
-                     ref=self.ref)
+        return Reply(lines=[Outgoing(text=text, at=self.at, ref=self.ref) for text in self.texts],
+                     stop=self._stop, emoji=self.emoji)
 
 
 def make_msg(text='hello', is_self=False, msg_type=1, create_time=None, ref_svrid=0, msg_id=None):
@@ -197,7 +197,7 @@ class CapturePlugin(Plugin):
 
     async def handle(self, ctx):
         self.ctx = ctx
-        return Reply(texts=self.texts)
+        return Reply(lines=[Outgoing(text=text) for text in self.texts])
 
 
 class TestForceReply(unittest.IsolatedAsyncioTestCase):
@@ -618,7 +618,7 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         class Inspector(Plugin):
             async def handle(self, ctx):
                 seen.extend(r.text for r in ctx.history)
-                return Reply(texts=['在 咋了'], stop=True)
+                return Reply(lines=[Outgoing('在 咋了')], stop=True)
 
         self.bot.outbox._typing_delay = lambda text: 0.2
         self.bot.set_default_plugin(FakePlugin(texts=['在的 咋啦']))
@@ -642,7 +642,7 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
                 calls.append(ctx.msg.content)
                 if len(calls) == 1:
                     await release.wait()        # 卡住第一轮，让后面的消息攒起来
-                return Reply(texts=[f'回 {ctx.msg.content}'], stop=True)
+                return Reply(lines=[Outgoing(f'回 {ctx.msg.content}')], stop=True)
 
         def quiet(text):
             msg = make_msg(text=text)
@@ -673,7 +673,7 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
                 calls.append(ctx.msg.content)
                 if len(calls) == 1:
                     await release.wait()
-                return Reply(texts=['ok'], stop=True)
+                return Reply(lines=[Outgoing('ok')], stop=True)
 
         def msg(text, at):
             item = make_msg(text=text)

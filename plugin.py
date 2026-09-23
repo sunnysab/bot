@@ -159,19 +159,36 @@ WEB_SEARCH_PER_TURN = 2  # 一轮最多搜几次：搜出来的一样就白花�
 
 
 @dataclass(slots=True)
+@dataclass(frozen=True)
+class Outgoing:
+    """ 一条要发出去的消息：正文 + **它自己的**引用 / @ 目标。
+
+    目标属于每一条消息，不属于这一轮。以前 at / ref 挂在 Reply 上（一轮一份），
+    同一轮里回两个人时两条会 @ 同一个人、引用同一条消息——静默错，群里还看不出来。
+    """
+
+    text: str = ''
+    at: str = ''                    # 要 @ 的群成员 wxid；名字由 Bot 解析后带回
+    ref: int = 0                    # 要引用（微信「回复某条」）的消息 svrid；0 = 不引用
+    verbatim: bool = False          # 一字不改发出去（复读机：抖错别字就不叫复读了）
+
+
+@dataclass
 class Reply:
     """ 插件对一条消息的决策。
 
-    :param texts: 要发送的文本，可以为空
+    :param lines: 要发送的消息，可以为空
     :param stop: 是否终止后续插件的处理
     """
 
-    texts: list[str] = field(default_factory=list)
+    lines: list[Outgoing] = field(default_factory=list)
     stop: bool = False
     emoji: Emoji | None = None      # 本轮要发的表情；发送由 Bot 统一走队列，插件不发
-    at: str = ''                    # 要 @ 的群成员 wxid；由 Bot 解析名字后带回
-    ref: int = 0                    # 要引用（微信「回复某条」）的消息 svrid；0 = 不引用
-    verbatim: bool = False          # 一字不改发出去（复读机：抖错别字就不叫复读了）
+
+    @property
+    def texts(self) -> list[str]:
+        """ 只要正文的视图（断言、复读机比对用；真正的数据是 `lines`）。 """
+        return [line.text for line in self.lines]
 
 
 # 模型爱顺手包上的东西：只剥真正在「包裹」的引号，括号不动
@@ -364,7 +381,7 @@ class RepeatPlugin(Plugin):
         if len(text) > self.max_length:
             return None
 
-        return Reply(texts=[text], stop=True, verbatim=True)
+        return Reply(lines=[Outgoing(text=text, verbatim=True)], stop=True)
 
 
 @dataclass(frozen=True)
@@ -716,7 +733,8 @@ class ChatPlugin(Plugin):
             self._emit(ctx, Status.EMPTY_REPLY)
             return self._silent(ctx, now, emoji=emoji)
         self.policy.record(ctx, spoke=True, now=now)
-        return Reply(texts=texts, emoji=emoji, at=at, ref=ref)
+        # 两段式里表达者只输出纯文本，给不出逐条目标：这一轮选的 ref / @ 由几条共同带着
+        return Reply(lines=[Outgoing(text=text, at=at, ref=ref) for text in texts], emoji=emoji)
 
     def _emit(self, ctx: MessageContext, status: str, detail: str = '', **fields) -> None:
         """ 把这一轮的状态发给管理后台。失败也不影响聊天（bus 自己吞异常）。
@@ -862,29 +880,25 @@ class ChatPlugin(Plugin):
 
         return [(WEB_SEARCH, search)]
 
-    async def _resolve_at(self, arguments: dict, state: dict, ctx: MessageContext) -> str:
-        """ 解析 @ 目标，把 wxid 存进 state（本轮结束时由 Reply 带出去给 Bot 发）。
+    async def _resolve_at(self, arguments: dict, ctx: MessageContext) -> tuple[str, str]:
+        """ 解析 @ 目标 → `(wxid, 给模型看的回执)`；没提 @ 就是两个空串。
 
-        返回一句给模型看的回执；没提 @ 就返回空串。名字对不上人时不拦回复——
-        @ 不到人不是不发这条消息的理由。
+        名字对不上人时不拦回复——@ 不到人不是不发这条消息的理由。
         """
         name = arg_str(arguments, 'at')
         if not name:
-            return ''
+            return '', ''
         if not ctx.msg.is_chatroom:
-            return '（这是私聊，@ 不了人。）'
+            return '', '（这是私聊，@ 不了人。）'
         if self.member_lookup is None:
-            return '（这会儿 @ 不了人。）'
-        if state.get('at'):
-            return f'（这一轮已经 @ 过别人了，「{name}」没算。）'
+            return '', '（这会儿 @ 不了人。）'
         wxid = await self.member_lookup(ctx.msg.reply_target, name)
         if not wxid:
-            return f'（群里没找到叫「{name}」的人，这条没 @ 成。）'
-        state['at'] = wxid
-        return f'（这条会 @{name}。）'
+            return '', f'（群里没找到叫「{name}」的人，这条没 @ 成。）'
+        return wxid, f'（这条会 @{name}。）'
 
     @staticmethod
-    def _resolve_ref(arguments: dict, state: dict, ctx: MessageContext) -> str:
+    def _resolve_ref(arguments: dict, ctx: MessageContext) -> tuple[int, str]:
         """ 解析引用目标：聊天记录里的 #标签 → 那条消息的 svrid，存进 state。
 
         返回一句给模型看的回执；没给 ref 就返回空串。标签对不上（写错 / 已被刷出
@@ -895,13 +909,13 @@ class ChatPlugin(Plugin):
         """
         ref = arg_str(arguments, 'ref')
         if not ref:
-            return ''
+            return 0, ''
         record = ctx.history.find_by_handle(ref)
         if record is None:
-            return f'（聊天记录里没有「{ref}」这条，这条就不引用了。）'
-        state['ref'] = record.msg_id
+            return 0, f'（聊天记录里没有「{ref}」这条，这条就不引用了。）'
         who = '我' if record.is_self else record.sender
-        return f'（这条会引用 {message_handle(record.msg_id)} —— {who}: {_brief(record.text, 40)}。）'
+        return record.msg_id, (f'（这条会引用 {message_handle(record.msg_id)} —— '
+                               f'{who}: {_brief(record.text, 40)}。）')
 
     def _tools(self, state: dict, terminal: ToolSpec, handler, ctx: MessageContext) -> list:
         """ 一轮的完整工具集：表情对 + 终点动作（speak / reply）+ 查历史 + 联网 +（可选）撤回。 """
@@ -928,9 +942,9 @@ class ChatPlugin(Plugin):
         async def speak(arguments: dict) -> ToolResult:
             said['intent'] = arg_str(arguments, 'intent')
             said['emotion'] = arg_str(arguments, 'emotion')
-            note = (await self._resolve_at(arguments, state, ctx)
-                    + self._resolve_ref(arguments, state, ctx))
-            return ToolResult(f'好，交给表达者。{note}', stop=True)
+            state['at'], at_note = await self._resolve_at(arguments, ctx)
+            state['ref'], ref_note = self._resolve_ref(arguments, ctx)
+            return ToolResult(f'好，交给表达者。{at_note}{ref_note}', stop=True)
 
         toolbox = Toolbox(self._tools(state, SPEAK, speak, ctx))
         prompt = await self._planner_prompt(ctx, toolbox.names)
@@ -963,8 +977,7 @@ class ChatPlugin(Plugin):
 
     async def _reply_agent(self, ctx: MessageContext, blocks: dict[str, str], transcript: str,
                            images: list[tuple[str, bytes]], must_speak: bool,
-                           errors: list[str]) \
-            -> tuple[list[str], Emoji | None, str, int, str]:
+                           errors: list[str]) -> tuple[list[Outgoing], Emoji | None, str]:
         """ 单段式：模型自己判断、自己写台词，回话就是一次 `reply` 调用。
 
         与 _plan_with_tools 只差终点动作：那边调 speak（只说意图），这边调 reply（原话）。
@@ -973,21 +986,22 @@ class ChatPlugin(Plugin):
         errors 是出参：模型压根没调通时往里记一条原因。调用方靠它把「模型说不发言」
         和「接口报错」分开——两者都是空回复，但面板上不能显示成同一件事。
         """
-        state: dict = {'candidates': [], 'picked': [], 'at': '', 'ref': 0, 'pat': ''}
-        replies: list[str] = []
+        state: dict = {'candidates': [], 'picked': [], 'pat': ''}
+        lines: list[Outgoing] = []
 
         async def reply(arguments: dict) -> ToolResult:
             text = arg_str(arguments, 'text')
             if not text:
                 return ToolResult('text 是空的，没发出去。')
-            if len(replies) >= self.agent_max_replies:
+            if len(lines) >= self.agent_max_replies:
                 return ToolResult('这一轮说得够多了，剩下的下轮再说。')
-            replies.append(text)
-            note = (await self._resolve_at(arguments, state, ctx)
-                    + self._resolve_ref(arguments, state, ctx))
+            # 引用 / @ 按条解析：回两个人的两条各引各的、各 @ 各的
+            at, at_note = await self._resolve_at(arguments, ctx)
+            ref, ref_note = self._resolve_ref(arguments, ctx)
+            lines.append(Outgoing(text=text, at=at, ref=ref))
             # stop=True：调完本轮就收，别再多跑一轮去确认。同一轮里的多个 reply
-            # 照样全部执行（Toolbox.call 是先把这轮的调用跑完再 break），所以多行不受影响
-            return ToolResult(f'好，这条算说完了（第 {len(replies)} 条）。{note}', stop=True)
+            # 照样全部执行（Toolbox.call 是先把这轮的调用跑完再 break），所以多条不受影响
+            return ToolResult(f'好，这条算说完了（第 {len(lines)} 条）。{at_note}{ref_note}', stop=True)
 
         toolbox = Toolbox(self._tools(state, REPLY, reply, ctx))
         prompt = await self._agent_prompt(ctx, toolbox.names)
@@ -1001,7 +1015,7 @@ class ChatPlugin(Plugin):
             if not turn.tool_calls:
                 # 点了名却什么都没做：只补一轮提醒，之后不再纠缠
                 # 拍了别人也算回应过——别把「拍回去」当成什么都没做
-                if must_speak and not replies and not state.get('pat') and not forced:
+                if must_speak and not lines and not state.get('pat') and not forced:
                     forced = True
                     messages.append({'role': 'user',
                                      'content': '【必须回应】你还没给回应。至少调一次 reply，'
@@ -1016,8 +1030,7 @@ class ChatPlugin(Plugin):
                 messages.append(tool_message(call, result.content))
             if stopped:
                 break
-        return (replies, (state['picked'][0] if state['picked'] else None),
-                state['at'], state['ref'], toolbox.render_calls())
+        return lines, (state['picked'][0] if state['picked'] else None), toolbox.render_calls()
 
     async def _agent_round(self, ctx: MessageContext, blocks: dict[str, str], transcript: str,
                            images: list[tuple[str, bytes]], must_speak: bool,
@@ -1026,10 +1039,11 @@ class ChatPlugin(Plugin):
         self._emit(ctx, Status.DECIDING, f'{necessity.kind} · agent')
         started = time.perf_counter()
         errors: list[str] = []
-        texts, emoji, at, ref, tool_log = await self._reply_agent(
+        lines, emoji, tool_log = await self._reply_agent(
             ctx, blocks, transcript, images, must_speak, errors)
-        self._trace(ctx, necessity, transcript, texts or None, self._elapsed(started), tool_log)
-        cleaned = self._clean(texts, ctx)
+        self._trace(ctx, necessity, transcript, [line.text for line in lines] or None,
+                    self._elapsed(started), tool_log)
+        cleaned = self._clean_lines(lines, ctx)
         if not cleaned:
             # 本轮空回复有两种来源：模型真的决定不开口，或者接口压根没调通。
             # 后者以前一律写成「选择不发言」，429 / 超时在面板上看着像模型的意思
@@ -1039,7 +1053,7 @@ class ChatPlugin(Plugin):
             self._emit(ctx, Status.PLANNER_FAILED, _brief(errors[-1], 160))
             return self._failed(emoji)
         self.policy.record(ctx, spoke=True, now=now)
-        return Reply(texts=cleaned, emoji=emoji, at=at, ref=ref)
+        return Reply(lines=cleaned, emoji=emoji)
 
     async def _ask_tools(self, prompt: str, messages: list[dict], tools: list[dict],
                          ctx: MessageContext, errors: list[str] | None = None) -> AssistantTurn | None:
@@ -1113,6 +1127,16 @@ class ChatPlugin(Plugin):
         """ 模型常顺手带上「昵称：」前缀或引号包裹，不能直接漏到群里。 """
         names = (ctx.self_name, *self.persona_for(ctx.contact).aliases)
         return [text for text in (clean_reply(x, names) for x in texts or ()) if text]
+
+    def _clean_lines(self, lines: list[Outgoing], ctx: MessageContext) -> list[Outgoing]:
+        """ 同 `_clean`，但**逐条保留各自的 @ / 引用目标**。 """
+        names = (ctx.self_name, *self.persona_for(ctx.contact).aliases)
+        cleaned = []
+        for line in lines:
+            text = clean_reply(line.text, names)
+            if text:
+                cleaned.append(replace(line, text=text))
+        return cleaned
 
     async def _plan(self, ctx: MessageContext, necessity: NecessityScore, blocks: dict[str, str],
                     transcript: str, images: list[tuple[str, bytes]],
