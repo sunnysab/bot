@@ -327,6 +327,24 @@ class TestWechatFacade(unittest.IsolatedAsyncioTestCase):
         self.wechat._bot.get_all_contacts = boom
         await self.wechat._refresh_contacts(self.wechat._bot)
         self.assertEqual(self.wechat.all_contacts, {})
+        # 失败了不锁窗口：下一次事件（扫码登录后）要能真的重试
+        self.assertEqual(self.wechat._contacts_at, 0.0)
+
+    async def test_contacts_are_fetched_once_per_connection_event_pair(self):
+        """ on_ready 与 login_status 启动时几乎同时到，只能拉一次联系人。 """
+        calls = []
+        original = self.wechat._bot.get_all_contacts
+
+        async def counted(**kwargs):
+            calls.append(kwargs)
+            return await original(**kwargs)
+
+        self.wechat._bot.get_all_contacts = counted
+        await self.wechat._refresh_contacts(self.wechat._bot)
+        await self.wechat._refresh_contacts(self.wechat._bot)      # 1ms 后同一个事件对
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.wechat.all_contacts, {'wxid_alice': 'Alice'})
 
     async def test_message_pagination_cursors_are_passed_through(self):
         """ 面板翻页要用 daemon 的 messages.id 游标，不能拿 64 位 msg_id 比大小。 """

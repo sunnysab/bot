@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from pathlib import Path
@@ -17,6 +18,10 @@ from media import parse_reference_media, render
 MEDIA_MEMO_BYTES = 8 * 1024 * 1024
 MEDIA_MEMO_ITEMS = 16
 
+# 拉联系人的去重窗口（秒）。daemon 已经登录时，`on_ready` 和 `login_status` 两个事件
+# 几乎同时到达，拉两遍只是白花一次 RPC（日志里就是两条一模一样的 Hello）
+CONTACTS_DEDUPE_SECONDS = 5.0
+
 
 class Wechat:
     """ 微信机器人组件（weixin-rs daemon 适配层） """
@@ -30,6 +35,7 @@ class Wechat:
         self.dry_run = dry_run
         # 联系人字典，键值对格式: {'wxid': '显示名'}
         self.all_contacts: dict[str, str] = {}
+        self._contacts_at = 0.0        # 上次真拉到联系人的时刻，用来去重（见 CONTACTS_DEDUPE_SECONDS）
         # 按需查到的名字（群名、群里的人）；只记成功的结果，查不到就下次再查
         self._names: dict[str, str] = {}
         # 取过的附件（msg_id -> 字节/扩展名）+ 还在路上的合并请求，见 media_bytes_by_id
@@ -92,10 +98,17 @@ class Wechat:
 
         **未登录时 daemon 会拒（401 session expired）**——这在启动时是常态，不是故障，
         扫码之后 `login_status` 会再走一次这里。
+
+        两个事件在「启动时已登录」这条路径上相隔一两毫秒到达（on_ready 先到），所以有个
+        很短的窗口去重：只花一次 RPC，日志里也只留一行 Hello。失败不锁窗口，下次事件立刻重试。
         """
+        if time.monotonic() - self._contacts_at < CONTACTS_DEDUPE_SECONDS:
+            return
+        self._contacts_at = time.monotonic()
         try:
             contacts = await self._bot.get_all_contacts(force_refresh=True)
         except WeChatBotError as e:
+            self._contacts_at = 0.0
             logger.warning(f'daemon 尚未登录，先不拉联系人（{e}）')
             return
         self.all_contacts = {c.username: c.name for c in contacts}
