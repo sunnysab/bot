@@ -41,6 +41,7 @@ class FakeWechat:
         self.transcript = None                          # 非 None = 转写成功，返回这段文本
         self.pats: list[tuple[str, str]] = []           # (会话, 被拍者 wxid)
         self.daemon_messages: list = []                 # 「手动回复这条」现取上下文时的 daemon 库
+        self.history_queries: list[tuple[str, int]] = []  # 补历史时问了哪些会话
 
     async def send_pat(self, to, target=None):
         self.pats.append((to, target or to))
@@ -136,6 +137,14 @@ class FakeWechat:
 
     async def window_from(self, messages, names=None):
         return await Wechat.window_from(self, messages, names)
+
+    async def fetch_history(self, chat, count=50, query=''):
+        """ 补历史用。拿 daemon_messages 当库，和真 daemon 一样最多给 count 条。 """
+        self.history_queries.append((chat, count))
+        window = ChatWindow()
+        for msg in self.daemon_messages[-count:]:
+            window.append(msg.sender_name, msg.content, msg.create_time, msg_id=msg.msg_id)
+        return window
 
 
 class FakePlugin(Plugin):
@@ -304,6 +313,27 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
         await self.bot.load_context()
         self.assertEqual(calls, ['456@chatroom'])
         self.assertEqual(len(self._window()), 1)
+
+    async def test_dormant_chat_gets_its_history_backfilled(self):
+        """ 启动时不在 daemon 会话列表里的会话（久没说话），开口时才补历史。
+
+        load_context 只盖得到 daemon 列的最近几个会话，剩下的窗口是空的——模型只
+        看得见本轮那一两条，以为话题凭空起头。
+        """
+        self.bot._wechat.daemon_messages = [make_msg(text='周末去爬山不', msg_id=11),
+                                           make_msg(text='好啊', msg_id=12)]
+        plugin = CapturePlugin()
+        self.bot.set_default_plugin(plugin)
+
+        await self.bot.on_message(make_msg(text='那就定周六'))
+        await asyncio.sleep(0.05)
+        self.assertIn('周末去爬山不', str(plugin.ctx.history))
+        self.assertEqual(self.bot._wechat.history_queries, [('456@chatroom', 30)])
+
+        # 一个会话只补一次：下一条消息不该再问 daemon 要一遍
+        await self.bot.on_message(make_msg(text='人呢'))
+        await asyncio.sleep(0.05)
+        self.assertEqual(len(self.bot._wechat.history_queries), 1)
 
     async def test_turn_waits_for_image_before_replying(self):
         """ describe_wait 开了之后：进插件链之前先等识图，不等模型对着 [图片] 瞎评。 """

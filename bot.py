@@ -103,6 +103,9 @@ class Bot:
         # 启动历史只加载一次：on_ready 和 login_status 各会触发一次，重复加载会让
         # 同一批消息在窗口里出现两遍，复读机会把每条都当成队形
         self._history_loaded = False
+        # 已经补过历史的会话。启动那一轮只盖得到 daemon 会话列表里的最近几个，
+        # 剩下的等它们开口时再补（见 _load_chat_history）
+        self._history_chats: set[str] = set()
         # 光有这个标志挡不住并发：on_ready 与 login_status 是几乎同时触发的两个回调，
         # 都先过了检查再各自 await，同一批历史就被 extend 两遍。整段载入放锁里
         self._history_lock = asyncio.Lock()
@@ -338,9 +341,27 @@ class Bot:
                 count_loaded += len(window)
                 self._history.get_context(contact).extend(window)
                 self._schedule_history_media(window)
+                self._history_chats.add(contact)
 
             self._history_loaded = True
             logger.info(f'{len(sessions)} sessions, {count_loaded} messages loaded.')
+
+    async def _load_chat_history(self, chat: str) -> None:
+        """ 第一次见到某个会话就补一次历史。
+
+        启动时只加载 daemon 会话列表里的最近几个（load_context）。久没说话的会话不在
+        那份名单里，窗口就是空的——模型只看得见本轮那一两条，以为话题凭空起头。
+        """
+        if not chat or chat in self._history_chats:
+            return
+        self._history_chats.add(chat)      # 先记上：拉失败也不要每轮都重拉一次
+        try:
+            window = await self._wechat.fetch_history(chat, self._visible_history or 30)
+        except Exception as e:  # noqa: BLE001 —— 少一段历史不该打断消息处理链
+            logger.warning(f'补历史失败（{chat}）: {e}')
+            return
+        self._history.get_context(chat).extend(window)
+        self._schedule_history_media(window)
 
     def _schedule_history_media(self, window: ChatWindow) -> None:
         """ 启动加载的历史媒体**全部**补描述，从新到旧。
@@ -747,6 +768,7 @@ class Bot:
         # daemon 有时把群成员的显示名解析成了 wxid，那样历史里全是 wxid，得自己补一次
         if msg.is_chatroom and msg.sender_name == msg.sender:
             msg.sender_display_name = await self._wechat.get_display_name(msg.sender, msg.reply_target)
+        await self._load_chat_history(msg.reply_target)
         logger.debug(msg)
 
         # 非文本消息的正文换成可读标记：图片/表情/位置/视频/语音/链接/文件/引用。
