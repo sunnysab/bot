@@ -1,21 +1,19 @@
 """ 入口：读配置、起 Runtime、起管理后台、开收消息。 """
 import asyncio
 
-from dotenv import load_dotenv
 from loguru import logger
 
 from admin import Admin
-from config import DOTENV_PATH, Config
+from config import CONFIG_PATH, Config
 from runtime import Runtime
 
 
 def main():
-    load_dotenv(DOTENV_PATH)  # 先读 .env，已存在的环境变量优先
-    config = Config.from_env()
+    config = Config.load()
     logger.add(sink=config.log_path, level=config.log_level)
 
     if not config.deepseek_key:
-        logger.warning('DEEPSEEK_KEY 未设置，ChatPlugin 将无法调用模型')
+        logger.warning(f'{CONFIG_PATH} 里没配 deepseek_key，ChatPlugin 将无法调用模型')
 
     runtime = Runtime(config)
     if config.planner_url:

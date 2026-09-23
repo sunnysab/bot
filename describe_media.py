@@ -28,12 +28,11 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-from dotenv import load_dotenv
 from loguru import logger
 from weixin_bot import WeChatBotError
 
 from ai import IMAGE_PROMPT_VERSION
-from config import DOTENV_PATH, Config
+from config import Config
 from context import SingleRecord
 from describer import MediaCache, MediaDescriber
 from emojis import Emoji, EmojiLibrary
@@ -162,8 +161,7 @@ def export(cache: MediaCache, library: EmojiLibrary, inventory: Inventory, path:
 
 
 async def amain(args: argparse.Namespace) -> None:
-    load_dotenv(DOTENV_PATH)
-    config = Config.from_env()
+    config = Config.load()
     cache = MediaCache(config.media_cache_path)
     library = EmojiLibrary.load(config.emoji_path) if config.emoji_path else EmojiLibrary()
     inventory = Inventory()

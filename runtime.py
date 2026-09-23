@@ -226,7 +226,7 @@ class Runtime:
                               max_tokens=self.config.describe_max_tokens)
 
     def _make_search(self) -> TavilySearch | None:
-        """ 联网搜索。没配 key（环境变量和 tavily.key 都没有）就不挂工具。 """
+        """ 联网搜索。没配 key（config.toml 的 tavily_key）就不挂工具。 """
         search = TavilySearch(self.config.tavily_key)
         return search if search.ready else None
 
@@ -349,6 +349,8 @@ class Runtime:
     async def _restart(self) -> None:
         logger.warning('按管理后台要求重启进程')
         await self.stop()
+        # 配置全在 config.toml 里，不靠环境变量，所以直接 exec 就行（以前这里要
+        # 先把 .env 管的键从继承环境里摘掉：否则上一轮的旧值会把新 key 盖回去）
         os.execv(sys.executable, [sys.executable, *sys.argv])  # noqa: S606 —— 就是要重启自己
 
 

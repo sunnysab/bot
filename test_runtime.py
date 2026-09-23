@@ -11,7 +11,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from config import Config
+from config import Config, save
 from runtime import ReplyScope, Runtime
 
 
@@ -133,6 +133,23 @@ class TestRuntimeReload(unittest.TestCase):
         self.assertEqual(again.mode, 'allow')
         self.assertTrue(again.allows('测试群'))
         self.assertFalse(again.allows('没勾过的群'))
+
+
+class TestRestartReadsTheFile(unittest.TestCase):
+    def test_a_key_saved_by_the_panel_is_what_the_restart_reads(self):
+        """ 2026-09-23 的复盘：面板上换的 key，重启后必须真的在用。
+
+        以前配置落在环境变量里，`execv` 重启会继承上一轮的旧值、把新 key 盖回去，
+        于是「保存并重启」白点，429 一直不停，面板还把它显示成「agent 选择不发言」。
+        现在启动只读 config.toml：写进去的就是下次启动读到的。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'config.toml'
+            save(path, {'deepseek_key': '新 key', 'deepseek_model': '新模型'})
+            self.assertEqual(Config.load(path).deepseek_key, '新 key')
+            self.assertEqual(Config.load(path).deepseek_model, '新模型')
+            # 没碰过的字段仍是默认值（换 key 不该顺手改掉别的）
+            self.assertEqual(Config.load(path).daemon_port, 9099)
 
 
 if __name__ == '__main__':

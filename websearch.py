@@ -4,21 +4,16 @@
 一次请求、不需要连接池，所以直接标准库 urllib + 线程——省一个依赖和一份 client
 生命周期管理（httpx2 是 openai 的传递依赖，不该被我们直接依赖）。
 
-key 优先取 TAVILY_KEY（面板可以改，落在 .env），没有就读项目根的 tavily.key 文件；
-那个文件在 .gitignore 里，不进仓库。
+key 取 `config.toml` 的 `tavily_key`（面板上就能改）；留空就不挂这个工具。
 """
-
-from __future__ import annotations
 
 import asyncio
 import json
 import urllib.request
-from pathlib import Path
 
 from loguru import logger
 
 TAVILY_URL = 'https://api.tavily.com/search'
-KEY_PATH = Path(__file__).parent / 'tavily.key'
 QUERY_LIMIT = 200      # 搜索词上限：模型偶尔会把一整段话塞进来
 RESULT_LIMIT = 5       # 取几条结果
 SNIPPET_LIMIT = 300    # 每条正文截到多少字（5 条 ≈ 1k token，再多就不是参考而是全文搬运）
@@ -28,8 +23,8 @@ TIMEOUT = 15.0         # 单次搜索超时（实测 basic 深度 1~3s）
 class TavilySearch:
     """ 一次搜索 → 一段能直接给模型看的文本。没配 key 就 ready=False，调用方不挂工具。 """
 
-    def __init__(self, key: str = '', key_path: str | Path | None = None, timeout: float = TIMEOUT):
-        self.key = (key or '').strip() or _read_key(key_path)
+    def __init__(self, key: str = '', timeout: float = TIMEOUT):
+        self.key = (key or '').strip()
         self.timeout = timeout
 
     @property
@@ -61,14 +56,6 @@ class TavilySearch:
             return json.load(response)
 
 
-def _read_key(path: str | Path | None) -> str:
-    """ 读 key 文件；没配 / 读不到就当没有（工具不挂，而不是每轮报错）。 """
-    try:
-        return (Path(path) if path else KEY_PATH).read_text(encoding='utf-8').strip()
-    except OSError:
-        return ''
-
-
 def _render(data: dict, query: str) -> str:
     """ Tavily 的响应压成几行：综合回答 + 标题/链接/摘要。 """
     lines: list[str] = []
@@ -84,19 +71,11 @@ def _render(data: dict, query: str) -> str:
 
 
 def _self_check() -> None:
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as tmp:
-        missing = Path(tmp) / 'missing'
-        # 没 key：不发请求，直接告诉模型别编
-        assert not TavilySearch(key='', key_path=missing).ready
-        assert '搜不了网' in asyncio.run(TavilySearch(key='', key_path=missing).__call__('今天天气'))
-        # key 文件回退（面板没配 TAVILY_KEY 时的正常路径）
-        path = Path(tmp) / 'tavily.key'
-        path.write_text('tvly-test\n', encoding='utf-8')
-        assert TavilySearch(key_path=path).key == 'tvly-test'
-        # 环境变量来的 key 优先于文件
-        assert TavilySearch(key=' from-env ', key_path=path).key == 'from-env'
+    # 没 key：不发请求，直接告诉模型别编
+    assert not TavilySearch(key='').ready
+    assert not TavilySearch(key='   ').ready
+    assert '搜不了网' in asyncio.run(TavilySearch(key='').__call__('今天天气'))
+    assert TavilySearch(key=' tvly-test ').key == 'tvly-test'      # 首尾空白要削掉
 
     # 渲染：综合回答 + 结果，正文要截断；空结果得有话说
     text = _render({'answer': '是的', 'results': [{'title': 'T', 'url': 'http://u',

@@ -15,9 +15,9 @@ media_cache/
 
 __pycache__/
 *.egg-info/
-.env
+# 本地配置（里面有 API key，不进仓库）
+config.toml
 admin.db*
-tavily.key
 
 # 面板前端（产物由 npm run build 生成，不进仓库）
 web/node_modules/

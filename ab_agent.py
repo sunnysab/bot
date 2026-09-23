@@ -23,11 +23,10 @@ import time
 import types
 from pathlib import Path
 
-from dotenv import load_dotenv
 from loguru import logger
 
 from ai import usage
-from config import DOTENV_PATH, Config
+from config import Config
 from context import ChatWindow, MessageContext
 from persona import Persona
 from plugin import ChatPlugin, clean_reply
@@ -117,10 +116,9 @@ def _delta(before: dict, after: dict) -> dict:
 
 
 async def amain(args) -> None:
-    load_dotenv(DOTENV_PATH)
-    config = Config.from_env()
+    config = Config.load()
     if not config.deepseek_key:
-        raise SystemExit('没配 DEEPSEEK_KEY，跑不了')
+        raise SystemExit('config.toml 里没配 deepseek_key，跑不了')
     ai, planner = _providers(config)
     persona = Persona(
         personality=config.personality, reply_style=config.reply_style,

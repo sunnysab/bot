@@ -222,7 +222,7 @@ export interface ConfigItem {
 
 export interface ConfigRes {
   groups: { group: string; items: ConfigItem[] }[];
-  dotenv: string;
+  config_path: string;
 }
 
 export interface PersonaRes {

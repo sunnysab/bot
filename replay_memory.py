@@ -83,11 +83,9 @@ async def replay(records: list[SingleRecord], windows: int, batch: int, model: s
     if not model:
         print(f'离线模式：拿窗口原文当回想文本，共 {len(chunks)} 个窗口，每个 {batch} 条\n')
     else:
-        import os
+        from config import Config
 
-        from dotenv import load_dotenv
-        load_dotenv(Path(__file__).parent / '.env')
-        ai = Deepseek(key=os.getenv('DEEPSEEK_KEY', ''), model=model, temperature=0.3)
+        ai = Deepseek(key=Config.load().deepseek_key, model=model, temperature=0.3)
         print(f'真压缩：{len(chunks)} 个窗口，每个 {batch} 条，模型 {model}\n')
 
     covered = total = 0

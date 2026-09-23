@@ -31,12 +31,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from dotenv import load_dotenv
 from jinja2 import StrictUndefined, Template, TemplateSyntaxError, UndefinedError
 from loguru import logger
 
 from ai import usage
-from config import DOTENV_PATH, Config, update_dotenv
+from config import CONFIG_PATH, Config, coerce
+from config import save as save_config
 from context import SYSTEM_KINDS, MessageKind
 from events import Status, bus
 from media import render, render_referred, tag
@@ -143,21 +143,11 @@ def _parse(field, raw):
 
     留空 = 恢复默认值（面板里把一个输入框清空的直觉就是「回默认」）。
     """
-    if field.type is bool:
-        return raw if isinstance(raw, bool) else str(raw).strip().lower() not in ('0', 'false', 'no', '')
-    text = str(raw).strip()
-    if not text:
+    if not str(raw).strip():
         if field.default is not MISSING:
             return field.default
         raise ValueError(f'{field.name} 不能为空')
-    try:
-        return field.type(text)
-    except ValueError as e:
-        raise ValueError(f'{field.name} 要 {_type_name(field.type)}，收到 {text!r}') from e
-
-
-def _dotenv_value(value) -> str:
-    return ('1' if value else '0') if isinstance(value, bool) else str(value)
+    return coerce(field, raw)
 
 
 def _readable(changed: dict) -> dict:
@@ -312,7 +302,7 @@ class Admin:
         self.runtime = runtime
         self.host = host
         self.port = port
-        self.dotenv = DOTENV_PATH      # 自检里会换成临时文件
+        self.config_path = CONFIG_PATH      # 自检里会换成临时文件
         self.decisions = DecisionLog(sidecar)
         # 面板一次刷一堆图：daemon 那边原图是串行下的（一次一张），这里限的是并发
         # 占用的 HTTP 线程数，免得附件把面板的其它请求一起拖住
@@ -824,10 +814,10 @@ class Admin:
                     'hot': name in HOT_FIELDS,
                 })
             groups.append({'group': title, 'items': items})
-        return {'groups': groups, 'dotenv': str(self.dotenv)}
+        return {'groups': groups, 'config_path': str(self.config_path)}
 
     def write_config(self, updates: dict) -> dict:
-        """ 校验 → 写回 .env → 热字段**立刻生效**。
+        """ 校验 → 写回 config.toml → 热字段**立刻生效**。
 
         校验不过一个字都不写（一个笔误不能让 bot 下次起不来）。热字段当场 apply，
         面板不用再点一次「热重载」；只有要整进程重启的字段才留在 stale 里。
@@ -855,25 +845,18 @@ class Admin:
         changed = {name: candidate[name] for name in updates if candidate[name] != current[name]}
         if not changed:
             return {'changed': {}, 'stale': []}
-        update_dotenv(self.dotenv, {name.upper(): _dotenv_value(value)
-                                   for name, value in changed.items()})
+        save_config(self.config_path, changed)
         stale = self.runtime.apply(config)
         logger.warning(f'管理后台改了配置 {_readable(changed)}；'
                        f'需要重启进程的：{stale or "（无）"}')
         return {'changed': _readable(changed), 'stale': stale}
 
     def reload_config(self) -> dict:
-        """ 重新读 .env 并热重载。
-
-        override=True：面板上改的就是最终值。跟启动时的「真实环境变量优先」相反，
-        但只能这样——不然在面板上改了不生效。
-        """
+        """ 重新读 config.toml 并热重载。 """
         before = self.runtime.config
-        load_dotenv(self.dotenv, override=True)
-        config = Config.from_env()
+        config = Config.load(self.config_path)
         changed = {f.name: getattr(config, f.name) for f in dataclass_fields(Config)
-                   if getattr(config, f.name) != getattr(before, f.name)
-                   and f.name not in SECRET_FIELDS}
+                   if getattr(config, f.name) != getattr(before, f.name)}
         stale = self.runtime.apply(config)
         logger.warning(f'管理后台热重载：改了 {_readable(changed) or "（无）"}；'
                        f'需要重启进程的：{stale or "（无）"}')
@@ -1023,7 +1006,7 @@ class Admin:
     def _asset(handler, route: str) -> None:
         """vite 的产物：文件名带内容 hash，所以可以长期缓存。
 
-        路径解析后必须仍然落在 dist/assets 里——不然 `/assets/../../.env` 就把仓库读穿了。
+        路径解析后必须仍然落在 dist/assets 里——不然 `/assets/../../config.toml` 就把仓库读穿了。
         """
         path = (ASSETS / route[len('/assets/'):]).resolve()
         if not path.is_relative_to(ASSETS.resolve()) or not path.is_file():
@@ -1389,15 +1372,15 @@ def _self_check() -> None:
     assert flat['deepseek_key']['isset'] is False        # Config() 默认 key 是空
     assert flat['typo_rate']['hot'] and not flat['daemon_port']['hot']
 
-    # 写回 .env：先校验 → 原子写 → 保留注释 → 报出要重启的字段
+    # 写回 config.toml：先校验 → 原子写 → 保留注释 → 报出要重启的字段
     with tempfile.TemporaryDirectory() as tmp:
-        admin.dotenv = Path(tmp) / '.env'
-        admin.dotenv.write_text('# 注释\nTYPO_RATE=0.08\n', encoding='utf-8')
+        admin.config_path = Path(tmp) / 'config.toml'
+        admin.config_path.write_text('# 注释\ntypo_rate = 0.08\n', encoding='utf-8')
         out = admin.write_config({'typo_rate': '0', 'daemon_port': '9999'})
         assert out['changed'] == {'typo_rate': '0.0', 'daemon_port': '9999'}, out
         assert out['stale'] == ['daemon_port'], out
-        written = admin.dotenv.read_text(encoding='utf-8')
-        assert '# 注释' in written and 'TYPO_RATE=0' in written and 'DAEMON_PORT=9999' in written
+        written = admin.config_path.read_text(encoding='utf-8')
+        assert '# 注释' in written and 'typo_rate = 0.0' in written and 'daemon_port = 9999' in written
 
         # 坏值：一个字都不能写（否则下次启动直接起不来）
         try:
@@ -1405,7 +1388,7 @@ def _self_check() -> None:
             raise AssertionError('坏值应该被拒')
         except ValueError as e:
             assert 'typo_rate' in str(e), e
-        assert admin.dotenv.read_text(encoding='utf-8') == written
+        assert admin.config_path.read_text(encoding='utf-8') == written
 
         try:
             admin.write_config({'没这个': '1'})
@@ -1415,15 +1398,15 @@ def _self_check() -> None:
 
         # 密钥留空 = 保持原值（不回显的东西就不该被覆盖）
         assert admin.write_config({'deepseek_key': ''})['changed'] == {}
-        assert 'DEEPSEEK_KEY' not in admin.dotenv.read_text(encoding='utf-8')
+        assert 'deepseek_key' not in admin.config_path.read_text(encoding='utf-8')
 
-        # 布尔在 .env 里存 1/0
+        # 布尔在 toml 里存字面量，不是 1/0
         admin.write_config({'enable_focus': False})
-        assert 'ENABLE_FOCUS=0' in admin.dotenv.read_text(encoding='utf-8')
+        assert 'enable_focus = false' in admin.config_path.read_text(encoding='utf-8')
 
-        # 热重载：重读 .env 并交给 runtime.apply
+        # 热重载：重读 config.toml 并交给 runtime.apply
         applied.clear()
-        admin.dotenv.write_text('TYPO_RATE=0.25\n', encoding='utf-8')
+        admin.config_path.write_text('typo_rate = 0.25\n', encoding='utf-8')
         result = admin.reload_config()
         assert applied and applied[0].typo_rate == 0.25, applied
         assert result['changed']['typo_rate'] == '0.25', result
@@ -1439,7 +1422,7 @@ def _self_check() -> None:
         except ValueError as e:
             assert 'reply_context_length' in str(e), e
 
-    # reload_config 用 Config.from_env() 重建，把自检的两个哨兵路径带回了默认值——
+    # reload_config 重新读文件重建，把自检的两个哨兵路径带回了默认值——
     # 下面统计卡的断言依赖它们指向不存在的文件，钉回去
     runtime.config = replace(runtime.config, trace_path='/no/such/trace.jsonl',
                              log_path='/no/such/bot.log')

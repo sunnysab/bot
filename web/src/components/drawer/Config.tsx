@@ -19,7 +19,7 @@ interface Props {
 
 const HINT = '热字段保存后立即生效；带 ⚠ 的要重启进程；清空一个框 = 回默认值。';
 
-/** 配置：全局 .env 的分组表单 + 当前会话的人设覆盖。 */
+/** 配置：全局 config.toml 的分组表单 + 当前会话的人设覆盖。 */
 export function Config({ chat, onSaved }: Props) {
   const [tick, setTick] = useState(0);
   // 草稿只存「用户动过」的字段，没动过的显示服务端值——省掉一层初始化 effect
