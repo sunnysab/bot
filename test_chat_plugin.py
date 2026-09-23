@@ -112,9 +112,16 @@ def sample_history():
     return window
 
 
-def make_ctx(msg, history=None, forced=False):
+def plugin_fresh_text(ctx):
+    """ 直接问插件那个取正文的帮手，别绕一圈猜。 """
+    from plugin import _fresh_text
+    return _fresh_text(ctx)
+
+
+def make_ctx(msg, history=None, forced=False, fresh=()):
     history = history if history is not None else sample_history()
-    return MessageContext(msg=msg, history=history, self_name='Bot', contact='测试群', forced=forced)
+    return MessageContext(msg=msg, history=history, self_name='Bot', contact='测试群', forced=forced,
+                          fresh=fresh)
 
 
 def history_with(others: int, now: float) -> ChatWindow:
@@ -149,6 +156,50 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.ai.planner_calls), 1)
         self.assertEqual(len(self.ai.reply_calls), 1)
 
+    async def test_the_model_sees_the_record_not_the_stale_placeholder(self):
+        """ 图 / 表情的描述是识图跑完写回**记录**的，`msg.content` 还是分发那一刻的裸占位符。
+
+        拿它渲染，模型最该看的那条就没有内容，只好去别处找话题——2026-09-23 那张猫表情
+        被答成「这拌面看着真香」就是这么来的。所以正文一律从记录里取。
+        """
+        msg = make_msg(content='[表情 #nbzb5x]')
+        history = sample_history()
+        history.append('Alice', '[表情 #nbzb5x：猫咪瞪大双眼一脸震惊]', 2, msg_id=msg.msg_id)
+        ctx = make_ctx(msg, history, fresh=(msg,))
+        await self.plugin.handle(ctx)
+        sent = self.plugin.ai.reply_calls[0][1]
+
+        self.assertIn('[表情 #nbzb5x：猫咪瞪大双眼一脸震惊]', sent)
+        self.assertNotIn('[表情 #nbzb5x]\n', sent)                # 没有裸占位符那一版
+        self.assertNotIn('【本轮】', sent)                         # 不再单独拎一条出来
+        # 群用语 / 记忆的取词也走记录（裸占位符里没有可匹配的词）
+        self.assertEqual(plugin_fresh_text(ctx), '[表情 #nbzb5x：猫咪瞪大双眼一脸震惊]')
+
+    async def test_new_messages_are_marked_in_the_transcript(self):
+        """ 新消息在聊天记录里画一条分隔线：模型没有未读概念，得告诉它边界在哪。 """
+        msg = make_msg(content='那就定周六')
+        old_id, new_id = 7100000000000000001, msg.msg_id
+        history = sample_history()
+        history.append('Alice', '周末去爬山不', 1, msg_id=old_id)
+        history.append('Alice', '那就定周六', 2, msg_id=new_id)
+        await self.plugin.handle(make_ctx(msg, history, fresh=(msg,)))
+
+        sent = self.plugin.ai.reply_calls[0][1]
+        lines = sent.split('\n')
+        divider = lines.index('----以下是新消息----')
+        self.assertTrue(lines[divider + 1].endswith('Alice: 那就定周六'), lines[divider:])
+        # 分隔线之前那条（更早的）不该被标成新消息
+        self.assertNotIn('----以下是新消息----', lines[:divider])
+
+    async def test_quote_feedback_names_what_it_quotes(self):
+        """ 引用回执要点出被引那条是什么，否则模型看不见自己引的是表情还是照片。 """
+        history = sample_history()
+        history.append('Bob', '[表情 #a1b2c3：猫咪瞪大双眼一脸震惊]', 2, msg_id=99)
+        ctx = make_ctx(make_msg(content='震惊啥'), history)
+        note = self.plugin._resolve_ref({'ref': message_handle(99)}, {}, ctx)
+        self.assertIn('猫咪瞪大双眼', note)
+        self.assertIn('Bob', note)
+
     async def test_direct_address_also_goes_through_planner(self):
         """ 被 @ / 叫名字 / 私聊也走决策者——表情工具在那条路上，代价是多一次调用。 """
         for msg in (make_msg(is_chatroom=True, is_at_me=True),
@@ -178,7 +229,6 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
     async def test_plan_is_passed_to_expressor(self):
         await self.plugin.handle(proactive_ctx())
         message = self.ai.reply_calls[0][1]
-        self.assertIn('【本轮】', message)
         self.assertIn('【决策】', message)
         self.assertIn('想表达：附和一句', message)
         self.assertIn('情绪：无奈', message)

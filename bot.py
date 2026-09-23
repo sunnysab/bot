@@ -526,14 +526,17 @@ class Bot:
 
     async def _run_plugins(self, msg: Message, self_name: str, source: str,
                            history: ChatWindow | None = None,
-                           forced: bool = False) -> Reply:
+                           forced: bool = False,
+                           fresh: tuple[Message, ...] = ()) -> Reply:
         """ 把当前消息交给该会话的插件链，收集要回复的文本和表情。
 
         :param history: 这一轮看的上下文。默认是当前活窗口；手动回复传「截到那条为止」的窗口
         :param forced: 管理后台手动触发（见 `force_reply`）
+        :param fresh: 这一块里的消息（不止触发那条时一起给插件，门控和分隔线都要用）
         """
         ctx = MessageContext(msg=msg, history=history or self._history.get_context(msg.reply_target),
-                             self_name=self_name, contact=source, forced=forced)
+                             self_name=self_name, contact=source, forced=forced,
+                             fresh=fresh or (msg,))
         texts: list[str] = []
         emoji = None
         verbatim = False
@@ -583,7 +586,8 @@ class Bot:
                 msg, self_name, source = self._pick_trigger(block)
                 try:
                     await self._wait_media(contact, block)
-                    await self._reply_once(msg, self_name, source)
+                    await self._reply_once(msg, self_name, source,
+                                           fresh=tuple(item[0] for item in block))
                 except Exception as e:  # 一轮报错不能把整个会话的回复循环带死
                     logger.error(f'回复处理失败（{contact}）: {e}', exc_info=True)
         finally:
@@ -631,13 +635,16 @@ class Bot:
         logger.info(f'等识图 {time.perf_counter() - started:.1f}s（{len(wanted)} 张，{contact}）')
 
     async def _reply_once(self, msg: Message, self_name: str, source: str,
-                          forced: bool = False, history: ChatWindow | None = None) -> None:
+                          forced: bool = False, history: ChatWindow | None = None,
+                          fresh: tuple[Message, ...] = ()) -> None:
         """ 跑一轮插件链并把回复写历史 + 入队。
 
         :param forced: 管理后台手动触发：不走「必不必须回」那套，而且一定引用被点的那条
         :param history: 见 `_run_plugins`
+        :param fresh: 见 `_run_plugins`
         """
-        response = await self._run_plugins(msg, self_name, source, history=history, forced=forced)
+        response = await self._run_plugins(msg, self_name, source, history=history, forced=forced,
+                                           fresh=fresh)
         if not response.texts and not response.emoji:
             logger.debug('no response to send.')
             # 插件链什么都没说，而且这一轮也没留下别的埋点（语音消息、或该会话静音），

@@ -67,6 +67,9 @@ def format_minute(t: int) -> str:
     return datetime.fromtimestamp(t).strftime('%m-%d %H:%M')
 
 
+# 聊天记录里「新消息从这里开始」的分隔线。模型没有「未读」这个概念，靠它才知道边界
+NEW_MESSAGES = '----以下是新消息----'
+
 _HANDLE_DIGITS = '0123456789abcdefghijklmnopqrstuvwxyz'
 _HANDLE_LENGTH = 6
 
@@ -213,14 +216,23 @@ class ChatWindow:
         return ChatWindow(self._history[-n:], max_history=n)
 
     def __str__(self):
-        """ 渲染给模型看的 transcript。
+        return self.transcript()
+
+    def transcript(self, fresh: tuple[int, ...] = ()) -> str:
+        """ 渲染给模型看的聊天记录。
 
         每条带绝对时间（如 [09-14 14:32:07]）、消息短标签（`#4k2p0z`，回复时用它指定引用哪条）
-        和「我」标记：模型据此判断消息时间、以及自己说过什么。
-        历史行的文本跨轮不变，保住 KV cache 前缀。
+        和「我」标记：模型据此判断消息时间、以及自己说过什么。历史行的文本跨轮不变，
+        保住 KV cache 前缀。
+
+        `fresh` 是这一轮要处理的几条消息的 msg_id（按时间序）：它们前面画一条分隔线。
+        模型没有「未读」这个概念，不给边界它就会重新捡起已经晾过的话题。
         """
+        first = fresh[0] if fresh else 0
         lines = []
         for record in self._history:
+            if first and record.msg_id == first:
+                lines.append(NEW_MESSAGES)
             who = '我' if record.is_self else record.sender
             body = record.text.replace('\n', ' ')
             prefix = f'[{format_time(record.t)}] ' if record.t else ''
@@ -319,6 +331,9 @@ class MessageContext:
     # 管理后台「手动回复这条」：跳过门控 / 退避 / 频率闸，而且必须开口。
     # 人已经替你决定了要说，这里再拦一次就是把人的操作吞掉
     forced: bool = False
+    # 这一轮要处理的**新消息**（同一个块里的那几条，按时间序）。单个消息到达时就是
+    # 只有 msg 一条。门控按整块判、聊天记录里从第一条开始画分隔线都靠它
+    fresh: tuple[Message, ...] = ()
 
     @property
     def kind(self) -> MessageKind:
@@ -352,6 +367,18 @@ if __name__ == '__main__':
     assert lines[0] == f'[01-01 08:16:40] {message_handle(111)} 张三: 在吗', lines
     assert lines[1].endswith('我: 在'), lines                      # 自己那条没有 svrid，不打标签
     assert all(re.match(r'\[\d\d-\d\d \d\d:\d\d:\d\d\] ', line) for line in lines), lines
+    # 新消息分隔线：只在这一轮要处理的那几条之前画一条；旧消息（重放 / 手动回复）一条不画
+    assert NEW_MESSAGES not in str(window)
+    marked = ChatWindow()
+    marked.append('张三', '旧的', 1000, msg_id=111)
+    marked.append('Bot', '我回过了', 1060, is_self=True)
+    marked.append('张三', '新的一句', 4600, msg_id=222)
+    assert NEW_MESSAGES not in str(marked), str(marked)          # 不传 fresh = 全是旧消息
+    fresh = marked.transcript(fresh=(222,)).split('\n')
+    assert fresh[-2] == NEW_MESSAGES and fresh[-1].endswith('张三: 新的一句'), fresh
+    # 块里有几条就从第一条之前画；msg_id=0（没有身份）画不了线，不该乱插
+    assert marked.transcript(fresh=(111, 222)).split('\n')[0] == NEW_MESSAGES
+    assert NEW_MESSAGES not in marked.transcript(fresh=(0,))
     # 引用哪条：按标签找回原消息；撞了 / 找不到就返回 None
     assert window.find_by_handle(message_handle(111)).text == '在吗'
     assert window.find_by_handle('#nope') is None and window.find_by_handle('') is None

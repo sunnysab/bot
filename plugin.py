@@ -224,6 +224,29 @@ def clean_reply(text: str, names: Iterable[str] = ()) -> str:
     return cleaned
 
 
+def _fresh_text(ctx: MessageContext) -> str:
+    """ 这一轮那几条消息的正文，取**历史记录里那份**。
+
+    不用 `msg.content`：图 / 表情的描述是识图跑完写回记录的，而 `msg.content` 是分发
+    那一刻渲染的字符串——拿它去取关键词、取群用语，表情那轮就什么也匹配不到
+    （2026-09-23 那张猫表情被答成「这拌面看着真香」，就是从这条缝里漏出去的）。
+    """
+    texts = [record.text for record in (_record_of(ctx, item) for item in ctx.fresh or (ctx.msg,))
+             if record is not None]
+    return '\n'.join(texts) if texts else ctx.msg.content
+
+
+def _record_of(ctx: MessageContext, message):
+    """ 一条消息在历史里的记录；没 svrid / 已经滑出窗口 / 标签撞了就返回 None。 """
+    msg_id = getattr(message, 'msg_id', 0)
+    return ctx.history.find_by_handle(message_handle(msg_id)) if msg_id else None
+
+
+def _fresh_ids(ctx: MessageContext) -> tuple[int, ...]:
+    """ 这一轮要处理的几条消息的 msg_id（按时间序），给聊天记录画分隔线用。 """
+    return tuple(message for message in (getattr(item, 'msg_id', 0) for item in ctx.fresh) if message)
+
+
 def _brief(text: str, limit: int = 80) -> str:
     """ 压成一行短摘要，给面板显示「为什么选择不发言」。 """
     one = ' '.join((text or '').split())
@@ -419,7 +442,7 @@ class ReplyPolicy:
             text=msg.content,
             is_group=msg.is_chatroom,
             has_at=msg.is_at_me,
-            has_mention=self._mentions_me(ctx),
+            has_mention=self.mentions_me(ctx),
             activity=activity,
             self_replies=self._self_replies(ctx, now),
             recent_messages=self._recent_messages(ctx, now),
@@ -483,10 +506,14 @@ class ReplyPolicy:
     def _recent_messages(self, ctx: MessageContext, now: float) -> int:
         return len(self._recent(ctx, now))
 
-    def _mentions_me(self, ctx: MessageContext) -> bool:
-        """ 群昵称或任一别名出现在消息里，就算在叫它。别名按会话取（可能有覆盖）。 """
+    def mentions_me(self, ctx: MessageContext, message=None) -> bool:
+        """ 群昵称或任一别名出现在消息里，就算在叫它。别名按会话取（可能有覆盖）。
+
+        `message` 不给就看触发那条：整块门控要逐条问，所以它得能按条判。
+        """
         names = (ctx.self_name, *self.aliases_for(ctx.contact))
-        return any(name and name in ctx.msg.content for name in names)
+        text = (message or ctx.msg).content or ''
+        return any(name and name in text for name in names)
 
 
 def _mime(raw: bytes) -> str:
@@ -635,8 +662,8 @@ class ChatPlugin(Plugin):
             # 手动触发别说成「点名」——模型会以为自己被 @ 了，去答上一个根本不存在的人
             blocks['must'] = ('这轮是人手动挑出来让你回的，必须说点什么，不能装没看见。'
                               if ctx.forced
-                              else f'这条点名了 {ctx.self_name}，必须给个回应，不能装没看见。')
-        transcript = '以下聊天记录供你参考：\n\n' + str(history)
+                              else self._must_note(ctx, necessity.kind))
+        transcript = '以下聊天记录供你参考：\n\n' + history.transcript(_fresh_ids(ctx))
         # 窗口里的图一并取回来附给模型（新→旧、按媒体去重）。取不到就少一张，不影响回复
         images = await self._collect_images(history)
 
@@ -703,6 +730,20 @@ class ChatPlugin(Plugin):
     def _tools_ready(self) -> bool:
         """ 决策者能不能用工具。后端不支持就退回单轮 JSON，功能不受影响。 """
         return self.enable_tools and bool(getattr(self.planner_ai, 'supports_tools', False))
+
+    def _must_note(self, ctx: MessageContext, kind: str) -> str:
+        """ 「必须回应」那句话，指到**具体是哪条**（`#标签`）。
+
+        以前只说「有人点它的名」，模型得自己在历史里猜是哪一条——回错了人和话题都是这么来的。
+        """
+        tags = []
+        for item in ctx.fresh or (ctx.msg,):
+            if item.is_at_me or self.policy.mentions_me(ctx, item):
+                tags.append(message_handle(item.msg_id) or '最新那条')
+        who = f'（{"、".join(dict.fromkeys(tags))}）' if tags else ''
+        if kind == 'private':
+            return f'这是私下发给 {ctx.self_name} 的消息，必须给个回应，不能装没看见。'
+        return f'{ctx.self_name} 被点名了{who}，必须给个回应，不能装没看见。'
 
     def _silent(self, ctx: MessageContext, now: float, emoji: Emoji | None = None) -> Reply:
         """ 这一轮没说话（最多只发了个表情），记一笔给连续沉默退避用。 """
@@ -848,6 +889,9 @@ class ChatPlugin(Plugin):
 
         返回一句给模型看的回执；没给 ref 就返回空串。标签对不上（写错 / 已被刷出
         窗口）就不引用——引用错了比不引用更糟，回执说清楚，让模型自己决定要不要重发。
+
+        回执里**带上被引那条的正文**：只回一个标签，模型看不见自己引的是什么，
+        「评论照片却引了表情」这种错配就无从自查。
         """
         ref = arg_str(arguments, 'ref')
         if not ref:
@@ -856,7 +900,8 @@ class ChatPlugin(Plugin):
         if record is None:
             return f'（聊天记录里没有「{ref}」这条，这条就不引用了。）'
         state['ref'] = record.msg_id
-        return f'（这条会引用 {message_handle(record.msg_id)}。）'
+        who = '我' if record.is_self else record.sender
+        return f'（这条会引用 {message_handle(record.msg_id)} —— {who}: {_brief(record.text, 40)}。）'
 
     def _tools(self, state: dict, terminal: ToolSpec, handler, ctx: MessageContext) -> list:
         """ 一轮的完整工具集：表情对 + 终点动作（speak / reply）+ 查历史 + 联网 +（可选）撤回。 """
@@ -1014,14 +1059,14 @@ class ChatPlugin(Plugin):
 
     def _context_blocks(self, ctx: MessageContext, history: ChatWindow) -> dict[str, str]:
         """ 画像 / 群用语 / 中期记忆，三者都是「能捞到才注入」。 """
-        msg = ctx.msg
+        text = _fresh_text(ctx)
         block = {'profiles': '', 'habits': '', 'memories': ''}
         if self.profiles:
             block['profiles'] = self.profiles.render_for(record.sender for record in reversed(history))
         if self.habits:
-            block['habits'] = self.habits.render(msg.content)
+            block['habits'] = self.habits.render(text)
         if self.memories:
-            recalled = self.memories.search(msg.reply_target, extract_keywords(msg.content))
+            recalled = self.memories.search(ctx.msg.reply_target, extract_keywords(text))
             block['memories'] = '\n'.join(moment.render() for moment in recalled)
         return block
 
@@ -1033,7 +1078,7 @@ class ChatPlugin(Plugin):
         所有会变的东西（本轮消息 / 决策 / 临时风格 / 画像 / 群用语 / 记忆）都放这里，
         不放 system prompt——system 恒定才能吃到 KV 前缀缓存。
         """
-        lines = [f'【本轮】{ctx.msg.sender_name}: {ctx.msg.content}']
+        lines = []
         for label, key in (('必须回应', 'must'), ('专注模式', 'focus')):
             if blocks.get(key):
                 lines.append(f'【{label}】\n{blocks[key]}')
