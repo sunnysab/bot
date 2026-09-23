@@ -125,7 +125,7 @@ class Config:
     reply_activity_window: float = 180.0
     # 回复行为（面板上直接调，都不用重启）
     reply_context_length: int = 60       # 每轮送进模型的历史条数（上限 ChatWindow.max_history=100）
-    agent_max_replies: int = 2           # agent 模式一轮最多发几条消息
+    agent_max_replies: int = 3           # agent 模式一轮最多发几条消息（回几个人就几条）
     focus_score_bonus: int = 0           # 专注期加分。默认 0：热群本来就有压力分，
                                          # 再加就成了「热群必回」（见 necessity.PRESSURE_MAX）
     # 发言频率闸：阈值过了也可能说得太密，这是最后一道闸（只拦主动参与）

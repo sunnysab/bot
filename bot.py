@@ -566,8 +566,9 @@ class Bot:
     def _pick_trigger(block: list[tuple[Message, str, str]]) -> tuple[Message, str, str]:
         """ 从一块里挑「本轮」那条：优先被 @ 的（最该回），否则取最新。
 
-        不能一律取最新：忙的时候别人 @ 了机器人、紧跟着又一句「哈哈」，拿「哈哈」当本轮
-        会被门控判成不值得回，那个 @ 就没人理了。
+        只用来**挂身份**（事件归属、面板对气泡、手动回复引用哪条）。门控不看它了：
+        块里每条都会被打分，取最该回的（见 ReplyPolicy.evaluate_detailed）。
+        优先 @ 是为了让面板把这一轮挂在「最值得看」的那条上。
         """
         for item in block:
             if item[0].is_at_me:

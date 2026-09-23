@@ -453,17 +453,22 @@ class ReplyPolicy:
         `forced`（管理后台手动点了「回复这条」）只跳过**拦不拦**这一层：分数照算，
         面板要看得见「本来会被拦下」；退避和频率闸也不记一笔，那是自动回复的节流。
         """
-        msg = ctx.msg
         activity = self._activity(ctx, now)
-        result = score_necessity(NecessityInput(
-            text=msg.content,
-            is_group=msg.is_chatroom,
-            has_at=msg.is_at_me,
-            has_mention=self.mentions_me(ctx),
-            activity=activity,
-            self_replies=self._self_replies(ctx, now),
-            recent_messages=self._recent_messages(ctx, now),
-        ))
+
+        def score_one(message) -> NecessityScore:
+            return score_necessity(NecessityInput(
+                text=message.content,
+                is_group=message.is_chatroom,
+                has_at=message.is_at_me,
+                has_mention=self.mentions_me(ctx, message),
+                activity=activity,
+                self_replies=self._self_replies(ctx, now),
+                recent_messages=self._recent_messages(ctx, now),
+            ))
+
+        # 按**整块**判：一块里可能几个人同时在说话，只看触发那条的话，最后那句「哈哈」
+        # 会把前面的真问题一起拖死（拿块里最该回的那条说话）
+        result = max((score_one(message) for message in ctx.fresh or (ctx.msg,)), key=_urgency)
         if forced:
             return GateDecision(allowed=True, score=result.score, kind=result.kind,
                                 reasons=result.reasons, score_obj=result,
@@ -531,6 +536,14 @@ class ReplyPolicy:
         names = (ctx.self_name, *self.aliases_for(ctx.contact))
         text = (message or ctx.msg).content or ''
         return any(name and name in text for name in names)
+
+
+_KIND_RANK = {'at': 3, 'private': 3, 'mention': 2, 'proactive': 1}
+
+
+def _urgency(result: NecessityScore) -> tuple[int, int]:
+    """ 「块里最该回的那条」怎么挑：被点名/私聊 > 叫到名字 > 主动参与，同类再看分数。 """
+    return _KIND_RANK.get(result.kind, 0), result.score
 
 
 def _mime(raw: bytes) -> str:
@@ -1121,7 +1134,7 @@ class ChatPlugin(Plugin):
             identity=persona.identity(ctx.self_name), reply_style=persona.reply_style,
             behavior_style=persona.behavior_style, self_name=ctx.self_name,
             contact=ctx.contact, is_group=ctx.msg.is_chatroom, aliases=persona.aliases,
-            tools=tools, faces=FACE_CATALOG)
+            tools=tools, faces=FACE_CATALOG, max_replies=self.agent_max_replies)
 
     def _clean(self, texts: Iterable[str] | None, ctx: MessageContext) -> list[str]:
         """ 模型常顺手带上「昵称：」前缀或引号包裹，不能直接漏到群里。 """

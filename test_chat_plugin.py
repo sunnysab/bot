@@ -535,6 +535,30 @@ class TestReplyPolicy(unittest.TestCase):
         self.assertEqual(self.policy.evaluate(self.ctx(is_at_me=True), now=1000.0).kind, 'at')
         self.assertEqual(self.policy.evaluate(self.ctx(content='Bot 在吗'), now=1000.0).kind, 'mention')
 
+    def test_a_burst_is_judged_as_a_whole(self):
+        """ 一块里好几个人说话时，门控看整块。
+
+        以前只看挑出来的触发那条：块是 [「这个怎么弄啊」, 「哈哈」] 时触发是「哈哈」，
+        短反应直接被判成不值得回，前面那句真问题就没人理了。
+        """
+        question = make_msg(is_chatroom=True, content='这个怎么弄啊')
+        laugh = make_msg(is_chatroom=True, content='哈哈')
+        ctx = make_ctx(laugh, history=history_with(12, time.time()), fresh=(question, laugh))
+
+        decision = self.policy.evaluate_detailed(ctx, now=time.time())
+        self.assertTrue(decision.allowed, decision.detail)
+        self.assertEqual(decision.score_obj.kind, 'proactive')
+        self.assertIn('问句', decision.score_obj.reasons)
+
+    def test_addressed_message_anywhere_in_the_burst_wins(self):
+        """ 被 @ 的那条不在块尾也要算：块里有一条指名了就必须回。 """
+        addressed = make_msg(is_chatroom=True, is_at_me=True, content='Bot 在吗')
+        laugh = make_msg(is_chatroom=True, content='哈哈')
+        ctx = make_ctx(laugh, history=history_with(12, time.time()), fresh=(addressed, laugh))
+        decision = self.policy.evaluate_detailed(ctx, now=time.time())
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.score_obj.kind, 'at')
+
     def test_quiet_group_is_silent(self):
         self.assertIsNone(self.policy.evaluate(self.ctx(content='大家好啊'), now=1000.0))
 
@@ -1267,6 +1291,12 @@ class TestAgentMode(unittest.IsolatedAsyncioTestCase):
         reply = await plugin.handle(make_ctx(make_msg(is_chatroom=False)))
         self.assertEqual(reply.texts, ['在'])
         self.assertIn('必须回应', json.dumps(self.ai.rounds[1], ensure_ascii=False))
+
+    async def test_agent_prompt_tells_it_the_reply_cap(self):
+        """ 一轮想说的要一次调完，所以模板里得写明最多几条。 """
+        plugin = self.plugin([], agent_max_replies=3)
+        prompt = await plugin._agent_prompt(proactive_ctx(), ('reply',))
+        self.assertIn('最多 3 条', prompt)
 
     async def test_agent_prompt_switches_on_available_tools(self):
         plugin = self.plugin([])
