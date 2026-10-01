@@ -80,10 +80,10 @@ def clean(texts, plugin, ctx) -> list[str]:
 
 
 async def run_two_stage(plugin: ChatPlugin, ctx: MessageContext, transcript: str,
-                        must_speak: bool) -> dict:
+                        must_speak: bool, blocks: dict) -> dict:
     started = time.perf_counter()
     before = usage.snapshot()
-    decided, _emoji, _at, _ref, _log = await plugin._plan_with_tools(ctx, {}, transcript)
+    decided, _emoji, _at, _ref, _log = await plugin._plan_with_tools(ctx, {}, transcript, [], [])
     texts: list[str] = []
     plan = ''
     if decided is not None:
@@ -91,7 +91,7 @@ async def run_two_stage(plugin: ChatPlugin, ctx: MessageContext, transcript: str
     if decided is None:
         reply = None
     elif decided.speak or must_speak:
-        reply = await plugin._express(ctx, {}, transcript, plan)
+        reply = await plugin._express(ctx, blocks, transcript, [], plan, [])
         texts = clean(reply, plugin, ctx)
     after = usage.snapshot()
     return {'texts': texts, 'plan': plan, 'latency_ms': int((time.perf_counter() - started) * 1000),
@@ -99,11 +99,11 @@ async def run_two_stage(plugin: ChatPlugin, ctx: MessageContext, transcript: str
 
 
 async def run_agent(plugin: ChatPlugin, ctx: MessageContext, transcript: str,
-                    must_speak: bool) -> dict:
+                    must_speak: bool, blocks: dict) -> dict:
     started = time.perf_counter()
     before = usage.snapshot()
-    replies, _emoji, _at, _ref, _log = await plugin._reply_agent(ctx, {}, transcript, must_speak)
-    texts = clean(replies, plugin, ctx)
+    lines, _emoji, _log = await plugin._reply_agent(ctx, blocks, transcript, [], must_speak, [])
+    texts = clean([line.text for line in lines], plugin, ctx)
     after = usage.snapshot()
     return {'texts': texts, 'latency_ms': int((time.perf_counter() - started) * 1000),
             'tokens': _delta(before, after)}
@@ -144,9 +144,16 @@ async def amain(args) -> None:
         ctx = build_ctx(record, SELF_NAME)
         transcript = record['transcript']
         must_speak = record.get('trigger') != 'proactive'
+        # 线上这两块是 handle() 现加的；不补上，模型看不出「这轮非回不可」或「正聊得热」，
+        # 两边都判「没必要插话」，比出来全是 0，比不出东西
+        blocks = {}
+        if must_speak:
+            blocks['must'] = '这轮点名了，必须给个回应。'
+        elif '专注' in (record.get('reasons') or ()):
+            blocks['focus'] = '你正在专注跟这个群聊，可以比平时更主动一点，但别硬凑话题，接不上就闭嘴。'
         was = list(record.get('reply') or ())
-        got_two = await run_two_stage(two_stage, ctx, transcript, must_speak)
-        got_agent = await run_agent(agent, ctx, transcript, must_speak)
+        got_two = await run_two_stage(two_stage, ctx, transcript, must_speak, blocks)
+        got_agent = await run_agent(agent, ctx, transcript, must_speak, blocks)
         rows.append({'i': index, 'trigger': record.get('trigger'), 'was': was,
                      'two_stage': got_two, 'agent': got_agent})
         print(f"\n#{index} 触发={record.get('trigger')} 当时回了: {' / '.join(was) or '（没开口）'}")
