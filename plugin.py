@@ -657,6 +657,8 @@ class ChatPlugin(Plugin):
         base = Path(__file__).parent
         # trim_blocks/lstrip_blocks：{% if %} 独占一行时不留空行。
         # 不设的话每个分支里都会多出一堆空行，白烧 token。
+        # planner/replyer 是旧两段式那套（reply_mode='two_stage' 才走）。**改规则时两边
+        # 都要改**：agent 模式不读这两个文件，只改一边就会出现「面板上改了却不生效」。
         options = {'enable_async': True, 'trim_blocks': True, 'lstrip_blocks': True}
         self.planner_template = Template(
             (base / 'planner.txt').read_text(encoding='utf-8'), **options)
@@ -1155,13 +1157,18 @@ class ChatPlugin(Plugin):
         lines.append(transcript)
         return '\n\n'.join(lines)
 
+    def _ref_candidates(self, ctx: MessageContext) -> str:
+        """ 交给模型的 ref 候选清单。窗口要和聊天记录一致，否则会列出记录里看不见的标签。 """
+        return ctx.history.latest_n(self.context_length).ref_candidates()
+
     async def _planner_prompt(self, ctx: MessageContext, tools: tuple[str, ...] = ()) -> str:
         """ tools 传空就用单轮 JSON 那套输出格式，传工具名就换成工具行动那套。 """
         persona = self.persona_for(ctx.contact)
         return await self.planner_template.render_async(behavior_style=persona.behavior_style,
                                                         self_name=ctx.self_name, contact=ctx.contact,
                                                         is_group=ctx.msg.is_chatroom,
-                                                        aliases=persona.aliases, tools=tools)
+                                                        aliases=persona.aliases, tools=tools,
+                                                        refs=self._ref_candidates(ctx))
 
     async def _agent_prompt(self, ctx: MessageContext, tools: tuple[str, ...] = ()) -> str:
         """ agent 模式的 system prompt：人设 + 行动准则 + 工具说明，一次调用把判断和台词都做了。 """
@@ -1170,7 +1177,8 @@ class ChatPlugin(Plugin):
             identity=persona.identity(ctx.self_name), reply_style=persona.reply_style,
             behavior_style=persona.behavior_style, self_name=ctx.self_name,
             contact=ctx.contact, is_group=ctx.msg.is_chatroom, aliases=persona.aliases,
-            tools=tools, faces=FACE_CATALOG, max_replies=self.agent_max_replies)
+            tools=tools, faces=FACE_CATALOG, max_replies=self.agent_max_replies,
+            refs=self._ref_candidates(ctx))
 
     def _clean(self, texts: Iterable[str] | None, ctx: MessageContext) -> list[str]:
         """ 模型常顺手带上「昵称：」前缀或引号包裹，不能直接漏到群里。 """

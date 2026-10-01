@@ -240,6 +240,22 @@ class ChatWindow:
             lines.append(f'{prefix}{tag}{who}: {body}')
         return '\n'.join(lines)
 
+    def ref_candidates(self, limit: int = 4) -> str:
+        """ 给模型看的「ref 能填哪几个」候选，新→旧。
+
+        整段记录里每个 #标签都摆着，模型挑错是常事——尤其最后一条是表情/图片时，
+        容易引着那个标签去讲上一个话题。只列最近几条，把 ref 变成「从这几个里挑一个」。
+        """
+        recent = [record for record in self._history if record.msg_id][-limit:]
+        if not recent:
+            return '  （这一轮没有能引用的消息，ref 别填）'
+        lines = []
+        for record in reversed(recent):
+            who = '我' if record.is_self else record.sender
+            lines.append(f'  · {message_handle(record.msg_id)} {who}: '
+                         f"{record.text.replace(chr(10), ' ')[:24]}")
+        return '\n'.join(lines)
+
     def find_by_handle(self, handle: str) -> SingleRecord | None:
         """ 按 transcript 里的短标签（`#4k2p0z`）找一条记录，用于「引用哪条」。
 

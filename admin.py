@@ -167,7 +167,7 @@ def _validate_prompt(text: str) -> None:
     # （每次保存都报「模板有问题」，而线上渲染其实好好的）。faces / max_replies 就是这么漏的
     context = {'behavior_style': '', 'self_name': '', 'contact': '', 'is_group': True,
                'aliases': (), 'tools': (), 'identity': '', 'reply_style': '',
-               'faces': '', 'max_replies': 2}
+               'faces': '', 'max_replies': 2, 'refs': ''}
     try:
         Template(text, undefined=StrictUndefined).render(**context)
     except (TemplateSyntaxError, UndefinedError) as e:

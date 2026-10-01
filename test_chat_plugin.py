@@ -191,6 +191,26 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         # 分隔线之前那条（更早的）不该被标成新消息
         self.assertNotIn('----以下是新消息----', lines[:divider])
 
+    async def test_ref_candidates_only_list_recent_tagged_messages(self):
+        """ ref 候选只列最近几条带标签的：满记录都是标签，模型挑错就引错人。 """
+        history = sample_history()
+        for i in range(6):
+            history.append('Alice', f'第{i}条', i, msg_id=1000 + i)
+        history.append('Bot', '我说过的', 9, is_self=True, msg_id=2000)
+
+        listing = history.ref_candidates(limit=3)
+        self.assertEqual([line.split()[1] for line in listing.splitlines()],
+                         [message_handle(2000), message_handle(1005), message_handle(1004)])
+        self.assertIn('我: 我说过的', listing)      # 自己刚说的话也能引
+        self.assertNotIn('第3条', listing)          # 超出 limit 的不列
+
+        # 一条标签都没有（老记录 / 空窗口）时给一句兜底，不是空字符串
+        self.assertIn('别填', ChatWindow().ref_candidates())
+
+        # 提示词里得真带上这份候选，否则 ref 规则还是让模型满记录乱挑
+        prompt = await self.plugin._agent_prompt(make_ctx(make_msg(), history), ('reply',))
+        self.assertIn(message_handle(2000), prompt)
+
     async def test_quote_feedback_names_what_it_quotes(self):
         """ 引用回执要点出被引那条是什么，否则模型看不见自己引的是表情还是照片。 """
         history = sample_history()
