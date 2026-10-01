@@ -33,6 +33,9 @@ class TraceRecord:
     plan: str = ''              # Planner 的决策（两段式时才有）
     # 这一轮走的哪条路：two_stage / agent。A/B 对比时靠它分组
     mode: str = ''
+    # 本条回复引用了哪几条（svrid）。**诊断用**：光看 transcript 分不出「在回这一轮的消息」
+    # 还是「在回更早的那条」，「对着表情讲上一个话题」这种毛病就靠它对出来
+    refs: tuple[int, ...] = ()
     # 触发这一轮的微信消息 ID（daemon 的 server_id）。管理后台的「为什么没回」
     # 抽屉就靠它把气泡和这一轮对上；老记录没有这个字段，读出来是空串
     msg_id: str = ''
@@ -120,7 +123,8 @@ def _self_check() -> None:
         tracer.log(TraceRecord(ts=1.0, contact='g@chatroom', contact_name='某群', sender='Alice',
                                trigger='proactive', score=65, reasons=('问句', '活跃=10条'),
                                transcript='[09-14 14:32] Alice: 这个怎么弄', reply=('这样弄',),
-                               latency_ms=800, msg_id='7100000000000000123'))
+                               latency_ms=800, refs=(7100000000000000003,),
+                               msg_id='7100000000000000123'))
         tracer.log(TraceRecord(ts=2.0, contact='g@chatroom', contact_name='某群', sender='Bob',
                                trigger='at', score=100, reasons=(), transcript='...', reply=(),
                                latency_ms=500))
@@ -149,6 +153,10 @@ def _self_check() -> None:
         assert find(path, '') is None and find(path, None) is None
         assert find(path, '没这个') is None
         assert find('/no/such/dir/trace.jsonl', '1') is None
+
+        # 引用目标要能读出（诊断用）：没引用就是空
+        assert hit['refs'] == [7100000000000000003], hit
+        assert json.loads(lines[1])['refs'] == []
 
         # 超过上限就转存，新的从头写
         rotated = Path(tmp) / 'big.jsonl'

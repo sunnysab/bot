@@ -1226,6 +1226,24 @@ class TestAgentMode(unittest.IsolatedAsyncioTestCase):
         # reply 终止本轮：不再多跑一轮去确认，一次调用就够
         self.assertEqual(len(self.ai.rounds), 1)
 
+    async def test_trace_records_which_message_it_quoted(self):
+        """ 引了哪条要留痕：光看 transcript 分不出「在回这一轮」还是「在回更早的那条」。 """
+        msg = make_msg(is_chatroom=True, is_at_me=True, content='继续')
+        quoted = 7100000000000000001
+        history = sample_history()
+        history.append('Alice', '周末去爬山不', 2, msg_id=quoted)
+        history.append('Alice', '继续', 3, msg_id=msg.msg_id)
+        plugin = self.plugin([AssistantTurn(tool_calls=(
+            _call('reply', text='爬', ref=message_handle(quoted)),))])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'trace.jsonl'
+            plugin.tracer = TraceLogger(path)
+            reply = await plugin.handle(make_ctx(msg, history, fresh=(msg,)))
+            record = json.loads(path.read_text(encoding='utf-8').strip())
+
+        self.assertEqual(reply.texts, ['爬'])
+        self.assertEqual(record['refs'], [quoted])
+
     async def test_replies_over_the_cap_are_refused(self):
         """ 上限是防刷屏的闸门：超出的那条被拒，剩下的下轮再说。 """
         calls = tuple(_call('reply', text=f'第{i}条') for i in range(1, 4))

@@ -746,7 +746,8 @@ class ChatPlugin(Plugin):
         self._emit(ctx, Status.EXPRESSING)
         response = await self._express(ctx, blocks, transcript, images, plan, errors)
         latency_ms = self._elapsed(started)
-        self._trace(ctx, necessity, transcript, response, latency_ms, plan)
+        self._trace(ctx, necessity, transcript, response, latency_ms, plan,
+                    refs=(ref,) if ref else ())
         if response is None:
             self._emit(ctx, Status.EXPRESS_FAILED,
                        _brief(errors[-1], 160) if errors else '表达者调用失败')
@@ -1089,7 +1090,8 @@ class ChatPlugin(Plugin):
         lines, emoji, tool_log = await self._reply_agent(
             ctx, blocks, transcript, images, must_speak, errors)
         self._trace(ctx, necessity, transcript, [line.text for line in lines] or None,
-                    self._elapsed(started), tool_log)
+                    self._elapsed(started), tool_log,
+                    refs=tuple(line.ref for line in lines if line.ref))
         cleaned = self._clean_lines(lines, ctx)
         if not cleaned:
             # 本轮空回复有两种来源：模型真的决定不开口，或者接口压根没调通。
@@ -1271,8 +1273,9 @@ class ChatPlugin(Plugin):
                 'latency_ms': self._elapsed(started)}
 
     def _trace(self, ctx: MessageContext, necessity: NecessityScore, transcript: str,
-               response: list[str] | None, latency_ms: int, plan: str) -> None:
-        """ 记录这一轮：为什么开口、看到了什么、说了什么。 """
+               response: list[str] | None, latency_ms: int, plan: str,
+               refs: tuple[int, ...] = ()) -> None:
+        """ 记录这一轮：为什么开口、看到了什么、说了什么、引了哪几条。 """
         if not self.tracer:
             return
         msg = ctx.msg
@@ -1280,7 +1283,7 @@ class ChatPlugin(Plugin):
             ts=time.time(), contact=msg.reply_target, contact_name=ctx.contact,
             sender=msg.sender_name, trigger=necessity.kind, score=necessity.score,
             reasons=necessity.reasons, transcript=transcript, reply=tuple(response or ()),
-            latency_ms=latency_ms, plan=plan, mode=self.reply_mode,
+            latency_ms=latency_ms, plan=plan, mode=self.reply_mode, refs=refs,
             msg_id=str(getattr(msg, 'msg_id', ''))))
 
     async def _collect_images(self, history: ChatWindow) -> list[tuple[str, bytes]]:
