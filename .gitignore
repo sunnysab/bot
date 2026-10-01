@@ -6,7 +6,7 @@ venv/
 *.exe
 *.log
 media_cache.db
-reply_trace.jsonl
+reply_trace.jsonl*
 
 # 群聊记录与人物画像（含个人信息，不入库）
 memory/
