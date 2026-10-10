@@ -13,6 +13,7 @@ dependencies = [
     "loguru",
     "weixin-bot",
     "pillow>=12.3.0",
+    "lunar-python>=1.4.8",
 ]
 
 [tool.uv.sources]
@@ -30,6 +31,7 @@ py-modules = [
     "build_profiles",
     "config",
     "context",
+    "dates",
     "describer",
     "emojis",
     "events",

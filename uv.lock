@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.14"
 
 [[package]]
@@ -31,6 +31,7 @@ source = { editable = "." }
 dependencies = [
     { name = "jinja2" },
     { name = "loguru" },
+    { name = "lunar-python" },
     { name = "openai" },
     { name = "pillow" },
     { name = "weixin-bot" },
@@ -45,6 +46,7 @@ dev = [
 requires-dist = [
     { name = "jinja2" },
     { name = "loguru" },
+    { name = "lunar-python", specifier = ">=1.4.8" },
     { name = "openai" },
     { name = "pillow", specifier = ">=12.3.0" },
     { name = "weixin-bot", editable = "../weixin-rs/sdk/python" },
@@ -205,6 +207,12 @@ sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/3a/05/a1dae3dffd1116
 wheels = [
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/0c/29/0348de65b8cc732daa3e33e67806420b2ae89bdce2b04af740289c5c6c8c/loguru-0.7.3-py3-none-any.whl", hash = "sha256:31a33c10c8e1e10422bfd431aeb5d351c7cf7fa671e3c4df004162264b28220c", size = 61595, upload-time = "2024-12-06T11:20:54.538Z" },
 ]
+
+[[package]]
+name = "lunar-python"
+version = "1.4.8"
+source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
+sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/59/45/5154c95ae7feaab7ca508e71c3288692c09952dfe33b03b7c2f18a32e2cd/lunar_python-1.4.8.tar.gz", hash = "sha256:3aa11cc73c25e70ddf0ba5bdac7398c03acc9491a3aa512a91c9642973b669d6", size = 105862, upload-time = "2025-11-05T12:31:53.353Z" }
 
 [[package]]
 name = "markupsafe"

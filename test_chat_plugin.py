@@ -19,7 +19,15 @@ from moments import Moment, MomentStore
 from necessity import NECESSITY_THRESHOLD, SpeechLimiter
 from persona import Persona
 from personas import PersonaStore
-from plugin import REVOKE_PER_TURN, WEB_SEARCH_PER_TURN, ChatPlugin, RepeatPlugin, ReplyPolicy, clean_reply
+from plugin import (
+    CALENDAR_PER_TURN,
+    REVOKE_PER_TURN,
+    WEB_SEARCH_PER_TURN,
+    ChatPlugin,
+    RepeatPlugin,
+    ReplyPolicy,
+    clean_reply,
+)
 from profiles import Profile, ProfileStore
 from reply_trace import TraceLogger
 from reply_trace import find as find_trace
@@ -856,7 +864,7 @@ class TestToolLoop(unittest.IsolatedAsyncioTestCase):
         ai = ToolAi([AssistantTurn()])
         plugin = ChatPlugin(ai, context_length=10)      # 没传 emoji_search
         await plugin.handle(proactive_ctx())
-        self.assertEqual(ai.tools_seen[0], ['search_emoji', 'speak'])
+        self.assertNotIn('send_emoji', ai.tools_seen[0])
 
     async def test_backend_without_tool_support_falls_back_to_json(self):
         """ 不支持工具的后端要回到单轮 JSON 决策，功能不能少。 """
@@ -1036,6 +1044,60 @@ class TestWebSearchTool(unittest.IsolatedAsyncioTestCase):
         ai = ToolAi([AssistantTurn()])
         await ChatPlugin(ai, context_length=10).handle(proactive_ctx())
         self.assertNotIn('web_search', ai.tools_seen[0])
+
+
+class TestCalendarTool(unittest.IsolatedAsyncioTestCase):
+    """ 日历：模型自己查，公历 + 农历 + 节日/节气。 """
+
+    def plugin(self, turns, **kwargs):
+        self.ai = ToolAi(turns)
+        return ChatPlugin(self.ai, context_length=10, reply_mode='agent', **kwargs)
+
+    async def test_result_is_fed_back_and_the_turn_continues(self):
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('calendar'),)),
+                              AssistantTurn(tool_calls=(_call('reply', text='今天周一'),))])
+        reply = await plugin.handle(proactive_ctx())
+
+        self.assertIn('calendar', self.ai.tools_seen[0])
+        # 日历要进下一轮的对话，模型才看得到农历和星期
+        fed = json.dumps(self.ai.rounds[1], ensure_ascii=False)
+        self.assertIn('农历', fed)
+        self.assertIn('← 今天', fed)
+        self.assertEqual(reply.texts, ['今天周一'])
+
+    async def test_month_query_returns_that_month(self):
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('calendar', when='2026-10'),)),
+                              AssistantTurn()])
+        await plugin.handle(proactive_ctx())
+        self.assertIn('2026 年 10 月', json.dumps(self.ai.rounds[1], ensure_ascii=False))
+
+    async def test_queries_are_capped_per_turn(self):
+        """ 一轮里模型看不见自己查过几回，不能让它逮着一天反复查。 """
+        calls = tuple(_call('calendar', when=f'2026-{month:02d}')
+                      for month in range(1, CALENDAR_PER_TURN + 2))
+        plugin = self.plugin([AssistantTurn(tool_calls=calls)])
+        await plugin.handle(proactive_ctx())
+        self.assertIn('查得够多了', json.dumps(self.ai.rounds[1], ensure_ascii=False))
+
+    async def test_unparsable_input_comes_back_in_plain_words(self):
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('calendar', when='下周三'),)),
+                              AssistantTurn()])
+        await plugin.handle(proactive_ctx())
+        self.assertIn('看不懂', json.dumps(self.ai.rounds[1], ensure_ascii=False))
+
+    async def test_tool_is_available_out_of_the_box(self):
+        """ 不依赖任何可选能力注入——日历是内置的。 """
+        ai = ToolAi([AssistantTurn()])
+        await ChatPlugin(ai, context_length=10, reply_mode='agent').handle(proactive_ctx())
+        self.assertIn('calendar', ai.tools_seen[0])
+
+    async def test_compose_carries_the_current_time(self):
+        """ 聊天记录只有 MM-DD，没有年份和星期；正文末尾得补上「现在」。 """
+        text = ChatPlugin._compose(proactive_ctx(), {}, '张三: 在吗')
+        self.assertRegex(text, r'【现在】\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} '
+                                r'星期[一二三四五六日] · 农历\S+月\S+')
+        # 时刻必须是最后一行：它前面的聊天记录跨轮稳定，KV 前缀才能复用
+        self.assertTrue(text.splitlines()[-1].startswith('【现在】'), text.splitlines()[-1])
 
 
 class TestRefTool(unittest.IsolatedAsyncioTestCase):

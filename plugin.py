@@ -13,6 +13,7 @@ from loguru import logger
 
 from ai import AiProvider, reason_of
 from context import ChatWindow, MessageContext, SingleRecord, message_handle
+from dates import calendar_text, now_line
 from emojis import FACE_CATALOG, Emoji, EmojiPolicy, filter_faces
 from events import Status, bus
 from focus import FocusMode
@@ -165,9 +166,19 @@ WEB_SEARCH = ToolSpec(
     parameters={'type': 'object',
                 'properties': {'query': {'type': 'string', 'description': '一句具体的搜索词'}},
                 'required': ['query']})
+CALENDAR = ToolSpec(
+    name='calendar',
+    description='查日历。when 留空就是今天所在的整月；也可以给 `2026-10-05`（某一天）'
+                '或 `2026-10`（某个月），返回那一整月的公历、星期、农历（含闰月）、节日和节气。'
+                '要回答「今天几号」「星期几」「还有几天」「中秋是哪天」这类问题**必须查它**——'
+                '日期你算不准，别凭印象编。一轮最多查两次。',
+    parameters={'type': 'object',
+                'properties': {'when': {'type': 'string',
+                                        'description': '要查的日期或月份，如 2026-10-05、2026-10；不填 = 今天'}}})
 
 REVOKE_PER_TURN = 3      # 一轮最多撤几条：撤回不可逆，别让模型连点
 WEB_SEARCH_PER_TURN = 2  # 一轮最多搜几次：搜出来的一样就白花延迟，搜两次够翻案了
+CALENDAR_PER_TURN = 2    # 一轮最多查几次日历：模型看不见自己查过几回
 
 
 @dataclass(slots=True)
@@ -908,6 +919,21 @@ class ChatPlugin(Plugin):
 
         return [(WEB_SEARCH, search)]
 
+    def _calendar_tool(self) -> list:
+        """ 查日历。一轮限次：模型看不见自己查过几回，容易逮着一天反复查。 """
+        calls = {'n': 0}
+
+        async def calendar(arguments: dict) -> ToolResult:
+            if calls['n'] >= CALENDAR_PER_TURN:
+                return ToolResult('这一轮查得够多了，用查到的这些答。')
+            calls['n'] += 1
+            try:
+                return ToolResult(calendar_text(arg_str(arguments, 'when')))
+            except ValueError as e:
+                return ToolResult(str(e))
+
+        return [(CALENDAR, calendar)]
+
     async def _resolve_at(self, arguments: dict, ctx: MessageContext) -> tuple[str, str]:
         """ 解析 @ 目标 → `(wxid, 给模型看的回执)`；没提 @ 就是两个空串。
 
@@ -966,13 +992,14 @@ class ChatPlugin(Plugin):
         return make_plan
 
     def _tools(self, state: dict, terminal: ToolSpec, handler, ctx: MessageContext) -> list:
-        """ 一轮的完整工具集：表情对 +（agent）先想一步 + 终点动作 + 查历史 + 联网 +（可选）撤回。 """
+        """ 一轮的完整工具集：表情对 +（agent）先想一步 + 终点动作 + 查历史 + 查日历 + 联网 +（可选）撤回。 """
         tools = self._emoji_tools(state)
         if terminal is REPLY:
             tools.append((PLAN, self._plan_tool(ctx)))
         tools.append((terminal, handler))
         tools.extend(self._message_tools(ctx))
         tools.extend(self._web_tools())
+        tools.extend(self._calendar_tool())
         tools.extend(self._pat_tool(ctx, state))
         if self.revoke is not None:
             tools.append((REVOKE, self._revoke_tool(ctx)))
@@ -1155,6 +1182,8 @@ class ChatPlugin(Plugin):
             if blocks.get(key):
                 lines.append(f'【{label}】\n{blocks[key]}')
         lines.append(transcript)
+        # 时刻放最后一行：它前面的聊天记录跨轮稳定，KV 前缀还能复用
+        lines.append(f'【现在】{now_line()}')
         return '\n\n'.join(lines)
 
     def _ref_candidates(self, ctx: MessageContext) -> str:
