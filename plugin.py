@@ -598,7 +598,7 @@ class ChatPlugin(Plugin):
                  habits: HabitStore | None = None, memories: MomentStore | None = None,
                  tracer: TraceLogger | None = None, enable_planner: bool = True,
                  planner_ai: AiProvider | None = None,
-                 emoji_search: EmojiSearch | None = None, enable_tools: bool = True,
+                 emoji_search: EmojiSearch | None = None,
                  planner_rounds: int = 5, emoji_policy: EmojiPolicy | None = None,
                  reply_mode: str = 'two_stage', revoke: Revoke | None = None,
                  timeout: float = 60.0, rng: random.Random | None = None,
@@ -621,7 +621,6 @@ class ChatPlugin(Plugin):
         :param enable_planner: 是否跑两段式；False 则只调 Expressor
         :param planner_ai: 决策者专用模型；留空则和 Expressor 用同一个
         :param emoji_search: 搜表情的函数；不传就只剩说话，决策者看不到表情工具
-        :param enable_tools: 决策者是否用工具调用；关掉就退回单轮 JSON 决策
         :param planner_rounds: 决策循环最多几轮（搜 → 发 两轮就够）
         :param emoji_policy: 发表情的节制（间隔 + 不重复）；模型看不见自己上次什么时候发的
         :param reply_mode: 'two_stage' = 决策者 + 表达者；'agent' = 单模型，回话就是 reply 工具
@@ -649,7 +648,6 @@ class ChatPlugin(Plugin):
         self.tracer = tracer
         self.enable_planner = enable_planner
         self.emoji_search = emoji_search
-        self.enable_tools = enable_tools
         self.planner_rounds = planner_rounds
         self.emoji_policy = emoji_policy or EmojiPolicy()
         self.reply_mode = reply_mode
@@ -723,7 +721,7 @@ class ChatPlugin(Plugin):
         images = await self._collect_images(history)
 
         # agent 模式：判断和台词在同一次调用里完成，不走表达者
-        if self.reply_mode == 'agent' and self._tools_ready:
+        if self.reply_mode == 'agent':
             return await self._agent_round(ctx, blocks, transcript, images, must_speak, necessity, now)
 
         started = time.perf_counter()
@@ -735,12 +733,8 @@ class ChatPlugin(Plugin):
         errors: list[str] = []
         if self.enable_planner:
             self._emit(ctx, Status.DECIDING, f'{necessity.kind} · 分数 {necessity.score}')
-            if self._tools_ready:
-                decided, emoji, at, ref, tool_log = await self._plan_with_tools(
-                    ctx, blocks, transcript, images, errors)
-            else:
-                decided = await self._plan(ctx, necessity, blocks, transcript, images, errors)
-                tool_log = ''
+            decided, emoji, at, ref, tool_log = await self._plan_with_tools(
+                ctx, blocks, transcript, images, errors)
             # 决策本身没跑通（超时/报错）：不算「不发言」，照走表达者
             if decided is None:
                 self._emit(ctx, Status.PLANNER_FAILED,
@@ -782,11 +776,6 @@ class ChatPlugin(Plugin):
         """
         bus.publish(status, chat_id=ctx.msg.reply_target, chat_name=ctx.contact,
                     msg_id=getattr(ctx.msg, 'msg_id', ''), detail=detail, **fields)
-
-    @property
-    def _tools_ready(self) -> bool:
-        """ 决策者能不能用工具。后端不支持就退回单轮 JSON，功能不受影响。 """
-        return self.enable_tools and bool(getattr(self.planner_ai, 'supports_tools', False))
 
     def _must_note(self, ctx: MessageContext, kind: str) -> str:
         """ 「必须回应」那句话，指到**具体是哪条**（`#标签`）。
@@ -1190,8 +1179,8 @@ class ChatPlugin(Plugin):
         """ 交给模型的 ref 候选清单。窗口要和聊天记录一致，否则会列出记录里看不见的标签。 """
         return ctx.history.latest_n(self.context_length).ref_candidates()
 
-    async def _planner_prompt(self, ctx: MessageContext, tools: tuple[str, ...] = ()) -> str:
-        """ tools 传空就用单轮 JSON 那套输出格式，传工具名就换成工具行动那套。 """
+    async def _planner_prompt(self, ctx: MessageContext, tools: tuple[str, ...]) -> str:
+        """ 决策者的 system prompt。tools 决定渲染出哪些工具说明。 """
         persona = self.persona_for(ctx.contact)
         return await self.planner_template.render_async(behavior_style=persona.behavior_style,
                                                         self_name=ctx.self_name, contact=ctx.contact,
@@ -1199,7 +1188,7 @@ class ChatPlugin(Plugin):
                                                         aliases=persona.aliases, tools=tools,
                                                         refs=self._ref_candidates(ctx))
 
-    async def _agent_prompt(self, ctx: MessageContext, tools: tuple[str, ...] = ()) -> str:
+    async def _agent_prompt(self, ctx: MessageContext, tools: tuple[str, ...]) -> str:
         """ agent 模式的 system prompt：人设 + 行动准则 + 工具说明，一次调用把判断和台词都做了。 """
         persona = self.persona_for(ctx.contact)
         return await self.agent_template.render_async(
@@ -1224,17 +1213,6 @@ class ChatPlugin(Plugin):
                 cleaned.append(replace(line, text=text))
         return cleaned
 
-    async def _plan(self, ctx: MessageContext, necessity: NecessityScore, blocks: dict[str, str],
-                    transcript: str, images: list[tuple[str, bytes]],
-                    errors: list[str]) -> Plan | None:
-        """ 单轮 JSON 决策。后端不支持工具时走这条。 """
-        raw = await self._ask(await self._planner_prompt(ctx), self._compose(ctx, blocks, transcript),
-                              ctx, images, ai=self.planner_ai, errors=errors)
-        if not raw:
-            return None
-        # ai.chat 返回的是按行切好的列表，决策是一整块 JSON，拼回去再解析
-        return Plan.parse('\n'.join(raw))
-
     async def _express(self, ctx: MessageContext, blocks: dict[str, str], transcript: str,
                        images: list[tuple[str, bytes]], plan: str,
                        errors: list[str]) -> list[str] | None:
@@ -1249,16 +1227,15 @@ class ChatPlugin(Plugin):
         return await self._ask(prompt, message, ctx, images, errors=errors)
 
     async def _ask(self, prompt: str, message: str, ctx: MessageContext,
-                   images: list[tuple[str, bytes]], ai: AiProvider | None = None,
+                   images: list[tuple[str, bytes]],
                    errors: list[str] | None = None) -> list[str] | None:
         """ 调模型。超时或报错只当这次没结果——不能让一次 API 抽风拖死消息处理链。
 
         errors 给了就往里记一条原因：面板上「表达失败」和「被限流」是两回事。
         """
-        provider = ai or self.ai
         try:
             return await asyncio.wait_for(
-                provider.chat(prompt.strip(), self._build_message(message, images)), self.timeout)
+                self.ai.chat(prompt.strip(), self._build_message(message, images)), self.timeout)
         except Exception as e:
             why = reason_of(e)
             logger.warning(f'调用模型失败（{ctx.contact}）：{why}')
@@ -1270,44 +1247,32 @@ class ChatPlugin(Plugin):
     def _elapsed(started: float) -> int:
         return int((time.perf_counter() - started) * 1000)
 
-    async def _complete(self, prompt: str, message: str,
-                        ai: AiProvider | None = None) -> list[str] | None:
+    async def _complete(self, prompt: str, message: str) -> list[str] | None:
         """ 单轮纯文本调用。重放用——没有 ctx，不走 _ask 的图片分支。 """
         try:
-            return await asyncio.wait_for((ai or self.ai).chat(prompt.strip(), message), self.timeout)
+            return await asyncio.wait_for(self.ai.chat(prompt.strip(), message), self.timeout)
         except Exception as e:
             logger.warning(f'调用模型失败（重放）：{reason_of(e)}')
             return None
 
     async def replay(self, transcript: str, plan: str = '', self_name: str = '',
-                     contact: str = '', stage: str = 'all') -> dict:
-        """ 用**当前**提示词重跑这一轮，只看输出：不碰历史、不进队列、不发送。
+                     contact: str = '') -> dict:
+        """ 用**当前**提示词重跑表达这一步，只看输出：不碰历史、不进队列、不发送。
 
-        三个如实说明的限制：
+        两个如实说明的限制：
         1. 上下文只能用 trace 里存的那份聊天记录——画像 / 群用语 / 中期记忆当时注入了
            什么没有留痕，所以重放的输入比真实那一轮少几块；
-        2. 决策那一步走**单轮 JSON 模式**（线上是工具模式），两者提示词不同，
-           拿它比决策质量不可靠；
-        3. 比表达风格（replyer）是可靠的，那也是调得最多的那个。
+        2. 只重跑表达者、不重新决策：决策那步调的是工具，离线没有执行环境。所以它答的是
+           「这句话换个写法会怎样」，不是「该不该说」。比表达风格可靠，也是调得最多的那个。
         """
         started = time.perf_counter()
         persona = self.persona_for(contact)
-        new_plan = plan
-        if stage == 'all' and self.enable_planner:
-            prompt = await self.planner_template.render_async(
-                behavior_style=persona.behavior_style, self_name=self_name, contact=contact,
-                is_group=True, aliases=persona.aliases, tools=())
-            raw = await self._complete(prompt, transcript, ai=self.planner_ai)
-            decided = Plan.parse('\n'.join(raw)) if raw else None
-            new_plan = decided.render() if decided and decided.speak else ''
-
-        replyer = await self.replyer_template.render_async(
+        prompt = await self.replyer_template.render_async(
             identity=persona.identity(self_name), reply_style=persona.reply_style,
             self_name=self_name, contact=contact, is_group=True, faces=FACE_CATALOG)
-        body = f'{new_plan}\n\n{transcript}' if new_plan else transcript
-        reply = await self._complete(replyer, body)
-        return {'stage': stage, 'plan': new_plan, 'reply': reply or [],
-                'latency_ms': self._elapsed(started)}
+        body = f'{plan}\n\n{transcript}' if plan else transcript
+        reply = await self._complete(prompt, body)
+        return {'plan': plan, 'reply': reply or [], 'latency_ms': self._elapsed(started)}
 
     def _trace(self, ctx: MessageContext, necessity: NecessityScore, transcript: str,
                response: list[str] | None, latency_ms: int, plan: str,

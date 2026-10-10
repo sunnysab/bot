@@ -36,20 +36,28 @@ from tools import AssistantTurn, ToolCall
 PLANNER_MARK = '决策者'          # planner.txt 里独有的字眼，用来区分两次调用
 
 
+# 决策者默认「说一句」；传 AssistantTurn() 表示这一轮不发言，传 None 表示决策调用失败
+_SPEAK = AssistantTurn(tool_calls=(ToolCall('speak-1', 'speak',
+                                            {'intent': '附和一句', 'emotion': '无奈'}),))
+
+
 class FakeAi:
-    """ Planner 和 Expressor 共用，用 prompt 里的标记区分。 """
+    """ 决策者 + 表达者共用，用 prompt 里的标记区分。
 
-    supports_tools = False      # 不支持工具的假后端；工具路径另外用 ToolAi 测
+    决策者走 `chat_tools`（工具模式），表达者走 `chat`。
+    """
 
-    def __init__(self, reply=('收到',), plan='{"speak": true, "intent": "附和一句", "emotion": "无奈"}'):
+    def __init__(self, reply=('收到',), turn=_SPEAK):
         self.reply = list(reply) if reply else None
-        self.plan = plan
+        self.turn = turn
         self.calls = []
+
+    async def chat_tools(self, prompt, messages, tools):
+        self.calls.append((prompt, messages[0]['content']))
+        return self.turn
 
     async def chat(self, prompt, message):
         self.calls.append((prompt, message))
-        if PLANNER_MARK in prompt:
-            return [self.plan] if self.plan else None
         return self.reply
 
     @property
@@ -71,8 +79,6 @@ def _emoji(md5='a' * 32, desc='无语', scene='别人说了很离谱的话', cou
 
 class ToolAi:
     """ 会用工具的假决策者：turns 是每轮依次返回的东西。 """
-
-    supports_tools = True
 
     def __init__(self, turns=(), reply=('收到',)):
         self.turns = list(turns)
@@ -241,14 +247,14 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
 
     async def test_must_respond_ignores_a_silent_plan(self):
         """ 被点名时决策者说「不发言」不算数——必须回应的场景得真回。 """
-        self.plugin.ai = FakeAi(plan='{"speak": false, "analysis": "接不上"}')
+        self.plugin.ai = FakeAi(turn=AssistantTurn())
         reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
         self.assertEqual(reply.texts, ['收到'])
         self.assertNotIn('【决策】', self.plugin.ai.reply_calls[0][1])
 
     async def test_forced_reply_ignores_a_silent_plan(self):
         """ 手动触发：决策者仍可说「不发言」，但人点了它，就得不说话也不算数。 """
-        self.plugin.ai = FakeAi(plan='{"speak": false, "analysis": "接不上"}')
+        self.plugin.ai = FakeAi(turn=AssistantTurn())
         reply = await self.plugin.handle(make_ctx(
             make_msg(is_chatroom=True, content='大家好啊'), forced=True))
         self.assertEqual(reply.texts, ['收到'])
@@ -267,7 +273,7 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertIn('不是 Bot 本人', self.ai.planner_calls[0][0])
 
     async def test_silent_plan_skips_expressor(self):
-        self.plugin.ai = FakeAi(plan='{"speak": false, "analysis": "接不上话"}')
+        self.plugin.ai = FakeAi(turn=AssistantTurn())
         reply = await self.plugin.handle(proactive_ctx())
         self.assertEqual(reply.texts, [])
         self.assertTrue(reply.stop)
@@ -293,7 +299,7 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
 
     async def test_planner_failure_does_not_mute_the_bot(self):
         """ 决策者挂了就退回单段，不能因此变吧。 """
-        self.plugin.ai = FakeAi(plan=None)
+        self.plugin.ai = FakeAi(turn=None)
         reply = await self.plugin.handle(proactive_ctx())
         self.assertEqual(reply.texts, ['收到'])
         self.assertNotIn('【决策】', self.plugin.ai.reply_calls[0][1])
@@ -439,8 +445,6 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
     async def test_model_failure_does_not_break_the_round(self):
         """ 一次 API 抽风不能把消息处理链拖死。 """
         class Boom:
-            supports_tools = False
-
             async def chat(self, prompt, message):
                 raise RuntimeError('api down')
 
@@ -539,7 +543,7 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
     async def test_tracer_records_silent_turns(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'trace.jsonl'
-            self.plugin.ai = FakeAi(plan='{"speak": false, "analysis": "接不上"}')
+            self.plugin.ai = FakeAi(turn=AssistantTurn())
             self.plugin.tracer = TraceLogger(path)
             await self.plugin.handle(proactive_ctx())
             record = json.loads(path.read_text(encoding='utf-8').strip())
@@ -707,7 +711,7 @@ class TestIdleBackoffInPlugin(unittest.IsolatedAsyncioTestCase):
     """ 连着几轮没开口就别再每条都花一次决策模型调用。 """
 
     def silent_plugin(self):
-        self.ai = FakeAi(plan='{"speak": false, "analysis": "没什么可说的"}')
+        self.ai = FakeAi(turn=AssistantTurn())
         return ChatPlugin(self.ai, context_length=10)
 
     async def test_silent_rounds_stop_calling_the_planner(self):
@@ -866,12 +870,6 @@ class TestToolLoop(unittest.IsolatedAsyncioTestCase):
         await plugin.handle(proactive_ctx())
         self.assertNotIn('send_emoji', ai.tools_seen[0])
 
-    async def test_backend_without_tool_support_falls_back_to_json(self):
-        """ 不支持工具的后端要回到单轮 JSON 决策，功能不能少。 """
-        plugin = ChatPlugin(FakeAi(), context_length=10, emoji_search=FakeEmojiSearch())
-        reply = await plugin.handle(proactive_ctx())
-        self.assertEqual(reply.texts, ['收到'])
-
     async def test_emoji_cooldown_refuses_a_second_sticker(self):
         """ 模型看不见自己上次什么时候发的表情，节制只能由程序管。 """
         turns = [AssistantTurn(tool_calls=(_call('search_emoji', keyword='无语'),)),
@@ -886,24 +884,18 @@ class TestToolLoop(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(second.emoji)
         self.assertIn('刚发过表情', json.dumps(self.ai.rounds[-1], ensure_ascii=False))
 
-    async def test_prompt_switches_between_tool_and_json_mode(self):
-        """ 提示词的输出格式必须跟走哪条路一致，不能两个都写。 """
+    async def test_prompt_says_how_to_act_without_repeating_the_tools(self):
+        """ 工具用法只写在 schema 的 description 里；prompt 只留跨工具的规则。 """
         plugin = self.plugin([])
-        ctx = proactive_ctx()
-        tool_prompt = await plugin._planner_prompt(ctx, ('search_emoji', 'send_emoji', 'speak', 'revoke'))
-        json_prompt = await plugin._planner_prompt(ctx)
+        prompt = await plugin._planner_prompt(proactive_ctx(),
+                                              ('search_emoji', 'send_emoji', 'speak', 'revoke'))
 
-        self.assertIn('什么工具都不调，就等于这一轮不发言', tool_prompt)
-        self.assertIn('search_emoji', tool_prompt)
-        self.assertIn('revoke', tool_prompt)
-        self.assertNotIn('只输出一个 JSON', tool_prompt)
-
-        self.assertIn('只输出一个 JSON', json_prompt)
-        self.assertNotIn('search_emoji', json_prompt)
-
+        self.assertIn('什么工具都不调，就等于这一轮不发言', prompt)
+        self.assertIn('send_emoji', prompt)          # 组合规则里要提它
+        self.assertNotIn('search_emoji', prompt)     # 单工具用法不在这里重抄
+        self.assertNotIn('只输出一个 JSON', prompt)
         # {% if %} 独占一行不能留下空行，白烧 token
-        for text in (tool_prompt, json_prompt):
-            self.assertNotIn('\n\n\n', text)
+        self.assertNotIn('\n\n\n', prompt)
 
     async def test_emoji_tools_are_left_out_of_the_prompt_when_unavailable(self):
         """ 没接表情搜索时，提示词里不能提搜表情——不然模型会去调一个不存在的工具。 """

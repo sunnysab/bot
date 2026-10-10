@@ -127,7 +127,7 @@ async def amain(args) -> None:
         alternate_probability=config.style_probability)
 
     two_stage = ChatPlugin(ai, context_length=30, persona=persona, enable_planner=True,
-                           enable_tools=True, planner_ai=planner, emoji_search=no_emoji,
+                           planner_ai=planner, emoji_search=no_emoji,
                            planner_rounds=3, timeout=config.request_timeout)
     agent = ChatPlugin(ai, context_length=30, persona=persona, reply_mode='agent',
                        planner_ai=planner, emoji_search=no_emoji,

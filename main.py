@@ -18,7 +18,7 @@ def main():
     runtime = Runtime(config)
     if config.planner_url:
         logger.info(f'Planner 使用本地模型: {config.planner_url} / {config.planner_model} '
-                    f'(thinking={config.planner_thinking}, json_schema={config.planner_json_schema})')
+                    f'(thinking={config.planner_thinking})')
     logger.info(f'机器人别名: {"、".join(runtime.chat_plugin.persona.aliases)}')
     logger.info(f'联网搜索: {"已接入 Tavily" if runtime.chat_plugin.web_search else "未配置，模型没有 web_search 工具"}')
     logger.info(f'专注模式 {"开" if config.enable_focus else "关"}：'

@@ -38,7 +38,6 @@ from moments import MomentKeeper, MomentStore
 from necessity import IdleBackoff, SpeechLimiter
 from persona import Persona
 from personas import PersonaStore
-from planner import PLAN_RESPONSE_FORMAT
 from plugin import ChatPlugin, EndProcessing, RepeatPlugin, ReplyPolicy
 from profiles import ProfileStore
 from reply_trace import TraceLogger
@@ -118,7 +117,7 @@ HOT_FIELDS = frozenset({
     'typo_rate', 'dry_run', 'quote_replies',
     'personality', 'reply_style', 'behavior_style', 'reply_styles', 'style_probability',
     'enable_planner', 'reply_mode', 'planner_url', 'planner_model', 'planner_key', 'planner_temperature',
-    'planner_max_tokens', 'planner_thinking', 'planner_json_schema', 'enable_tools',
+    'planner_max_tokens', 'planner_thinking',
     'planner_rounds', 'request_timeout', 'trace_path',
     'tavily_key',
 })
@@ -260,7 +259,7 @@ class Runtime:
                           habits=self.habits, memories=self.memories,
                           tracer=TraceLogger(config.trace_path),
                           enable_planner=config.enable_planner, planner_ai=self.planner_ai,
-                          emoji_search=self.bot.search_emoji, enable_tools=config.enable_tools,
+                          emoji_search=self.bot.search_emoji,
                           planner_rounds=config.planner_rounds, emoji_policy=self.emoji_policy,
                           reply_mode=config.reply_mode, revoke=self.bot.revoke,
                           member_lookup=self.bot.lookup_member,
@@ -364,7 +363,5 @@ def _providers(config: Config):
     if config.planner_url:
         planner = OpenAI(url=config.planner_url, key=config.planner_key, model=config.planner_model,
                          temperature=config.planner_temperature, max_tokens=config.planner_max_tokens,
-                         # thinking 与 json_schema 二选一：开 schema 会压掉思考（见 config 注释）
-                         extra_body={'chat_template_kwargs': {'enable_thinking': config.planner_thinking}},
-                         response_format=PLAN_RESPONSE_FORMAT if config.planner_json_schema else None)
+                         extra_body={'chat_template_kwargs': {'enable_thinking': config.planner_thinking}})
     return ai, planner

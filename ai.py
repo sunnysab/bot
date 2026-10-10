@@ -104,9 +104,6 @@ def _error_message(error: Exception) -> str:
 class AiProvider:
     """ 聊天机器人 """
 
-    # 后端支不支持工具调用。不支持就退回单段的 JSON 决策，不影响其余功能。
-    supports_tools: bool = False
-
     @staticmethod
     def silent(s: str) -> bool:
         """ 本轮不发言 """
@@ -118,8 +115,8 @@ class AiProvider:
 
     async def chat_tools(self, prompt: str, messages: list[dict],
                          tools: list[dict]) -> AssistantTurn | None:
-        """ 带工具的一轮调用。返回 None 表示这个后端不支持，调用方自己决定退路。 """
-        return None
+        """ 带工具的一轮调用。 """
+        raise NotImplementedError
 
     async def describe(self, image: bytes, max_tokens: int = 1024,
                        prompt: str = DESCRIBE_PROMPT, model: str | None = None) -> str | None:
@@ -138,11 +135,8 @@ class AiProvider:
 class OpenAI(AiProvider):
     """ OpenAI 兼容接口 """
 
-    supports_tools = True
-
     def __init__(self, url: str, key: str, model: str = 'deepseek-chat', temperature: float = 0.8,
-                 top_p: float = 0.95, max_tokens: int | None = None, extra_body: dict | None = None,
-                 response_format: dict | None = None):
+                 top_p: float = 0.95, max_tokens: int | None = None, extra_body: dict | None = None):
         super().__init__()
 
         from openai import AsyncOpenAI
@@ -152,14 +146,11 @@ class OpenAI(AiProvider):
         self.top_p = top_p
         self.max_tokens = max_tokens
         self.extra_body = extra_body or {}
-        self.response_format = response_format
         self.client = AsyncOpenAI(base_url=url, api_key=key)
 
     async def chat(self, prompt: str, message: str | list) -> list[str] | None:
         """ 聊天 """
         extra = {'max_tokens': self.max_tokens} if self.max_tokens else {}
-        if self.response_format:
-            extra['response_format'] = self.response_format
         response = await self.client.chat.completions.create(
             model=self.model,
             temperature=self.temperature,

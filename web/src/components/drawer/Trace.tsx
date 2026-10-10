@@ -29,11 +29,11 @@ export function Trace({ msgId, picked, xml, tick }: Props) {
   if (view.error) return <div className="empty">取不到：{view.error}</div>;
   const tr = view.trace;
 
-  const replay = async (stage: string) => {
+  const replay = async () => {
     setOut('重放中（会真的调模型）…');
-    const r = await post<ReplayRes>(`/api/replay/${encodeURIComponent(msgId)}`, { stage });
+    const r = await post<ReplayRes>(`/api/replay/${encodeURIComponent(msgId)}`, {});
     setOut(r.error ? `失败：${r.error}`
-      : `决策：${r.plan || '（不发言）'}\n\n表达（${r.latency_ms} ms）：\n${(r.reply ?? []).join('\n')}`);
+      : `表达（${r.latency_ms} ms）：\n${(r.reply ?? []).join('\n')}`);
   };
 
   return (
@@ -74,13 +74,12 @@ export function Trace({ msgId, picked, xml, tick }: Props) {
           <Pre text={tr.transcript} />
           <h3>重放</h3>
           <div className="detail">
-            用当前提示词重跑这一轮：不碰历史、不进队列、也不发送，但会真的花 token。
-            上下文只能用当时存下的聊天记录（画像/群用语/记忆没留痕），决策那一步走单轮 JSON 模式。
-            比表达风格可靠，比决策质量不可靠。
+            用当前提示词重跑表达这一步：不碰历史、不进队列、也不发送，但会真的花 token。
+            上下文只能用当时存下的聊天记录（画像 / 群用语 / 记忆没留痕）；不重新决策——
+            决策那步调的是工具，离线没有执行环境。所以说的是「这句话换个写法会怎样」。
           </div>
           <div style={{ margin: '6px 0' }}>
-            <button onClick={() => replay('all')}>重放两步</button>
-            <button onClick={() => replay('expressor')}>只重放表达</button>
+            <button onClick={replay}>重放表达</button>
           </div>
           {/* 没重放过就不画这个框：`.drawer pre` 带边框，空着就是一个多余的空盒子 */}
           {out && <pre>{out}</pre>}

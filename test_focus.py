@@ -8,21 +8,29 @@ from context import ChatWindow, MessageContext
 from focus import FocusMode
 from necessity import IdleBackoff
 from plugin import ChatPlugin, ReplyPolicy
+from tools import AssistantTurn, ToolCall
 
 PLANNER_MARK = '决策者'
 
+# 决策者默认「说一句」；传 AssistantTurn() 表示这一轮不发言
+_SPEAK = AssistantTurn(tool_calls=(ToolCall('speak-1', 'speak', {'intent': '接一句'}),))
+
 
 class FakeAi:
-    supports_tools = False
+    """ 决策者走 `chat_tools`（工具模式），表达者走 `chat`。 """
 
-    def __init__(self, reply=('收到',), plan='{"speak": true, "intent": "接一句"}'):
+    def __init__(self, reply=('收到',), turn=_SPEAK):
         self.reply = list(reply)
-        self.plan = plan
+        self.turn = turn
         self.calls = []
+
+    async def chat_tools(self, prompt, messages, tools):
+        self.calls.append((prompt, messages[0]['content']))
+        return self.turn
 
     async def chat(self, prompt, message):
         self.calls.append((prompt, message))
-        return [self.plan] if PLANNER_MARK in prompt else self.reply
+        return self.reply
 
     @property
     def planner_calls(self):

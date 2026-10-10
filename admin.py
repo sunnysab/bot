@@ -100,7 +100,7 @@ CONFIG_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
                 'reply_min_gap', 'reply_rate_window', 'reply_rate_max')),
     ('人格与表达', ('personality', 'reply_style', 'behavior_style', 'reply_styles', 'style_probability')),
     ('决策者', ('reply_mode', 'enable_planner', 'planner_url', 'planner_key', 'planner_model', 'planner_temperature',
-                'planner_max_tokens', 'planner_thinking', 'planner_json_schema', 'enable_tools',
+                'planner_max_tokens', 'planner_thinking',
                 'planner_rounds')),
     ('出站', ('send_interval', 'typo_rate', 'dry_run')),
     ('图片内联', ('image_inline', 'image_shrink_threshold', 'image_shrink_target',
@@ -703,15 +703,15 @@ class Admin:
         logger.warning(f'管理后台改了分会话人设 {chat!r}：{sorted(saved) or "（清空，回全局）"}')
         return {'chat': chat, 'overrides': saved}
 
-    def replay(self, msg_id: str, stage: str = 'all') -> dict:
-        """ 用当前提示词重跑一轮。会真的花 token（面板上要确认）。 """
+    def replay(self, msg_id: str) -> dict:
+        """ 用当前提示词重跑表达那一步。会真的花 token（面板上要确认）。 """
         record = find_trace(self.runtime.config.trace_path, msg_id)
         if not record:
             raise ValueError('这一轮没有 trace——被门控拦下的没走到模型，重放不了')
         return self.call(self.runtime.chat_plugin.replay(
             record.get('transcript', ''), record.get('plan', ''),
             self_name=getattr(self._wechat, 'nickname', ''),
-            contact=record.get('contact_name', ''), stage=stage))
+            contact=record.get('contact_name', '')))
 
     def emojis(self, limit: int = 300) -> list[dict]:
         return [{'md5': item.md5, 'desc': item.desc, 'scene': item.scene,
@@ -990,7 +990,7 @@ class Admin:
                 return self._json(handler, self.delete_moment(payload.get('id', 0)))
             if route.startswith('/api/replay/'):
                 msg_id = unquote(route[len('/api/replay/'):])
-                return self._json(handler, self.replay(msg_id, payload.get('stage', 'all')))
+                return self._json(handler, self.replay(msg_id))
             self._json(handler, {'error': 'not found'}, 404)
         except ValueError as e:
             self._json(handler, {'error': str(e)}, 400)
