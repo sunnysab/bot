@@ -61,6 +61,8 @@ DEFAULT_PORT = 8099          # 8080 在本机被 iptv 占了，别用
 CHATS_LIMIT = 50
 MESSAGES_LIMIT = 300         # v1 一次拉满，daemon 的 get_messages 还不能翻页
 RPC_TIMEOUT = 15.0
+# 试回结果在内存里留几条：面板是单用户工具，翻旧账没意义
+REPLAY_KEEP = 20
 LOGIN_TIMEOUT = 60.0          # 取二维码要现走一次短链握手 + getloginqrcode，比普通 RPC 慢得多
 MEDIA_TIMEOUT = 60.0         # 图片要现下原图（实测 0.5~1.3s），比普通 RPC 慢得多
 AVATAR_TIMEOUT = 20.0        # 首次头像要现走一次 batchgetheadimg 短链（响应里带图片字节）
@@ -103,7 +105,7 @@ CONFIG_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ('出站', ('send_interval', 'typo_rate', 'dry_run')),
     ('图片内联', ('image_inline', 'image_shrink_threshold', 'image_shrink_target',
                 'image_fetch_timeout', 'image_cache_dir', 'describe_wait')),
-    ('观测', ('trace_path',)),
+    ('观测', ('trace_path', 'otel_endpoint')),
     ('改了要重启进程', ('daemon_host', 'daemon_port', 'daemon_unix', 'admin_host', 'admin_port', 'log_path', 'log_level',
                     'describe_media', 'media_cache_path', 'describe_concurrency', 'describe_timeout',
                     'describe_max_tokens', 'describe_image_max_tokens',
@@ -308,6 +310,8 @@ class Admin:
         # 面板一次刷一堆图：daemon 那边原图是串行下的（一次一张），这里限的是并发
         # 占用的 HTTP 线程数，免得附件把面板的其它请求一起拖住
         self._media_gate = threading.Semaphore(MEDIA_CONCURRENCY)
+        # 「试回一次」是后台跑的：msg_id -> {status, reply, latency_ms, error}
+        self._replays: dict[str, dict] = {}
         self.server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -701,17 +705,51 @@ class Admin:
         logger.warning(f'管理后台改了分会话人设 {chat!r}：{sorted(saved) or "（清空，回全局）"}')
         return {'chat': chat, 'overrides': saved}
 
-    def replay(self, msg_id: str) -> dict:
-        """ 用当前代码把这条重跑一遍（不发送）。跑的是真实链路，agent 模式也对。 """
+    def start_replay(self, msg_id: str) -> dict:
+        """ 用当前代码把这条重跑一遍（不发送），**立刻返回**。
+
+        一轮 LLM 要 20 秒以上，HTTP 干等只会撞上 `call()` 的 15 秒超时，然后被当成 500
+        ——而协程其实还在跑（面板上就这么显示成失败）。所以改成「发起 + 轮询」：
+        这里记一条 running，协程跑完把结果写回 `_replays`，面板 GET 同一个地址取。
+        """
+        job = self._replays.get(msg_id)
+        if job and job.get('status') == 'running':
+            return {'started': False, 'running': True}
         record = find_trace(self.runtime.config.trace_path, msg_id)
         if not record:
             raise ValueError('这一轮没有 trace——被门控拦下的没走到模型，试回不了')
+        loop = self.runtime.loop
+        if loop is None:
+            raise RuntimeError('bot 的事件循环还没起来')
+        self._remember_replay(msg_id, {'status': 'running'})
+        asyncio.run_coroutine_threadsafe(self._run_replay(msg_id, record), loop)
+        return {'started': True}
+
+    async def _run_replay(self, msg_id: str, record: dict) -> None:
         started = time.perf_counter()
-        reply = self.call(self.runtime.bot.replay(record.get('contact', ''), int(msg_id)))
+        try:
+            reply = await self.runtime.bot.replay(record.get('contact', ''), int(msg_id))
+        except Exception as e:  # noqa: BLE001 —— 失败也要让面板看到原因，不能只留个 running
+            logger.warning(f'试回失败（msg_id={msg_id}）: {e}')
+            self._remember_replay(msg_id, {'status': 'error', 'error': str(e) or repr(e)})
+            return
         if reply is None:
-            raise ValueError('这条已经不在 daemon 的缓存里，拼不出当时的聊天记录')
-        return {'reply': [line.text for line in reply.lines],
-                'latency_ms': int((time.perf_counter() - started) * 1000)}
+            self._remember_replay(msg_id, {'status': 'error',
+                                           'error': '这条已经不在 daemon 的缓存里，拼不出当时的聊天记录'})
+            return
+        self._remember_replay(msg_id, {'status': 'done',
+                                       'reply': [line.text for line in reply.lines],
+                                       'latency_ms': int((time.perf_counter() - started) * 1000)})
+
+    def replay_result(self, msg_id: str) -> dict:
+        """ 面板轮询试回结果；没发起过就是 idle。 """
+        return self._replays.get(msg_id) or {'status': 'idle'}
+
+    def _remember_replay(self, msg_id: str, result: dict) -> None:
+        # HTTP 线程读、事件循环写。GIL 下 dict 的赋值/弹出是原子的，这里不再加锁
+        self._replays[msg_id] = result
+        while len(self._replays) > REPLAY_KEEP:
+            self._replays.pop(next(iter(self._replays)), None)
 
     def emojis(self, limit: int = 300) -> list[dict]:
         return [{'md5': item.md5, 'desc': item.desc, 'scene': item.scene,
@@ -918,6 +956,8 @@ class Admin:
                 return self._json(handler, {'moments': self.moments(chat)})
             if route.startswith('/api/trace/'):
                 return self._json(handler, self.trace(unquote(route[len('/api/trace/'):])))
+            if route.startswith('/api/replay/'):
+                return self._json(handler, self.replay_result(unquote(route[len('/api/replay/'):])))
             if route == '/api/media':
                 data, content_type = self.media((query.get('msg_id') or [''])[0])
                 return self._send_bytes(handler, data, content_type,
@@ -990,7 +1030,7 @@ class Admin:
                 return self._json(handler, self.delete_moment(payload.get('id', 0)))
             if route.startswith('/api/replay/'):
                 msg_id = unquote(route[len('/api/replay/'):])
-                return self._json(handler, self.replay(msg_id))
+                return self._json(handler, self.start_replay(msg_id))
             self._json(handler, {'error': 'not found'}, 404)
         except ValueError as e:
             self._json(handler, {'error': str(e)}, 400)
@@ -1277,8 +1317,19 @@ def _self_check() -> None:
         return types.SimpleNamespace(lines=[types.SimpleNamespace(text='收到')])
 
     runtime.bot.replay = fake_replay
-    result = admin.replay('123')
-    assert result['reply'] == ['收到'] and result['latency_ms'] >= 0, result
+    asyncio.run(admin._run_replay('123', {'contact': '某群'}))
+    result = admin.replay_result('123')
+    assert result['status'] == 'done' and result['reply'] == ['收到'], result
+    assert result['latency_ms'] >= 0, result
+    assert admin.replay_result('没跑过') == {'status': 'idle'}
+
+    # 没有 trace 的轮次（被门控拦下）要在发起那一刻就被拒，不能留一个永远 running 的槽
+    module.find_trace = lambda _path, _msg_id: None
+    try:
+        admin.start_replay('123')
+        raise AssertionError('没有 trace 应该被拒')
+    except ValueError:
+        pass
     module.find_trace = original_find
 
     # 头像接口：daemon 那边先读盘再打网络（缓存归它），bot 只转发字节

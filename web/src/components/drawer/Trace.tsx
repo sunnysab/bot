@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { get, post } from '../../api';
 import type { ReplayRes, TraceView } from '../../api';
@@ -22,6 +22,25 @@ export function Trace({ msgId, picked, xml, tick }: Props) {
     () => msgId ? get<TraceView>(`/api/trace/${encodeURIComponent(msgId)}`) : Promise.resolve(null),
     0, [msgId, tick]);
   const [out, setOut] = useState('');
+  const [replayOn, setReplayOn] = useState(false);
+
+  // 试回是后台跑的（一轮模型调用 20 秒以上），发起之后轮询同一个地址取结果
+  const { data: job } = usePoll(
+    () => (replayOn && msgId
+      ? get<ReplayRes>(`/api/replay/${encodeURIComponent(msgId)}`)
+      : Promise.resolve(null)),
+    replayOn ? 1500 : 0, [msgId, replayOn]);
+
+  useEffect(() => {
+    if (!job) return;
+    if (job.status === 'done') {
+      setOut(`会回（${job.latency_ms} ms）：\n${(job.reply ?? []).join('\n') || '（不发言）'}`);
+      setReplayOn(false);
+    } else if (job.status === 'error') {
+      setOut(`失败：${job.error ?? '未知错误'}`);
+      setReplayOn(false);
+    }
+  }, [job]);
 
   if (!msgId) return <div className="empty">点一条消息看它为什么被跳过</div>;
   const view = data;
@@ -31,9 +50,12 @@ export function Trace({ msgId, picked, xml, tick }: Props) {
 
   const replay = async () => {
     setOut('试回中（会真的调模型，但不会发出去）…');
+    setReplayOn(true);
     const r = await post<ReplayRes>(`/api/replay/${encodeURIComponent(msgId)}`, {});
-    setOut(r.error ? `失败：${r.error}`
-      : `会回（${r.latency_ms} ms）：\n${(r.reply ?? []).join('\n')}`);
+    if (r.error) {
+      setOut(`失败：${r.error}`);
+      setReplayOn(false);
+    }
   };
 
   return (

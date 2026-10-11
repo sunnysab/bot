@@ -170,9 +170,14 @@ export interface TraceView {
   trace: TraceRecord | null;
 }
 
+/** 试回是后台跑的：POST 只负责发起，结果靠轮询同一个地址拿（见 admin.start_replay）。 */
 export interface ReplayRes {
+  status?: 'idle' | 'running' | 'done' | 'error';
+  started?: boolean;
+  running?: boolean;
   reply?: string[];
   latency_ms?: number;
+  error?: string;
 }
 
 export interface StatsRes {
