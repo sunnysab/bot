@@ -222,14 +222,14 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertIn('别填', ChatWindow().ref_candidates())
 
         # 提示词里得真带上这份候选，否则 ref 规则还是让模型满记录乱挑
-        prompt = await self.plugin._agent_prompt(make_ctx(make_msg(), history), ('reply',))
+        prompt = await self.plugin._agent_prompt(make_ctx(make_msg(is_chatroom=True), history), ('reply',))
         self.assertIn(message_handle(2000), prompt)
 
     async def test_quote_feedback_names_what_it_quotes(self):
         """ 引用回执要点出被引那条是什么，否则模型看不见自己引的是表情还是照片。 """
         history = sample_history()
         history.append('Bob', '[表情 #a1b2c3：猫咪瞪大双眼一脸震惊]', 2, msg_id=99)
-        ctx = make_ctx(make_msg(content='震惊啥'), history)
+        ctx = make_ctx(make_msg(is_chatroom=True, content='震惊啥'), history)
         _, note = self.plugin._resolve_ref({'ref': message_handle(99)}, ctx)
         self.assertIn('猫咪瞪大双眼', note)
         self.assertIn('Bob', note)
@@ -1149,6 +1149,17 @@ class TestRefTool(unittest.IsolatedAsyncioTestCase):
         _, note = ChatPlugin._resolve_ref({'ref': '#nope'}, self.ctx())
         self.assertIn('没有「#nope」', note)
 
+    async def test_private_chat_does_not_quote(self):
+        """ 私聊只有一个人，引用框对着谁都是他——模型填了 ref 也不引，候选里干脆不列。 """
+        handle = message_handle(self.SVRID)
+        plugin = self.plugin([AssistantTurn(tool_calls=(_call('reply', text='这熊猫', ref=handle),))])
+        ctx = self.ctx()
+        ctx.msg.is_chatroom = False
+        reply = await plugin.handle(ctx)
+        self.assertEqual(reply.texts, ['这熊猫'])
+        self.assertEqual(reply.lines[0].ref, 0)
+        self.assertNotIn(handle, self.ai.prompts[0])
+
     async def test_two_stage_speak_carries_the_ref(self):
         handle = message_handle(self.SVRID)
         ai = ToolAi([AssistantTurn(tool_calls=(_call('speak', intent='附和', ref=handle),))])
@@ -1448,6 +1459,15 @@ class TestAgentMode(unittest.IsolatedAsyncioTestCase):
         reply = await plugin.handle(make_ctx(make_msg(is_chatroom=False)))
         self.assertEqual(reply.texts, ['在'])
         self.assertIn('必须回应', json.dumps(self.ai.rounds[1], ensure_ascii=False))
+
+    async def test_no_forced_reply_when_i_already_have_the_last_word(self):
+        """ 这条发出时上一轮还在跑，自己的回复已经落在它后面——不再强制回一遍。 """
+        history = sample_history()
+        history.append('Bot', '在呢 咋啦', 2, is_self=True)
+        plugin = self.plugin([AssistantTurn()])
+        reply = await plugin.handle(make_ctx(make_msg(is_chatroom=False, content='在吗'), history))
+        self.assertEqual(reply.texts, [])
+        self.assertEqual(len(self.ai.rounds), 1)          # 没有第二轮「必须回应」提醒
 
     async def test_agent_prompt_tells_it_the_reply_cap(self):
         """ 一轮想说的要一次调完，所以模板里得写明最多几条。 """

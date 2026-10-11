@@ -710,7 +710,10 @@ class ChatPlugin(Plugin):
         if necessity.focused and self.policy.focus:
             blocks['focus'] = self.policy.focus.describe(ctx.contact)
         # 被点名 / 私聊：必须回。手动触发也一样——人点了「回复这条」，就不该回一句「我闭嘴」
-        must_speak = ctx.forced or necessity.kind != 'proactive'
+        # 例外：这条消息发出时上一轮还在跑，等它排到队里，自己的回复已经落在它后面（见 enqueue）。
+        # 「我刚说完」不算点名——再强制回一遍就是一问两答。
+        last_is_mine = len(history) > 0 and max(history, key=lambda r: r.t).is_self
+        must_speak = ctx.forced or (necessity.kind != 'proactive' and not last_is_mine)
         if must_speak:
             # 手动触发别说成「点名」——模型会以为自己被 @ 了，去答上一个根本不存在的人
             blocks['must'] = ('这轮是人手动挑出来让你回的，必须说点什么，不能装没看见。'
@@ -956,6 +959,8 @@ class ChatPlugin(Plugin):
         ref = arg_str(arguments, 'ref')
         if not ref:
             return 0, ''
+        if not ctx.msg.is_chatroom:
+            return 0, '（这是私聊，不用引用。）'
         record = ctx.history.find_by_handle(ref)
         if record is None:
             return 0, f'（聊天记录里没有「{ref}」这条，这条就不引用了。）'
@@ -1179,7 +1184,12 @@ class ChatPlugin(Plugin):
         return '\n\n'.join(lines)
 
     def _ref_candidates(self, ctx: MessageContext) -> str:
-        """ 交给模型的 ref 候选清单。窗口要和聊天记录一致，否则会列出记录里看不见的标签。 """
+        """ 交给模型的 ref 候选清单。窗口要和聊天记录一致，否则会列出记录里看不见的标签。
+
+        私聊不列：只有一个人，引用框对着谁都是他，微信里看着多余。
+        """
+        if not ctx.msg.is_chatroom:
+            return '  （这是私聊，ref 一律别填）'
         return ctx.history.latest_n(self.context_length).ref_candidates()
 
     async def _planner_prompt(self, ctx: MessageContext, tools: tuple[str, ...]) -> str:
