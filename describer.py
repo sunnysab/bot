@@ -12,6 +12,7 @@ from dataclasses import replace
 
 from loguru import logger
 
+import otel
 from ai import IMAGE_DESCRIBE_PROMPT, IMAGE_PROMPT_VERSION, AiProvider, reason_of
 from context import SingleRecord
 from emojis import EMOJI_DESCRIBE_PROMPT, Emoji, EmojiLibrary, parse_description
@@ -256,20 +257,25 @@ class MediaDescriber:
             self._inflight.pop(media.md5, None)
 
     async def _download_and_describe(self, media: Media, download) -> str | None:
-        try:
-            image = await download()
-        except Exception as e:  # noqa: BLE001 —— 取字节失败和模型失败要分开算冷却期
-            raise MediaUnavailable(str(e)) from e
-        if not image:
-            raise MediaUnavailable('下载结果为空')
-        if media.kind == 'image':
-            description = await self._ai.describe(image, max_tokens=self._image_max_tokens or self._max_tokens,
-                                                  prompt=IMAGE_DESCRIBE_PROMPT, model=self._model)
-        else:
-            description = await self._ai.describe(image, max_tokens=self._max_tokens, model=self._model)
-        if description:
-            self._cache.put(media.md5, media.kind, description, self._model, self._version(media))
-        return description
+        with otel.span('media.describe', {'wxbot.media_kind': media.kind,
+                                          'gen_ai.request.model': self._model}):
+            try:
+                image = await download()
+            except Exception as e:  # noqa: BLE001 —— 取字节失败和模型失败要分开算冷却期
+                raise MediaUnavailable(str(e)) from e
+            if not image:
+                raise MediaUnavailable('下载结果为空')
+            if media.kind == 'image':
+                description = await self._ai.describe(
+                    image, max_tokens=self._image_max_tokens or self._max_tokens,
+                    prompt=IMAGE_DESCRIBE_PROMPT, model=self._model)
+            else:
+                description = await self._ai.describe(image, max_tokens=self._max_tokens,
+                                                      model=self._model)
+            if description:
+                self._cache.put(media.md5, media.kind, description, self._model,
+                                self._version(media))
+            return description
 
 
 class EmojiDescriber:

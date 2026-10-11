@@ -9,6 +9,7 @@ from typing import Any
 from loguru import logger
 from weixin_bot import Message, WeChatBot, WeChatBotError
 
+import otel
 from context import SYSTEM_KINDS, ChatWindow, MessageKind, message_handle
 from emojis import Emoji
 from media import parse_reference_media, render
@@ -162,8 +163,10 @@ class Wechat:
         logger.info(f'To {receiver}: {text}')
         # 返回值里带 daemon 给的 msg_id（微信服务端消息 ID）。管理后台靠它把
         # 「排队中 → 已发送」贴到 daemon 库里的那条出站记录上，不能丢
-        return await self._bot.send_text(to=receiver, text=text, at_users=at_users, at_names=at_names,
-                                         ref_svrid=ref_svrid)
+        with otel.span('daemon.send_text', {'wxbot.chat_id': receiver, 'wxbot.chars': len(text),
+                                            'wxbot.at': bool(at_users)}):
+            return await self._bot.send_text(to=receiver, text=text, at_users=at_users,
+                                             at_names=at_names, ref_svrid=ref_svrid)
 
     async def search_emoji(self, keyword: str, limit: int = 10) -> list[Emoji]:
         """ 按关键词搜表情。返回的已经是可直接发送的完整元数据。 """
@@ -180,7 +183,8 @@ class Wechat:
             logger.info(f'[DRY RUN] To {receiver}: 表情「{emoji.desc or emoji.md5}」')
             return {'sent': False, 'dry_run': True}
         logger.info(f'To {receiver}: 表情「{emoji.desc or emoji.md5}」')
-        return await self._bot.send_emoji(to=receiver, emoji=emoji.to_daemon())
+        with otel.span('daemon.send_emoji', {'wxbot.chat_id': receiver}):
+            return await self._bot.send_emoji(to=receiver, emoji=emoji.to_daemon())
 
     async def send_pat(self, receiver: str, target: str = '') -> dict:
         """ 拍一拍。群聊要 `target`（被拍成员 wxid）；私聊留空即拍对方。 """
@@ -267,12 +271,14 @@ class Wechat:
 
     async def _fetch_media(self, msg_id: int) -> tuple[bytes, str]:
         """ 真正问 daemon 要一次字节：分块下载流，扩展名从元数据的 filename 里取。 """
-        stream = await self._bot.open_download(msg_id=msg_id)
-        meta = await stream.open()
-        data = b''.join([chunk async for chunk in stream.chunks()])
-        if not data:
-            raise ValueError(f'daemon 没返回附件内容（msg_id={msg_id}）')
-        return data, Path(str(meta.get('filename') or '')).suffix.lstrip('.').lower()
+        with otel.span('daemon.fetch_media', {'wxbot.msg_id': str(msg_id)}):
+            stream = await self._bot.open_download(msg_id=msg_id)
+            meta = await stream.open()
+            data = b''.join([chunk async for chunk in stream.chunks()])
+            if not data:
+                raise ValueError(f'daemon 没返回附件内容（msg_id={msg_id}）')
+            otel.mark({'wxbot.bytes': len(data)})
+            return data, Path(str(meta.get('filename') or '')).suffix.lstrip('.').lower()
 
     def _finish_media(self, msg_id: int, task: asyncio.Task) -> None:
         """ 下载结束：成功就留在内存里（有上限），失败什么都不记。 """
@@ -338,9 +344,11 @@ class Wechat:
         翻页游标是 daemon 的 `messages.id`（不是 64 位的 msg_id）：`before_id` 往早翻，
         `after_id` 往新翻。
         """
-        return await self._bot.get_messages(limit=limit, contact=peer, reverse=True,
-                                           exclude_system=exclude_system,
-                                           before_id=before_id or None, after_id=after_id or None)
+        with otel.span('daemon.messages', {'wxbot.chat_id': peer, 'wxbot.limit': limit}):
+            return await self._bot.get_messages(limit=limit, contact=peer, reverse=True,
+                                                exclude_system=exclude_system,
+                                                before_id=before_id or None,
+                                                after_id=after_id or None)
 
     def iter_media(self, peer: str, types: tuple[int, ...] = (3, 47),
                    since: int | None = None) -> AsyncIterator[Message]:

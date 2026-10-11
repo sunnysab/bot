@@ -11,6 +11,7 @@ from typing import override
 
 from loguru import logger
 
+import otel
 from ai import AiProvider, reason_of
 from context import ChatWindow, MessageContext, SingleRecord, message_handle
 from dates import calendar_text, now_line
@@ -665,7 +666,11 @@ class ChatPlugin(Plugin):
         # 「文本/图片/表情/语音」，结果是引用（type=49）被当成「不支持的类型」没人回——
         # 而它的正文就是一句话；@ 上一篇文章也一样被吞。
         now = time.time()
-        decision = self.policy.evaluate_detailed(ctx, now, forced=ctx.forced)
+        with otel.span('gate.check'):
+            decision = self.policy.evaluate_detailed(ctx, now, forced=ctx.forced)
+            otel.mark({'wxbot.score': decision.score, 'wxbot.threshold': decision.threshold,
+                       'wxbot.gate_allowed': decision.allowed,
+                       'wxbot.gate_blocked_by': decision.blocked_by or ''})
         if ctx.forced:
             self._emit(ctx, Status.MANUAL, f'手动触发 · 必要性 {decision.score}/{decision.threshold}')
         if not decision.allowed:
@@ -674,9 +679,11 @@ class ChatPlugin(Plugin):
             self._emit(ctx, blocked, decision.detail, score=decision.score)
             return None
         necessity = decision.score_obj
+        otel.mark({'wxbot.trigger': necessity.kind})
 
         history: ChatWindow = ctx.history.latest_n(self.context_length)
-        blocks = self._context_blocks(ctx, history)
+        with otel.span('context.build'):
+            blocks = self._context_blocks(ctx, history)
         # 这两块是「本轮」的事：专注状态和必须回应，都放请求正文，不进 system prompt
         if necessity.focused and self.policy.focus:
             blocks['focus'] = self.policy.focus.describe(ctx.contact)
@@ -693,6 +700,8 @@ class ChatPlugin(Plugin):
         transcript = '以下聊天记录供你参考：\n\n' + history.transcript(_fresh_ids(ctx))
         # 窗口里的图一并取回来附给模型（新→旧、按媒体去重）。取不到就少一张，不影响回复
         images = await self._collect_images(history)
+        otel.mark({'wxbot.context_turns': len(history), 'wxbot.transcript_chars': len(transcript),
+                   'wxbot.images': len(images), 'wxbot.fresh': len(ctx.fresh)})
 
         return await self._agent_round(ctx, blocks, transcript, images, must_speak, necessity, now)
 
@@ -951,12 +960,16 @@ class ChatPlugin(Plugin):
             return ToolResult(f'好，这条算说完了（第 {len(lines)} 条）。{at_note}{ref_note}', stop=True)
 
         toolbox = Toolbox(self._tools(state, reply, ctx))
-        prompt = await self._agent_prompt(ctx, toolbox.names)
-        messages = [{'role': 'user',
-                     'content': self._build_message(self._compose(ctx, blocks, transcript), images)}]
+        with otel.span('prompt.build'):
+            prompt = await self._agent_prompt(ctx, toolbox.names)
+            opening = self._build_message(self._compose(ctx, blocks, transcript), images)
+        messages = [{'role': 'user', 'content': opening}]
         forced = False
-        for _ in range(max(1, self.planner_rounds)):
-            turn = await self._ask_tools(prompt, messages, toolbox.schema(), ctx, errors)
+        # 每一轮模型调用一个 span：39 秒的 p50 里到底跑了几轮、每轮多久，全靠它
+        for index in range(max(1, self.planner_rounds)):
+            with otel.span('llm.turn', {'wxbot.llm_round': index + 1,
+                                        'wxbot.messages': len(messages)}):
+                turn = await self._ask_tools(prompt, messages, toolbox.schema(), ctx, errors)
             if turn is None:
                 break
             if not turn.tool_calls:
@@ -972,7 +985,8 @@ class ChatPlugin(Plugin):
             messages.append(assistant_message(turn))
             stopped = False
             for call in turn.tool_calls:
-                result = await toolbox.call(call)
+                with otel.span('execute_tool', {'gen_ai.tool.name': call.name}):
+                    result = await toolbox.call(call)
                 stopped = stopped or result.stop
                 messages.append(tool_message(call, result.content))
             if stopped:
@@ -996,11 +1010,14 @@ class ChatPlugin(Plugin):
             # 本轮空回复有两种来源：模型真的决定不开口，或者接口压根没调通。
             # 后者以前一律写成「选择不发言」，429 / 超时在面板上看着像模型的意思
             if not errors:
+                otel.mark({'wxbot.outcome': 'silent'})
                 self._emit(ctx, Status.PLANNER_SILENT, 'agent 选择不发言')
                 return self._silent(ctx, now, emoji=emoji)
+            otel.mark({'wxbot.outcome': 'failed'})
             self._emit(ctx, Status.PLANNER_FAILED, _brief(errors[-1], 160))
             return self._failed(emoji)
         self.policy.record(ctx, spoke=True, now=now)
+        otel.mark({'wxbot.outcome': 'replied', 'wxbot.replies': len(cleaned)})
         return Reply(lines=cleaned, emoji=emoji)
 
     async def _ask_tools(self, prompt: str, messages: list[dict], tools: list[dict],
@@ -1015,6 +1032,7 @@ class ChatPlugin(Plugin):
         except Exception as e:
             why = reason_of(e)
             logger.warning(f'决策工具调用失败（{ctx.contact}）：{why}')
+            otel.fail(why)
             if errors is not None:
                 errors.append(why)
             return None
@@ -1028,8 +1046,10 @@ class ChatPlugin(Plugin):
         if self.habits:
             block['habits'] = self.habits.render(text)
         if self.memories:
-            recalled = self.memories.search(ctx.msg.reply_target, extract_keywords(text))
-            block['memories'] = '\n'.join(moment.render() for moment in recalled)
+            with otel.span('recall.memories'):
+                recalled = self.memories.search(ctx.msg.reply_target, extract_keywords(text))
+                block['memories'] = '\n'.join(moment.render() for moment in recalled)
+                otel.mark({'wxbot.memories_hits': len(recalled)})
         return block
 
     @staticmethod
@@ -1101,7 +1121,7 @@ class ChatPlugin(Plugin):
             sender=msg.sender_name, trigger=necessity.kind, score=necessity.score,
             reasons=necessity.reasons, transcript=transcript, reply=tuple(response or ()),
             latency_ms=latency_ms, plan=plan, refs=refs,
-            msg_id=str(getattr(msg, 'msg_id', ''))))
+            msg_id=str(getattr(msg, 'msg_id', '')), trace_id=otel.trace_id()))
 
     async def _collect_images(self, history: ChatWindow) -> list[tuple[str, bytes]]:
         """ 把窗口里能拿到的图片都取回来（新→旧、按媒体 svrid 去重）。
@@ -1132,8 +1152,10 @@ class ChatPlugin(Plugin):
                 self.image_store.prepare, record.media_id, raw)
 
         # 并发取：串行的话 N 张图 × 单张超时会把这一轮拖到没法看
-        results = await asyncio.gather(*(fetch(record) for record in pending))
-        return [item for item in results if item is not None]
+        with otel.span('media.inline'):
+            results = await asyncio.gather(*(fetch(record) for record in pending))
+            images = [item for item in results if item is not None]
+        return images
 
     @staticmethod
     def _build_message(message: str, images: list[tuple[str, bytes]]) -> str | list:

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from loguru import logger
 from weixin_bot import PatContent, WeChatBotError
 
+import otel
 from context import (
     ChatWindow,
     ContextManager,
@@ -336,12 +337,14 @@ class Bot:
                 # register_login 会再调一次
                 logger.warning(f'daemon 尚未登录，先不加载历史上下文（{e}）')
                 return
-            for contact in sessions:
-                window = await self._wechat.fetch_history(contact, window_size)
-                count_loaded += len(window)
-                self._history.get_context(contact).extend(window)
-                self._schedule_history_media(window)
-                self._history_chats.add(contact)
+            with otel.span('history.load', {'wxbot.sessions': len(sessions)}):
+                for contact in sessions:
+                    window = await self._wechat.fetch_history(contact, window_size)
+                    count_loaded += len(window)
+                    self._history.get_context(contact).extend(window)
+                    self._schedule_history_media(window)
+                    self._history_chats.add(contact)
+                otel.mark({'wxbot.messages': count_loaded})
 
             self._history_loaded = True
             logger.info(f'{len(sessions)} sessions, {count_loaded} messages loaded.')
@@ -356,7 +359,8 @@ class Bot:
             return
         self._history_chats.add(chat)      # 先记上：拉失败也不要每轮都重拉一次
         try:
-            window = await self._wechat.fetch_history(chat, self._visible_history or 30)
+            with otel.span('history.load', {'wxbot.chat_id': chat}):
+                window = await self._wechat.fetch_history(chat, self._visible_history or 30)
         except Exception as e:  # noqa: BLE001 —— 少一段历史不该打断消息处理链
             logger.warning(f'补历史失败（{chat}）: {e}')
             return
@@ -408,14 +412,18 @@ class Bot:
         record = None
         if stored and not self.dry_run:
             record = self._history.push_message(chat, sender, stored, int(time.time()), is_self=True)
+        # 把当前的 trace context 一起交给队列：真正发送在几秒后（打字延迟），
+        # contextvars 早就不管用了，只能显式带着走
+        trace_ctx = otel.capture()
         if final:
             self.outbox.put(chat, final, sender=sender, reply_to=reply_to, chat_name=chat_name,
-                            record=record, ref_svrid=ref_svrid, at_list=at_list)
+                            record=record, ref_svrid=ref_svrid, at_list=at_list, trace_ctx=trace_ctx)
         if emoji:
             # 表情排在文字后面：先说一句，再补个表情收尾。
             # 同轮既有文字又有表情时，历史里记的是文字那条，表情不重复挂一个 record
             self.outbox.put_emoji(chat, emoji, sender=sender, reply_to=reply_to,
-                                  chat_name=chat_name, record=None if final else record)
+                                  chat_name=chat_name, record=None if final else record,
+                                  trace_ctx=trace_ctx)
 
     async def _deliver(self, item: Outbound) -> None:
         """ 真正发送，由 OutboundQueue 串行调用。历史和计数在 enqueue 时就已经落好。 """
@@ -441,6 +449,8 @@ class Bot:
         # 只要拿到 id 就说明 daemon 已经收下了（长链回执解析有 bug，消息通常已投递）
         if daemon_id and not self.dry_run:
             self._remember(item, daemon_id)
+        otel.mark({'wxbot.daemon_msg_id': str(daemon_id or ''),
+                   'wxbot.send_error': error[:200]})
 
         if self.dry_run:
             # 演习：没发出去、不进历史、也不在 daemon 里。正文只能靠事件带出去，
@@ -582,12 +592,19 @@ class Bot:
         try:
             while (block := self._blocks.pop(contact, None)) is not None:
                 msg, self_name, source = self._pick_trigger(block)
-                try:
-                    await self._wait_media(contact, block)
-                    await self._reply_once(msg, self_name, source,
-                                           fresh=tuple(item[0] for item in block))
-                except Exception as e:  # 一轮报错不能把整个会话的回复循环带死
-                    logger.error(f'回复处理失败（{contact}）: {e}', exc_info=True)
+                # 这个 task 是每会话复用的，一个 task 跑很多轮：每轮显式开一条新 trace，
+                # 否则第二轮之后的 span 会全挂到「第一条消息」那个陈旧 parent 上
+                with otel.span('turn', {
+                        'wxbot.chat_id': contact, 'wxbot.chat_name': source,
+                        'wxbot.msg_id': str(getattr(msg, 'msg_id', '')),
+                        'wxbot.fresh': len(block)}, new_trace=True):
+                    try:
+                        await self._wait_media(contact, block)
+                        await self._reply_once(msg, self_name, source,
+                                               fresh=tuple(item[0] for item in block))
+                    except Exception as e:  # 一轮报错不能把整个会话的回复循环带死
+                        otel.fail(str(e))
+                        logger.error(f'回复处理失败（{contact}）: {e}', exc_info=True)
         finally:
             # 这里跟 _schedule_turn 无 await 交错：pop 拿到 None 到 pop 掉 task 之间
             # 不让出事件循环，所以不会丢掉刚要进来的消息
@@ -629,7 +646,9 @@ class Bot:
         if not wanted:
             return
         started = time.perf_counter()
-        await asyncio.gather(*(self._describer.wait(record, self.describe_wait) for record in wanted))
+        with otel.span('media.wait', {'wxbot.images': len(wanted)}):
+            await asyncio.gather(*(self._describer.wait(record, self.describe_wait)
+                                   for record in wanted))
         logger.info(f'等识图 {time.perf_counter() - started:.1f}s（{len(wanted)} 张，{contact}）')
 
     async def _reply_once(self, msg: Message, self_name: str, source: str,
@@ -702,7 +721,9 @@ class Bot:
         window, msg = context
         self_name = await self._wechat.get_display_name(self.wxid, chat)
         source = await self._wechat.get_display_name(chat)
-        await self._reply_once(msg, self_name, source, forced=True, history=window)
+        with otel.span('turn', {'wxbot.chat_id': chat, 'wxbot.msg_id': str(msg_id),
+                                'wxbot.trigger': 'manual'}, new_trace=True):
+            await self._reply_once(msg, self_name, source, forced=True, history=window)
 
     async def replay(self, chat: str, msg_id: int) -> Reply | None:
         """ 管理后台「试回一次」：用**当前**代码和上下文把这条重跑一遍，但不发送。
@@ -824,7 +845,8 @@ class Bot:
         # 转写要上传 + 轮询（秒级），失败就保留占位符——不能让它拖垮消息链
         if kind is MessageKind.VOICE and not msg.is_self and media is not None:
             try:
-                transcript = await self._wechat.voice_text(msg)
+                with otel.span('voice.transcribe', {'wxbot.msg_id': str(msg.msg_id)}):
+                    transcript = await self._wechat.voice_text(msg)
             except Exception as e:  # noqa: BLE001 —— 转写失败不是这一轮的错
                 logger.warning(f'语音转写失败（msg_id={msg.msg_id}）: {e}')
                 transcript = ''

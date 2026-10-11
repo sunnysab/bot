@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 
 from loguru import logger
 
+import otel
 from tools import AssistantTurn, parse_tool_calls
 
 DESCRIBE_PROMPT = '用不超过 15 个字描述这张图片或表情包的内容和情绪，不要标点符号'
@@ -66,6 +67,19 @@ class Usage:
 
 # 全局累计：面板的统计卡要读，跨所有模型调用
 usage = Usage()
+
+
+def _mark_usage(raw, model: str = '') -> None:
+    """ 把这次调用的 token 用量写进当前 span（gen_ai 语义约定）。
+
+    官方插桩（opentelemetry-instrumentation-openai-v2）在这个环境用不了：
+    openai 3.13 走到了 httpx2，而插桩 patch 的是旧 httpx，打不到。所以自己埋。
+    """
+    if raw is None:
+        return
+    otel.mark({'gen_ai.usage.input_tokens': getattr(raw, 'prompt_tokens', 0) or 0,
+               'gen_ai.usage.output_tokens': getattr(raw, 'completion_tokens', 0) or 0,
+               'gen_ai.response.model': model or ''})
 
 
 def reason_of(error: Exception) -> str:
@@ -151,20 +165,24 @@ class OpenAI(AiProvider):
     async def chat(self, prompt: str, message: str | list) -> list[str] | None:
         """ 聊天 """
         extra = {'max_tokens': self.max_tokens} if self.max_tokens else {}
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            temperature=self.temperature,
-            top_p=self.top_p,
-            messages=[
-                {'role': 'system', 'content': prompt},
-                {'role': 'user', 'content': message}],
-            # 供应商特有的参数（如 vLLM 的 chat_template_kwargs）走 extra_body，不能当普通 kwarg 展开
-            extra_body=self.extra_body or None,
-            **extra,
-        )
+        with otel.span('llm.chat', {'gen_ai.operation.name': 'chat',
+                                    'gen_ai.request.model': self.model,
+                                    'gen_ai.request.temperature': self.temperature}):
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                messages=[
+                    {'role': 'system', 'content': prompt},
+                    {'role': 'user', 'content': message}],
+                # 供应商特有的参数（如 vLLM 的 chat_template_kwargs）走 extra_body
+                extra_body=self.extra_body or None,
+                **extra,
+            )
+            usage.add(response.usage, self.model)
+            _mark_usage(response.usage, self.model)
 
         completion_message = response.choices[0].message
-        usage.add(response.usage, self.model)
         reasoning = (completion_message.model_extra or {}).get('reasoning_content') or ''
         response_text: str = completion_message.content or ''
         if not response_text.strip() and reasoning.strip():
@@ -193,16 +211,20 @@ class OpenAI(AiProvider):
         和 chat() 分开是因为 chat() 会把回复按行切好、把「本轮不发言」当空，
         那是表达者要的形状；这里要原始 message。
         """
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            temperature=self.temperature,
-            top_p=self.top_p,
-            messages=[{'role': 'system', 'content': prompt}, *messages],
-            tools=tools or None,
-            extra_body=self.extra_body or None,
-        )
+        with otel.span('llm.chat_tools', {'gen_ai.operation.name': 'chat',
+                                          'gen_ai.request.model': self.model,
+                                          'wxbot.tools': len(tools or ())}):
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                messages=[{'role': 'system', 'content': prompt}, *messages],
+                tools=tools or None,
+                extra_body=self.extra_body or None,
+            )
+            usage.add(response.usage, self.model)
+            _mark_usage(response.usage, self.model)
         completion_message = response.choices[0].message
-        usage.add(response.usage, self.model)
         reasoning = (completion_message.model_extra or {}).get('reasoning_content') or ''
         turn = AssistantTurn(
             content=(completion_message.content or '').strip(),
@@ -237,16 +259,20 @@ class OpenAI(AiProvider):
         """ 返回 (文本, 是不是被预算截断的)。 """
         model = model or self.model
         encoded = base64.b64encode(image).decode()
-        response = await self.client.chat.completions.create(
-            model=model,
-            temperature=0.3,
-            max_tokens=max_tokens,
-            messages=[{'role': 'user', 'content': [
-                {'type': 'text', 'text': prompt},
-                {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{encoded}'}},
-            ]}],
-        )
-        usage.add(response.usage, model)
+        with otel.span('llm.describe', {'gen_ai.operation.name': 'describe',
+                                        'gen_ai.request.model': model,
+                                        'gen_ai.request.max_tokens': max_tokens}):
+            response = await self.client.chat.completions.create(
+                model=model,
+                temperature=0.3,
+                max_tokens=max_tokens,
+                messages=[{'role': 'user', 'content': [
+                    {'type': 'text', 'text': prompt},
+                    {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{encoded}'}},
+                ]}],
+            )
+            usage.add(response.usage, model)
+            _mark_usage(response.usage, model)
         choice = response.choices[0]
         text = (choice.message.content or '').strip()
         if not text:
@@ -256,13 +282,17 @@ class OpenAI(AiProvider):
 
     async def summarize(self, prompt: str, text: str, max_tokens: int = 400) -> str | None:
         """ 压缩一段文本，供中期记忆使用。 """
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            temperature=0.3,
-            max_tokens=max_tokens,
-            messages=[{'role': 'system', 'content': prompt}, {'role': 'user', 'content': text}],
-        )
-        usage.add(response.usage, self.model)
+        with otel.span('llm.summarize', {'gen_ai.operation.name': 'summarize',
+                                         'gen_ai.request.model': self.model}):
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                temperature=0.3,
+                max_tokens=max_tokens,
+                messages=[{'role': 'system', 'content': prompt},
+                          {'role': 'user', 'content': text}],
+            )
+            usage.add(response.usage, self.model)
+            _mark_usage(response.usage, self.model)
         content = (response.choices[0].message.content or '').strip()
         logger.debug(f'Summarize interface. response: {content!r}')
         return content or None
@@ -273,7 +303,6 @@ class Deepseek(OpenAI):
 
     def __init__(self, key: str, model: str = 'deepseek-flash', url: str = 'https://api.deepseek.com', **kwargs):
         super().__init__(url=url, key=key, model=model, **kwargs)
-
 
 
 def _self_check() -> None:

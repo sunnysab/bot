@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
+import otel
+
 if TYPE_CHECKING:
     from context import SingleRecord
 
@@ -39,6 +41,9 @@ class Outbound:
     ref_svrid: int = 0
     # 要 @ 的群成员 wxid，多个用逗号分隔；空 = 不 @
     at_list: str = ''
+    # 入队那一刻的 trace context。发送发生在几秒后（打字延迟），那时 contextvars
+    # 早换了，只能显式带着它，才能把出站挂在触发它的那一轮下面
+    trace_ctx: object | None = None
 
 
 class OutboundQueue:
@@ -56,22 +61,25 @@ class OutboundQueue:
 
     def put(self, receiver: str, text: str, sender: str = '',
             reply_to=None, chat_name: str = '', record=None, ref_svrid: int = 0,
-            at_list: str = '') -> None:
+            at_list: str = '', trace_ctx: object | None = None) -> None:
         # 非阻塞入队，避免拖住 SDK 的顺序事件循环
         # ponytail: 无界队列，个人 bot 量级够用；刷屏再换成有界 + 丢弃策略
         bus.publish(Status.QUEUED, chat_id=receiver, chat_name=chat_name,
                     reply_to=reply_to, origin='bot', detail=f'{len(text)} 字')
         self._queue.put_nowait(Outbound(receiver, text, sender,
                                         reply_to=_key(reply_to), chat_name=chat_name, record=record,
-                                        ref_svrid=ref_svrid or 0, at_list=at_list))
+                                        ref_svrid=ref_svrid or 0, at_list=at_list,
+                                        trace_ctx=trace_ctx))
 
     def put_emoji(self, receiver: str, emoji: Emoji, sender: str = '',
-                  reply_to=None, chat_name: str = '', record=None) -> None:
+                  reply_to=None, chat_name: str = '', record=None,
+                  trace_ctx: object | None = None) -> None:
         """ 发表情。同样过队列——不然它会绕过限速和打字延迟。 """
         bus.publish(Status.QUEUED, chat_id=receiver, chat_name=chat_name,
                     reply_to=reply_to, origin='bot', detail='表情')
         self._queue.put_nowait(Outbound(receiver, '', sender, emoji,
-                                        reply_to=_key(reply_to), chat_name=chat_name, record=record))
+                                        reply_to=_key(reply_to), chat_name=chat_name, record=record,
+                                        trace_ctx=trace_ctx))
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._worker(), name='outbound')
@@ -93,18 +101,24 @@ class OutboundQueue:
         next_at = 0.0
         while True:
             item = await self._queue.get()
-            if item.text and self._typing_delay:
-                # 队列里还有积压 = 已经落后群里的节奏了。这时还逐条按真人打字速度磨，
-                # 回复会迟到几分钟，群里话题早翻篇了（实测 2~3 分钟，见 notes）。
-                # 按积压深度等比砍，清空后恢复满速拟人。
-                delay = self._typing_delay(item.text) / (1 + self._queue.qsize())
-                bus.publish(Status.TYPING, chat_id=item.receiver, chat_name=item.chat_name,
-                            reply_to=item.reply_to, origin='bot',
-                            detail=f'拟人延迟 {delay:.1f}s')
-                await asyncio.sleep(delay)
-            await asyncio.sleep(max(0.0, next_at - loop.time()))
+            attrs = {'wxbot.chat_id': item.receiver, 'wxbot.chat_name': item.chat_name}
+            # 等待（打字延迟 + 最小间隔）和真正发送分开算：感知延迟的大头常常在前者
+            with otel.span('outbound.wait', {**attrs, 'wxbot.queue_depth': self._queue.qsize()},
+                           parent=item.trace_ctx):
+                if item.text and self._typing_delay:
+                    # 队列里还有积压 = 已经落后群里的节奏了。这时还逐条按真人打字速度磨，
+                    # 回复会迟到几分钟，群里话题早翻篇了（实测 2~3 分钟，见 notes）。
+                    # 按积压深度等比砍，清空后恢复满速拟人。
+                    delay = self._typing_delay(item.text) / (1 + self._queue.qsize())
+                    bus.publish(Status.TYPING, chat_id=item.receiver, chat_name=item.chat_name,
+                                reply_to=item.reply_to, origin='bot',
+                                detail=f'拟人延迟 {delay:.1f}s')
+                    await asyncio.sleep(delay)
+                await asyncio.sleep(max(0.0, next_at - loop.time()))
             next_at = loop.time() + self._min_interval
-            try:
-                await self._send(item)
-            except Exception as e:  # 单条失败不能拖垮 worker
-                logger.error(f'发送失败 {item.receiver}: {e}')
+            with otel.span('outbound.send', attrs, parent=item.trace_ctx):
+                try:
+                    await self._send(item)
+                except Exception as e:  # 单条失败不能拖垮 worker
+                    otel.fail(str(e))
+                    logger.error(f'发送失败 {item.receiver}: {e}')

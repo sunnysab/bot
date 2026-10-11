@@ -37,6 +37,9 @@ class TraceRecord:
     # 触发这一轮的微信消息 ID（daemon 的 server_id）。管理后台的「为什么没回」
     # 抽屉就靠它把气泡和这一轮对上；老记录没有这个字段，读出来是空串
     msg_id: str = ''
+    # 这一轮在 SigNoz 里的 trace id（32 位 hex）。span 树跟这条记录靠它对上；
+    # 没开链路追踪时是空串
+    trace_id: str = ''
 
 
 class TraceLogger:
