@@ -106,7 +106,7 @@ CONFIG_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ('图片内联', ('image_inline', 'image_shrink_threshold', 'image_shrink_target',
                 'image_fetch_timeout', 'image_cache_dir', 'describe_wait')),
     ('观测', ('trace_path',)),
-    ('改了要重启进程', ('daemon_host', 'daemon_port', 'daemon_unix', 'admin_port', 'log_path', 'log_level',
+    ('改了要重启进程', ('daemon_host', 'daemon_port', 'daemon_unix', 'admin_host', 'admin_port', 'log_path', 'log_level',
                     'describe_media', 'media_cache_path', 'describe_concurrency', 'describe_timeout',
                     'describe_max_tokens', 'describe_image_max_tokens',
                     'profile_path', 'habit_path',

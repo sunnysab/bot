@@ -30,7 +30,7 @@ def main():
         # 后台在循环起来之后才起——它要拿 loop 才能把 RPC 切回来跑
         panel = None
         if config.admin_port:
-            panel = Admin.start_safely(runtime, port=config.admin_port)
+            panel = Admin.start_safely(runtime, host=config.admin_host, port=config.admin_port)
         try:
             await runtime.start()
         finally:

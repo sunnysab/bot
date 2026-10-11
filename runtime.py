@@ -123,7 +123,7 @@ HOT_FIELDS = frozenset({
 })
 # 构造期就定死的东西：路径 / 传输 / 识图 / 日志
 RESTART_FIELDS = frozenset({
-    'daemon_host', 'daemon_port', 'daemon_unix', 'admin_port', 'log_path', 'log_level',
+    'daemon_host', 'daemon_port', 'daemon_unix', 'admin_host', 'admin_port', 'log_path', 'log_level',
     'describe_media', 'describe_model', 'media_cache_path', 'describe_concurrency', 'describe_timeout',
     'describe_max_tokens', 'describe_image_max_tokens',
     'image_inline', 'image_shrink_threshold', 'image_shrink_target', 'image_fetch_timeout',

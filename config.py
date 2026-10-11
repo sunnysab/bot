@@ -181,7 +181,9 @@ class Config:
     planner_thinking: bool = True
     # 单次模型调用超时（秒），避免一次 API 抽风拖死消息处理链
     request_timeout: float = 60.0
-    # 管理后台（本地网页）：只绑 127.0.0.1，不做鉴权；设 0 就不起
+    # 管理后台（本地网页）：不做鉴权；设 port 为 0 就不起。host 默认只绑 127.0.0.1，
+    # 要跨机访问才改（面板能发消息、能重启进程，别随便暴露到公网）
+    admin_host: str = '127.0.0.1'
     admin_port: int = 8099
     # 演习模式：全链路照跑（门控/决策/表达/状态都有），但不真发、自己的回复不进历史
     dry_run: bool = False
