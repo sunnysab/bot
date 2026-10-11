@@ -594,10 +594,13 @@ class Bot:
                 msg, self_name, source = self._pick_trigger(block)
                 # 这个 task 是每会话复用的，一个 task 跑很多轮：每轮显式开一条新 trace，
                 # 否则第二轮之后的 span 会全挂到「第一条消息」那个陈旧 parent 上
+                # 接上 daemon 推这条消息时所在的那条 trace：有就延续，没有才开新的一条
+                parent = otel.context_from_traceparent(getattr(msg, 'traceparent', '') or '')
                 with otel.span('turn', {
                         'wxbot.chat_id': contact, 'wxbot.chat_name': source,
                         'wxbot.msg_id': str(getattr(msg, 'msg_id', '')),
-                        'wxbot.fresh': len(block)}, new_trace=True):
+                        'wxbot.fresh': len(block)},
+                        parent=parent, new_trace=parent is None):
                     try:
                         await self._wait_media(contact, block)
                         await self._reply_once(msg, self_name, source,

@@ -33,6 +33,9 @@ class Wechat:
                  unix_path: str = None):
         logger.info('starting robot...')
         self._bot = WeChatBot(host=host, port=port, unix_path=unix_path or None)
+        # 每次 RPC 带上当前 trace 的 traceparent，daemon 那边把它当 parent——一条 trace
+        # 才能从 bot 穿进 daemon（见 otel.traceparent）。追踪关着时返回空串，不发这个字段
+        self._bot.traceparent = otel.traceparent
         self.dry_run = dry_run
         # 联系人字典，键值对格式: {'wxid': '显示名'}
         self.all_contacts: dict[str, str] = {}

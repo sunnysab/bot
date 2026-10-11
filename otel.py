@@ -160,6 +160,43 @@ def trace_id() -> str:
         return ''
 
 
+def context_from_traceparent(traceparent: str):
+    """ 把 W3C traceparent 还原成 SpanContext，交给 `span(parent=...)`；没有 / 解不了就 None。
+
+    用来接上 daemon 推这条消息时所在的那条 trace（见 weixin-cli 的 current_traceparent）。
+    """
+    if not _enabled or not traceparent:
+        return None
+    try:
+        from opentelemetry import trace
+        from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+        context = TraceContextTextMapPropagator().extract({'traceparent': traceparent})
+        span_context = trace.get_current_span(context).get_span_context()
+        return span_context if span_context.is_valid else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def traceparent() -> str:
+    """ 当前 span 的 W3C traceparent（`00-<trace32>-<span16>-<flags>`）；没有就空串。
+
+    给 RPC 用：塞进请求信封，daemon 那边 extract 出来当 parent，一条 trace 才能
+    从 bot 穿进 daemon。没有活跃 span 时返回空串，调用方就不带这个字段。
+    """
+    if not _enabled:
+        return ''
+    try:
+        from opentelemetry import trace
+
+        context = trace.get_current_span().get_span_context()
+        if not context.is_valid:
+            return ''
+        return f'00-{context.trace_id:032x}-{context.span_id:016x}-{int(context.trace_flags):02x}'
+    except Exception:  # noqa: BLE001
+        return ''
+
+
 def shutdown() -> None:
     """关停前把队列里的 span 刷出去。
 
@@ -190,7 +227,7 @@ def _parent_context(parent: Any, new_trace: bool):
 def _self_check() -> None:
     # 没初始化：所有函数都是 no-op，不抛异常、不返回脏值
     assert enabled() is False
-    assert trace_id() == '' and capture() is None
+    assert trace_id() == '' and capture() is None and traceparent() == ''
     with span('x', {'a': 1}) as current:
         assert current is None
     mark({'a': 1})
