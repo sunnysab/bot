@@ -1264,6 +1264,23 @@ def _self_check() -> None:
         except ValueError:
             pass
 
+    # 「试回一次」：拿到 trace 就调 bot.replay（不发送），把会说什么连同耗时带回去。
+    # find_trace 是模块级函数，直接换掉（admin.replay 内部按模块全局解析）。
+    import sys
+
+    module = sys.modules[__name__]
+    original_find = module.find_trace
+    module.find_trace = lambda _path, _msg_id: {'contact': '某群'}
+
+    async def fake_replay(chat, svrid):
+        assert (chat, svrid) == ('某群', 123), (chat, svrid)
+        return types.SimpleNamespace(lines=[types.SimpleNamespace(text='收到')])
+
+    runtime.bot.replay = fake_replay
+    result = admin.replay('123')
+    assert result['reply'] == ['收到'] and result['latency_ms'] >= 0, result
+    module.find_trace = original_find
+
     # 头像接口：daemon 那边先读盘再打网络（缓存归它），bot 只转发字节
     async def fake_avatar(wxid):
         if wxid != 'wxid_a':

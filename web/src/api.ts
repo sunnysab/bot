@@ -171,7 +171,6 @@ export interface TraceView {
 }
 
 export interface ReplayRes {
-  plan?: string;
   reply?: string[];
   latency_ms?: number;
 }
