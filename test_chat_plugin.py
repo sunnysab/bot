@@ -551,6 +551,28 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record['reply'], [])   # 决策者选择不发言，也要留痕
         self.assertEqual(record['plan'], '')
 
+    async def test_replay_round_leaves_no_trace_and_no_status(self):
+        """ 「试回一次」跑的是同一条链路，但不能留痕：它没真处理这条消息。 """
+        seen: list[str] = []
+
+        def record(event):
+            seen.append(event.status)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'trace.jsonl'
+            self.plugin.tracer = TraceLogger(path)
+            ctx = proactive_ctx()
+            ctx.replay = True
+            bus.subscribe(record)
+            try:
+                reply = await self.plugin.handle(ctx)
+            finally:
+                bus.unsubscribe(record)
+
+            self.assertEqual(reply.texts, ['收到'])                  # 链路照跑
+            self.assertEqual(seen, [])                               # 面板上一声不吭
+            self.assertFalse(path.exists())                          # 一条轨迹都不写
+
 
 class TestReplyPolicy(unittest.TestCase):
     def setUp(self):

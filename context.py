@@ -350,6 +350,8 @@ class MessageContext:
     # 这一轮要处理的**新消息**（同一个块里的那几条，按时间序）。单个消息到达时就是
     # 只有 msg 一条。门控按整块判、聊天记录里从第一条开始画分隔线都靠它
     fresh: tuple[Message, ...] = ()
+    # 后台「试回一次」：链路照跑，但不留痕——不写回复轨迹，也不发面板状态
+    replay: bool = False
 
     @property
     def kind(self) -> MessageKind:

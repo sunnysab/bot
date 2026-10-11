@@ -291,6 +291,7 @@ class TestReplay(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([line.text for line in reply.lines], ['收到'])
         self.assertEqual(capture.ctx.msg.content, '约饭')
         self.assertTrue(capture.ctx.forced)
+        self.assertTrue(capture.ctx.replay)      # 标记传到插件，让它不留痕
         self.assertEqual(self.bot._wechat.sent, [])
         self.assertEqual(self.bot._wechat.refs, [])
 

@@ -773,7 +773,10 @@ class ChatPlugin(Plugin):
         """ 把这一轮的状态发给管理后台。失败也不影响聊天（bus 自己吞异常）。
 
         msg_id 用 getattr：这是可观测性，不该因为拿不到身份键就把回复链路打断。
+        「试回一次」不发状态：它不是真的处理了这条消息，面板上不该跟着跳。
         """
+        if ctx.replay:
+            return
         bus.publish(status, chat_id=ctx.msg.reply_target, chat_name=ctx.contact,
                     msg_id=getattr(ctx.msg, 'msg_id', ''), detail=detail, **fields)
 
@@ -1251,7 +1254,7 @@ class ChatPlugin(Plugin):
                response: list[str] | None, latency_ms: int, plan: str,
                refs: tuple[int, ...] = ()) -> None:
         """ 记录这一轮：为什么开口、看到了什么、说了什么、引了哪几条。 """
-        if not self.tracer:
+        if not self.tracer or ctx.replay:
             return
         msg = ctx.msg
         self.tracer.log(TraceRecord(

@@ -527,16 +527,18 @@ class Bot:
     async def _run_plugins(self, msg: Message, self_name: str, source: str,
                            history: ChatWindow | None = None,
                            forced: bool = False,
-                           fresh: tuple[Message, ...] = ()) -> Reply:
+                           fresh: tuple[Message, ...] = (),
+                           replay: bool = False) -> Reply:
         """ 把当前消息交给该会话的插件链，收集要回复的文本和表情。
 
         :param history: 这一轮看的上下文。默认是当前活窗口；手动回复传「截到那条为止」的窗口
         :param forced: 管理后台手动触发（见 `force_reply`）
         :param fresh: 这一块里的消息（不止触发那条时一起给插件，门控和分隔线都要用）
+        :param replay: 后台「试回一次」：插件照跑，但不留痕（见 `MessageContext.replay`）
         """
         ctx = MessageContext(msg=msg, history=history or self._history.get_context(msg.reply_target),
                              self_name=self_name, contact=source, forced=forced,
-                             fresh=fresh or (msg,))
+                             fresh=fresh or (msg,), replay=replay)
         lines: list[Outgoing] = []
         emoji = None
         for plugin in self._plugins.get_plugins_for_contact(source):
@@ -641,7 +643,7 @@ class Bot:
         :param deliver: False = 只跑链路拿结果、不发送（后台「试回一次」）
         """
         response = await self._run_plugins(msg, self_name, source, history=history, forced=forced,
-                                           fresh=fresh)
+                                           fresh=fresh, replay=not deliver)
         if not deliver:
             return response
         if not response.lines and not response.emoji:
