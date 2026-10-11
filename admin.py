@@ -704,14 +704,16 @@ class Admin:
         return {'chat': chat, 'overrides': saved}
 
     def replay(self, msg_id: str) -> dict:
-        """ 用当前提示词重跑表达那一步。会真的花 token（面板上要确认）。 """
+        """ 用当前代码把这条重跑一遍（不发送）。跑的是真实链路，agent 模式也对。 """
         record = find_trace(self.runtime.config.trace_path, msg_id)
         if not record:
-            raise ValueError('这一轮没有 trace——被门控拦下的没走到模型，重放不了')
-        return self.call(self.runtime.chat_plugin.replay(
-            record.get('transcript', ''), record.get('plan', ''),
-            self_name=getattr(self._wechat, 'nickname', ''),
-            contact=record.get('contact_name', '')))
+            raise ValueError('这一轮没有 trace——被门控拦下的没走到模型，试回不了')
+        started = time.perf_counter()
+        reply = self.call(self.runtime.bot.replay(record.get('contact', ''), int(msg_id)))
+        if reply is None:
+            raise ValueError('这条已经不在 daemon 的缓存里，拼不出当时的聊天记录')
+        return {'reply': [line.text for line in reply.lines],
+                'latency_ms': int((time.perf_counter() - started) * 1000)}
 
     def emojis(self, limit: int = 300) -> list[dict]:
         return [{'md5': item.md5, 'desc': item.desc, 'scene': item.scene,

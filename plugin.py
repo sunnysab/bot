@@ -1247,33 +1247,6 @@ class ChatPlugin(Plugin):
     def _elapsed(started: float) -> int:
         return int((time.perf_counter() - started) * 1000)
 
-    async def _complete(self, prompt: str, message: str) -> list[str] | None:
-        """ 单轮纯文本调用。重放用——没有 ctx，不走 _ask 的图片分支。 """
-        try:
-            return await asyncio.wait_for(self.ai.chat(prompt.strip(), message), self.timeout)
-        except Exception as e:
-            logger.warning(f'调用模型失败（重放）：{reason_of(e)}')
-            return None
-
-    async def replay(self, transcript: str, plan: str = '', self_name: str = '',
-                     contact: str = '') -> dict:
-        """ 用**当前**提示词重跑表达这一步，只看输出：不碰历史、不进队列、不发送。
-
-        两个如实说明的限制：
-        1. 上下文只能用 trace 里存的那份聊天记录——画像 / 群用语 / 中期记忆当时注入了
-           什么没有留痕，所以重放的输入比真实那一轮少几块；
-        2. 只重跑表达者、不重新决策：决策那步调的是工具，离线没有执行环境。所以它答的是
-           「这句话换个写法会怎样」，不是「该不该说」。比表达风格可靠，也是调得最多的那个。
-        """
-        started = time.perf_counter()
-        persona = self.persona_for(contact)
-        prompt = await self.replyer_template.render_async(
-            identity=persona.identity(self_name), reply_style=persona.reply_style,
-            self_name=self_name, contact=contact, is_group=True, faces=FACE_CATALOG)
-        body = f'{plan}\n\n{transcript}' if plan else transcript
-        reply = await self._complete(prompt, body)
-        return {'plan': plan, 'reply': reply or [], 'latency_ms': self._elapsed(started)}
-
     def _trace(self, ctx: MessageContext, necessity: NecessityScore, transcript: str,
                response: list[str] | None, latency_ms: int, plan: str,
                refs: tuple[int, ...] = ()) -> None:

@@ -30,10 +30,10 @@ export function Trace({ msgId, picked, xml, tick }: Props) {
   const tr = view.trace;
 
   const replay = async () => {
-    setOut('重放中（会真的调模型）…');
+    setOut('试回中（会真的调模型，但不会发出去）…');
     const r = await post<ReplayRes>(`/api/replay/${encodeURIComponent(msgId)}`, {});
     setOut(r.error ? `失败：${r.error}`
-      : `表达（${r.latency_ms} ms）：\n${(r.reply ?? []).join('\n')}`);
+      : `会回（${r.latency_ms} ms）：\n${(r.reply ?? []).join('\n')}`);
   };
 
   return (
@@ -72,14 +72,14 @@ export function Trace({ msgId, picked, xml, tick }: Props) {
           <Pre text={tr.plan} />
           <h3>当时看到的聊天记录</h3>
           <Pre text={tr.transcript} />
-          <h3>重放</h3>
+          <h3>试回</h3>
           <div className="detail">
-            用当前提示词重跑表达这一步：不碰历史、不进队列、也不发送，但会真的花 token。
-            上下文只能用当时存下的聊天记录（画像 / 群用语 / 记忆没留痕）；不重新决策——
-            决策那步调的是工具，离线没有执行环境。所以说的是「这句话换个写法会怎样」。
+            用当前代码把这条重跑一遍，**不发送**：跑的是真实链路（agent 模式也一样）。
+            会真的花 token。上下文用现在还能重建的那份——消息还在窗口里就几乎和当时一致，
+            滑出去了就只能从 daemon 拉一段冷的（图会变成占位符）。
           </div>
           <div style={{ margin: '6px 0' }}>
-            <button onClick={replay}>重放表达</button>
+            <button onClick={replay}>试回一次</button>
           </div>
           {/* 没重放过就不画这个框：`.drawer pre` 带边框，空着就是一个多余的空盒子 */}
           {out && <pre>{out}</pre>}

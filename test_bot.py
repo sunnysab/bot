@@ -265,6 +265,41 @@ class TestForceReply(unittest.IsolatedAsyncioTestCase):
         self.assertIn('缓存', note.detail)
 
 
+class TestReplay(unittest.IsolatedAsyncioTestCase):
+    """ 「试回一次」：和「手动回复这条」同一条链路，只差最后那步发送。 """
+
+    async def asyncSetUp(self):
+        events.bus.reset()
+        self.bot = Bot('127.0.0.1', 9999, x_delay=0, send_interval=0)
+        self.bot._wechat = FakeWechat()
+        await self.bot.outbox.start()
+
+    async def asyncTearDown(self):
+        await self.bot.outbox.stop()
+
+    async def test_runs_the_pipeline_but_never_sends(self):
+        window = self.bot._history.get_context('456@chatroom')
+        window.append('Alice', '约饭', 200, msg_id=22)
+        self.bot._wechat.daemon_messages = [make_msg('约饭', msg_id=22, create_time=200)]
+        capture = CapturePlugin()
+        self.bot.set_default_plugin(capture)
+
+        reply = await self.bot.replay('456@chatroom', 22)
+        await asyncio.sleep(0.05)
+
+        # 链路真跑了（插件拿到 ctx、上下文截到那条），但一条都没发出去
+        self.assertEqual([line.text for line in reply.lines], ['收到'])
+        self.assertEqual(capture.ctx.msg.content, '约饭')
+        self.assertTrue(capture.ctx.forced)
+        self.assertEqual(self.bot._wechat.sent, [])
+        self.assertEqual(self.bot._wechat.refs, [])
+
+    async def test_missing_context_returns_none(self):
+        """ daemon 缓存里也没有这条：返回 None，不发也不报。 """
+        self.bot.set_default_plugin(CapturePlugin())
+        self.assertIsNone(await self.bot.replay('456@chatroom', 12345))
+
+
 class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.bot = Bot('127.0.0.1', 9999, x_delay=0, send_interval=0)

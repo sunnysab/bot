@@ -632,15 +632,18 @@ class Bot:
 
     async def _reply_once(self, msg: Message, self_name: str, source: str,
                           forced: bool = False, history: ChatWindow | None = None,
-                          fresh: tuple[Message, ...] = ()) -> None:
-        """ 跑一轮插件链并把回复写历史 + 入队。
+                          fresh: tuple[Message, ...] = (), deliver: bool = True) -> Reply:
+        """ 跑一轮插件链；deliver 时把回复写历史 + 入队，否则只要那份 Reply。
 
         :param forced: 管理后台手动触发：不走「必不必须回」那套，而且一定引用被点的那条
         :param history: 见 `_run_plugins`
         :param fresh: 见 `_run_plugins`
+        :param deliver: False = 只跑链路拿结果、不发送（后台「试回一次」）
         """
         response = await self._run_plugins(msg, self_name, source, history=history, forced=forced,
                                            fresh=fresh)
+        if not deliver:
+            return response
         if not response.lines and not response.emoji:
             logger.debug('no response to send.')
             # 插件链什么都没说，而且这一轮也没留下别的埋点（语音消息、或该会话静音），
@@ -653,7 +656,7 @@ class Bot:
                 bus.publish(Status.MUTED if muted else Status.EMPTY_REPLY,
                             chat_id=msg.reply_target, chat_name=source, msg_id=msg.msg_id,
                             detail='该会话已静音' if muted else '这一轮没生成任何回复')
-            return  # 没有回复内容
+            return response  # 没有回复内容
 
         # 交给全局发送队列统一限流和拟人延迟，避免阻塞消息接收循环
         lines = [line for line in response.lines if not is_placeholder(line.text)]
@@ -679,6 +682,7 @@ class Bot:
             self.enqueue(msg.reply_target, sender=self_name, reply_to=msg.msg_id,
                          chat_name=source, emoji=response.emoji)
         logger.debug(f'{len(lines)} responses queued.')
+        return response
 
     async def force_reply(self, chat: str, msg_id: int) -> None:
         """ 管理后台「手动回复这条」：让 bot 站在**那条消息当时**的聊天记录视角回它一句。
@@ -697,6 +701,21 @@ class Bot:
         self_name = await self._wechat.get_display_name(self.wxid, chat)
         source = await self._wechat.get_display_name(chat)
         await self._reply_once(msg, self_name, source, forced=True, history=window)
+
+    async def replay(self, chat: str, msg_id: int) -> Reply | None:
+        """ 管理后台「试回一次」：用**当前**代码和上下文把这条重跑一遍，但不发送。
+
+        和 `force_reply` 是同一条链路，只差最后那一步发送——所以它跑的就是线上那条路
+        （agent 模式回话是工具调用，这里也一样）。取不到当时的上下文返回 None。
+        """
+        context = await self._context_at(chat, msg_id)
+        if context is None:
+            return None
+        window, msg = context
+        self_name = await self._wechat.get_display_name(self.wxid, chat)
+        source = await self._wechat.get_display_name(chat)
+        return await self._reply_once(msg, self_name, source, forced=True,
+                                      history=window, deliver=False)
 
     async def _context_at(self, chat: str, svrid: int):
         """ 某条消息那一刻的上下文：`(截到它为止的窗口, 那条 Message)`。取不到返回 None。
