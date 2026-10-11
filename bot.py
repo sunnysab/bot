@@ -737,8 +737,10 @@ class Bot:
         window, msg = context
         self_name = await self._wechat.get_display_name(self.wxid, chat)
         source = await self._wechat.get_display_name(chat)
-        return await self._reply_once(msg, self_name, source, forced=True,
-                                      history=window, deliver=False)
+        with otel.span('turn', {'wxbot.chat_id': chat, 'wxbot.msg_id': str(msg_id),
+                                'wxbot.trigger': 'replay'}, new_trace=True):
+            return await self._reply_once(msg, self_name, source, forced=True,
+                                          history=window, deliver=False)
 
     async def _context_at(self, chat: str, svrid: int):
         """ 某条消息那一刻的上下文：`(截到它为止的窗口, 那条 Message)`。取不到返回 None。
