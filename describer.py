@@ -16,6 +16,7 @@ import otel
 from ai import IMAGE_DESCRIBE_PROMPT, IMAGE_PROMPT_VERSION, AiProvider, reason_of
 from context import SingleRecord
 from emojis import EMOJI_DESCRIBE_PROMPT, Emoji, EmojiLibrary, parse_description
+from images import SHRINK_TARGET, shrink
 from media import Media, add_handle
 
 # 失败后的冷却期，两种含义不同（见 `MediaDescriber._retry_ttl`）：
@@ -265,6 +266,13 @@ class MediaDescriber:
                 raise MediaUnavailable(str(e)) from e
             if not image:
                 raise MediaUnavailable('下载结果为空')
+            # 原图动辄几 MB，base64 后会把上游的请求体上限撞爆（实测一张 2.76MB 的图
+            # 报 `length limit exceeded`）。先压到 1MB 以内再送：只降 JPEG 质量、不缩尺寸——
+            # 实测 q85 就把 1.68MB / 1220x5403 的长截图压到 0.64MB 且肉眼无差，
+            # 而按长边缩放会把截图里的字压糊（见 images.shrink）
+            raw_bytes = len(image)
+            image = await asyncio.to_thread(shrink, image, SHRINK_TARGET, SHRINK_TARGET)
+            otel.mark({'wxbot.image_bytes': len(image), 'wxbot.image_bytes_raw': raw_bytes})
             if media.kind == 'image':
                 description = await self._ai.describe(
                     image, max_tokens=self._image_max_tokens or self._max_tokens,
