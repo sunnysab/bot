@@ -36,7 +36,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from ai import Deepseek
+from ai import OpenAI
 from build_profiles import BRACKET, PLACEHOLDER, TEXT_TYPES, iter_records
 from context import SingleRecord
 from moments import Moment, MomentKeeper, MomentStore, extract_keywords
@@ -85,7 +85,8 @@ async def replay(records: list[SingleRecord], windows: int, batch: int, model: s
     else:
         from config import Config
 
-        ai = Deepseek(key=Config.load().deepseek_key, model=model, temperature=0.3)
+        config = Config.load()
+        ai = OpenAI(url=config.deepseek_url, key=config.deepseek_key, model=model, temperature=0.3)
         print(f'真压缩：{len(chunks)} 个窗口，每个 {batch} 条，模型 {model}\n')
 
     covered = total = 0

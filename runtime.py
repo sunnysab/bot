@@ -27,7 +27,7 @@ from pathlib import Path
 from loguru import logger
 
 import otel
-from ai import Deepseek, OpenAI
+from ai import OpenAI
 from bot import Bot
 from config import Config
 from describer import EmojiDescriber, MediaCache, MediaDescriber
@@ -361,8 +361,8 @@ def _providers(config: Config):
     """ 主模型 + 决策者模型。决策者留空 PLANNER_URL 就两段都用主模型。 """
     # key 为空时给个占位：openai 客户端会因为「Missing credentials」直接抛，
     # 而没配 key 是能启动的（main 里只打了警告）——调用失败由各层的 try/except 兜
-    ai = Deepseek(key=config.deepseek_key or 'not-set', model=config.deepseek_model,
-                  url=config.deepseek_url, temperature=0.85)
+    ai = OpenAI(url=config.deepseek_url, key=config.deepseek_key or 'not-set',
+                model=config.deepseek_model, temperature=0.85)
     planner = None
     if config.planner_url:
         planner = OpenAI(url=config.planner_url, key=config.planner_key, model=config.planner_model,

@@ -298,13 +298,6 @@ class OpenAI(AiProvider):
         return content or None
 
 
-class Deepseek(OpenAI):
-    """ Deepseek；url 可指向任何 OpenAI 兼容的第三方服务 """
-
-    def __init__(self, key: str, model: str = 'deepseek-flash', url: str = 'https://api.deepseek.com', **kwargs):
-        super().__init__(url=url, key=key, model=model, **kwargs)
-
-
 def _self_check() -> None:
     """ token 记账：两种供应商口径都要认（字段名错了会一直静默显示 0）。 """
     import types
