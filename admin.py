@@ -56,9 +56,7 @@ BUILD_HINT = ('面板还没构建（web/dist 不存在）。\n\n'
               '开发期也可以只跑前端：cd web && npm run dev（它会自己把 /api 转发过来）\n')
 SIDECAR = Path(__file__).parent / 'admin.db'
 # 可以在面板上改的提示词。模板都不长，整体替换比行编辑简单也可控
-PROMPTS = {'planner': Path(__file__).parent / 'planner.txt',
-           'replyer': Path(__file__).parent / 'replyer.txt',
-           'agent': Path(__file__).parent / 'agent.txt'}
+PROMPTS = {'agent': Path(__file__).parent / 'agent.txt'}
 DEFAULT_PORT = 8099          # 8080 在本机被 iptv 占了，别用
 CHATS_LIMIT = 50
 MESSAGES_LIMIT = 300         # v1 一次拉满，daemon 的 get_messages 还不能翻页
@@ -99,7 +97,7 @@ CONFIG_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
                 'quote_replies',
                 'reply_min_gap', 'reply_rate_window', 'reply_rate_max')),
     ('人格与表达', ('personality', 'reply_style', 'behavior_style', 'reply_styles', 'style_probability')),
-    ('决策者', ('reply_mode', 'enable_planner', 'planner_url', 'planner_key', 'planner_model', 'planner_temperature',
+    ('决策者', ('planner_url', 'planner_key', 'planner_model', 'planner_temperature',
                 'planner_max_tokens', 'planner_thinking',
                 'planner_rounds')),
     ('出站', ('send_interval', 'typo_rate', 'dry_run')),
@@ -1468,7 +1466,7 @@ def _self_check() -> None:
     assert not (HOT_FIELDS & RESTART_FIELDS), HOT_FIELDS & RESTART_FIELDS
     # 提示词校验：语法错 / 变量名拼错都要拦下来（不拦的话热重载后每轮都抛，
     # 而消息链把异常吞掉，表现成「机器人突然不说话」）
-    # 三个真模板都要拿假上下文渲一遍：漏一个变量就等于面板上存不下它
+    # 真模板要拿假上下文渲一遍：漏一个变量就等于面板上存不下它
     for _name, _path in PROMPTS.items():
         _validate_prompt(_path.read_text(encoding='utf-8'))
     _validate_prompt('你好 {{ self_name }}，{{ behavior_style }}')
@@ -1497,8 +1495,8 @@ def _self_check() -> None:
         except ValueError:
             pass
 
-    # 提示词面板要能改 agent 模式那份（默认走的就是它）
-    assert set(PROMPTS) == {'planner', 'replyer', 'agent'}, PROMPTS
+    # 提示词面板只能改 agent 那份（唯一走的路）
+    assert set(PROMPTS) == {'agent'}, PROMPTS
 
     # 面板的状态表必须覆盖每一个 Status，否则 chip 会显示裸状态名
     assert 'src/main.tsx' in (WEB_DIR / 'index.html').read_text(encoding='utf-8'), \

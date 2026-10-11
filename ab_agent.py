@@ -1,12 +1,15 @@
-""" agent 模式 vs 两段式的离线 A/B：拿真实模型跑同一批历史轮次，并排看。
+""" 离线跑 agent 模式：拿真实模型重跑 trace 里的历史轮次，看它**现在**会说什么。
 
-数据来自 `reply_trace.jsonl`——那里存了每一轮真正送到模型的 transcript。
-两条路都喂**同一份 transcript**、同一个模型、同一个温度，只比「说什么/怎么说」。
+数据来自 `reply_trace.jsonl`——那里存了每一轮真正送到模型的 transcript。喂**同一份
+transcript**、同一个模型、同一个温度，和「当时线上回了什么」并排看。
+
+和后台「试回一次」的区别：那个走 `Bot.force_reply` 那条完整链路、用的是**现在**能重建的
+上下文；这个只用 trace 里的文本，不碰 daemon，历史早滑出去了也能跑。
 
 三个如实说明的限制（别拿它当线上效果）：
-1. trace 里没存画像 / 群用语 / 中期记忆当时注入了什么，所以两边都少几块上下文；
-2. 两段式的 planner 在线上可能单独配模型（留空才用主模型），这里统一用主模型；
-3. 温度不为 0，同一条重跑会变；样本量小，只在「差别大到肉眼可见」时才有意义。
+1. trace 里没存画像 / 群用语 / 中期记忆当时注入了什么，所以少几块上下文；
+2. 温度不为 0，同一条重跑会变；样本量小，只在「差别大到肉眼可见」时才有意义；
+3. trace 里存的是渲染后的文本，`#标签` 反推不回 svrid，所以 ref 相关的行为看不出来。
 
 用法：
     .venv/bin/python ab_agent.py            # 默认最近 6 条开口的轮次
@@ -79,25 +82,6 @@ def clean(texts, plugin, ctx) -> list[str]:
     return [t for t in (clean_reply(x, names) for x in texts or ()) if t]
 
 
-async def run_two_stage(plugin: ChatPlugin, ctx: MessageContext, transcript: str,
-                        must_speak: bool, blocks: dict) -> dict:
-    started = time.perf_counter()
-    before = usage.snapshot()
-    decided, _emoji, _at, _ref, _log = await plugin._plan_with_tools(ctx, {}, transcript, [], [])
-    texts: list[str] = []
-    plan = ''
-    if decided is not None:
-        plan = decided.render()
-    if decided is None:
-        reply = None
-    elif decided.speak or must_speak:
-        reply = await plugin._express(ctx, blocks, transcript, [], plan, [])
-        texts = clean(reply, plugin, ctx)
-    after = usage.snapshot()
-    return {'texts': texts, 'plan': plan, 'latency_ms': int((time.perf_counter() - started) * 1000),
-            'tokens': _delta(before, after), 'error': decided is None}
-
-
 async def run_agent(plugin: ChatPlugin, ctx: MessageContext, transcript: str,
                     must_speak: bool, blocks: dict) -> dict:
     started = time.perf_counter()
@@ -126,16 +110,11 @@ async def amain(args) -> None:
         alternates=tuple(style.strip() for style in config.reply_styles.split('|') if style.strip()),
         alternate_probability=config.style_probability)
 
-    two_stage = ChatPlugin(ai, context_length=30, persona=persona, enable_planner=True,
-                           planner_ai=planner, emoji_search=no_emoji,
-                           planner_rounds=3, timeout=config.request_timeout)
-    agent = ChatPlugin(ai, context_length=30, persona=persona, reply_mode='agent',
+    agent = ChatPlugin(ai, context_length=30, persona=persona,
                        planner_ai=planner, emoji_search=no_emoji,
                        planner_rounds=3, timeout=config.request_timeout)
-    # 这轮只比「说什么 / 怎么说」：把表情工具摘掉，否则模型会花一轮去搜一个空库，
-    # 把 agent 的调用数抬高（表情选择是另一个轴，已由 test_chat_plugin 覆盖）
-    for plugin in (two_stage, agent):
-        plugin._emoji_tools = lambda state: []          # noqa: ARG005
+    # 只看「说什么 / 怎么说」：把表情工具摘掉，否则模型会花一轮去搜一个空库
+    agent._emoji_tools = lambda state: []          # noqa: ARG005
 
     samples = load_samples(TRACE, args.n, only_spoken=not args.all)
     logger.info(f'{config.deepseek_model} · {len(samples)} 条样本（{"全部" if args.all else "开口的"}轮次）')
@@ -152,15 +131,11 @@ async def amain(args) -> None:
         elif '专注' in (record.get('reasons') or ()):
             blocks['focus'] = '你正在专注跟这个群聊，可以比平时更主动一点，但别硬凑话题，接不上就闭嘴。'
         was = list(record.get('reply') or ())
-        got_two = await run_two_stage(two_stage, ctx, transcript, must_speak, blocks)
-        got_agent = await run_agent(agent, ctx, transcript, must_speak, blocks)
-        rows.append({'i': index, 'trigger': record.get('trigger'), 'was': was,
-                     'two_stage': got_two, 'agent': got_agent})
+        got = await run_agent(agent, ctx, transcript, must_speak, blocks)
+        rows.append({'i': index, 'trigger': record.get('trigger'), 'was': was, 'agent': got})
         print(f"\n#{index} 触发={record.get('trigger')} 当时回了: {' / '.join(was) or '（没开口）'}")
-        print(f"  两段式 {got_two['latency_ms']:>6}ms  {_tokens(got_two)}  "
-              f"{' / '.join(got_two['texts']) or '（没开口）'}")
-        print(f"  agent  {got_agent['latency_ms']:>6}ms  {_tokens(got_agent)}  "
-              f"{' / '.join(got_agent['texts']) or '（没开口）'}")
+        print(f"  现在会说 {got['latency_ms']:>6}ms  {_tokens(got)}  "
+              f"{' / '.join(got['texts']) or '（没开口）'}")
 
     _summary(rows)
     if args.out:
@@ -183,7 +158,7 @@ def _summary(rows: list[dict]) -> None:
 
     print('\n' + '=' * 62)
     print(f"{'':10} {'开口':>5} {'平均延迟':>9} {'总 prompt':>11} {'总 completion':>15}")
-    for key in ('was', 'two_stage', 'agent'):
+    for key in ('was', 'agent'):
         if key == 'was':
             spoke = sum(1 for r in rows if r['was'])
             print(f"{'线上原样':10} {spoke:>3}/{len(rows):<2} {'-':>9} {'-':>11} {'-':>15}")

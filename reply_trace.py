@@ -30,9 +30,7 @@ class TraceRecord:
     transcript: str             # 送进模型的聊天记录
     reply: tuple[str, ...]      # 实际发出的内容，空 = 模型选择不发言
     latency_ms: int
-    plan: str = ''              # Planner 的决策（两段式时才有）
-    # 这一轮走的哪条路：two_stage / agent。A/B 对比时靠它分组
-    mode: str = ''
+    plan: str = ''              # 这一轮的决策 / 工具记录
     # 本条回复引用了哪几条（svrid）。**诊断用**：光看 transcript 分不出「在回这一轮的消息」
     # 还是「在回更早的那条」，「对着表情讲上一个话题」这种毛病就靠它对出来
     refs: tuple[int, ...] = ()

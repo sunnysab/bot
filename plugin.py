@@ -31,7 +31,6 @@ from necessity import (
 )
 from persona import Persona
 from personas import PersonaStore
-from planner import Plan
 from profiles import ProfileStore
 from reply_trace import TraceLogger, TraceRecord
 from tools import (
@@ -101,19 +100,6 @@ PLAN = ToolSpec(
     parameters={'type': 'object',
                 'properties': {'intent': {'type': 'string', 'description': '这一句想表达什么'},
                                'emotion': {'type': 'string', 'description': '什么情绪，如 无奈/想笑/认真'}},
-                'required': ['intent']})
-SPEAK = ToolSpec(
-    name='speak',
-    description='让机器人用文字说一句。intent 是你想表达什么，不是台词本身——'
-                '台词由别人负责写。调用这个工具本轮就结束了。'
-                'ref：这句在回哪一条——填聊天记录里那行的 #标签（如 #4k2p0z），'
-                '发出的消息会引用那一条；没在回具体某条就别填。',
-    parameters={'type': 'object',
-                'properties': {'intent': {'type': 'string', 'description': '想表达什么'},
-                               'emotion': {'type': 'string', 'description': '什么情绪'},
-                               'at': {'type': 'string', 'description': '要 @ 的群友昵称，不 @ 就别填'},
-                               'ref': {'type': 'string',
-                                       'description': '要引用（回复某条）的 #标签，没在回具体某条就别填'}},
                 'required': ['intent']})
 REPLY = ToolSpec(
     name='reply',
@@ -583,24 +569,19 @@ def _mime(raw: bytes) -> str:
 
 
 class ChatPlugin(Plugin):
-    """ 聊天插件。两段式：Planner 判断说与不说、说什么，Expressor 负责说成人话。
+    """ 聊天插件：一次调用里把「判断」和「台词」都做完，回话就是一次 `reply` 工具调用。
 
-    Planner 被明确告知「你不是本人，你是决策者」，输出的是判断而不是台词；
-    Expressor 拿人设 + 表达风格 + 决策当作参考，只负责组织语言。
-    enable_planner=False 时退回单段（Expressor 直接看着聊天记录说），便于对比。
-
-    被 @ / 被叫名字 / 私聊也走决策者——它们只需要表情工具，而工具在决策者手里；
-    区别是这几个场景下决策者的「不发言」被忽略（必须给个回应），只是额外花一次调用。
+    被 @ / 被叫名字 / 私聊走的是同一条路，只是它的「不发言」不算数（必须给个回应）。
     """
 
     def __init__(self, ai_provider: AiProvider, context_length: int = 10, policy: ReplyPolicy | None = None,
                  persona: Persona | None = None, profiles: ProfileStore | None = None,
                  habits: HabitStore | None = None, memories: MomentStore | None = None,
-                 tracer: TraceLogger | None = None, enable_planner: bool = True,
+                 tracer: TraceLogger | None = None,
                  planner_ai: AiProvider | None = None,
                  emoji_search: EmojiSearch | None = None,
                  planner_rounds: int = 5, emoji_policy: EmojiPolicy | None = None,
-                 reply_mode: str = 'two_stage', revoke: Revoke | None = None,
+                 revoke: Revoke | None = None,
                  timeout: float = 60.0, rng: random.Random | None = None,
                  agent_max_replies: int = 1, personas: PersonaStore | None = None,
                  member_lookup: MemberLookup | None = None,
@@ -618,12 +599,10 @@ class ChatPlugin(Plugin):
         :param habits: 群里的特色用语；当前消息命中才注入
         :param memories: 中期记忆；按当前消息关键词召回，命中才注入
         :param tracer: 回复轨迹记录；传了就把每轮触发/上下文/回复写成 JSONL
-        :param enable_planner: 是否跑两段式；False 则只调 Expressor
-        :param planner_ai: 决策者专用模型；留空则和 Expressor 用同一个
+        :param planner_ai: 决策者专用模型；留空就用主模型
         :param emoji_search: 搜表情的函数；不传就只剩说话，决策者看不到表情工具
         :param planner_rounds: 决策循环最多几轮（搜 → 发 两轮就够）
         :param emoji_policy: 发表情的节制（间隔 + 不重复）；模型看不见自己上次什么时候发的
-        :param reply_mode: 'two_stage' = 决策者 + 表达者；'agent' = 单模型，回话就是 reply 工具
         :param revoke: 撤回入口（Bot 提供）；不传就没有 revoke 工具
         :param timeout: 单次模型调用超时（秒）
         :param rng: 抽临时风格用的随机源，测试时可注入
@@ -646,11 +625,9 @@ class ChatPlugin(Plugin):
         self.habits = habits
         self.memories = memories
         self.tracer = tracer
-        self.enable_planner = enable_planner
         self.emoji_search = emoji_search
         self.planner_rounds = planner_rounds
         self.emoji_policy = emoji_policy or EmojiPolicy()
-        self.reply_mode = reply_mode
         self.revoke = revoke
         self.member_lookup = member_lookup
         self.message_search = message_search
@@ -666,19 +643,13 @@ class ChatPlugin(Plugin):
         base = Path(__file__).parent
         # trim_blocks/lstrip_blocks：{% if %} 独占一行时不留空行。
         # 不设的话每个分支里都会多出一堆空行，白烧 token。
-        # planner/replyer 是旧两段式那套（reply_mode='two_stage' 才走）。**改规则时两边
-        # 都要改**：agent 模式不读这两个文件，只改一边就会出现「面板上改了却不生效」。
         options = {'enable_async': True, 'trim_blocks': True, 'lstrip_blocks': True}
-        self.planner_template = Template(
-            (base / 'planner.txt').read_text(encoding='utf-8'), **options)
-        self.replyer_template = Template(
-            (base / 'replyer.txt').read_text(encoding='utf-8'), **options)
         self.agent_template = Template(
             (base / 'agent.txt').read_text(encoding='utf-8'), **options)
 
     @property
     def planner_ai(self) -> AiProvider:
-        """ 决策者用的模型；没单独配就和表达者共用一个。动态回退，换 ai 也能跟上。 """
+        """ 决策者用的模型；没单独配就用主模型。动态回退，换 ai 也能跟上。 """
         return self._planner_ai or self.ai
 
     def persona_for(self, contact: str) -> Persona:
@@ -723,54 +694,7 @@ class ChatPlugin(Plugin):
         # 窗口里的图一并取回来附给模型（新→旧、按媒体去重）。取不到就少一张，不影响回复
         images = await self._collect_images(history)
 
-        # agent 模式：判断和台词在同一次调用里完成，不走表达者
-        if self.reply_mode == 'agent':
-            return await self._agent_round(ctx, blocks, transcript, images, must_speak, necessity, now)
-
-        started = time.perf_counter()
-        plan = ''
-        emoji: Emoji | None = None
-        at = ''
-        ref = 0
-        # 这一轮所有被吞掉的接口失败都记在这里（按时间序），面板要那个原因
-        errors: list[str] = []
-        if self.enable_planner:
-            self._emit(ctx, Status.DECIDING, f'{necessity.kind} · 分数 {necessity.score}')
-            decided, emoji, at, ref, tool_log = await self._plan_with_tools(
-                ctx, blocks, transcript, images, errors)
-            # 决策本身没跑通（超时/报错）：不算「不发言」，照走表达者
-            if decided is None:
-                self._emit(ctx, Status.PLANNER_FAILED,
-                           _brief(errors[-1], 160) if errors else '决策调用失败，直接表达')
-            # 必须回应的场景忽略「不发言」，但采纳它挑的表情——
-            # 被 @ 时配个表情本来就是最自然的
-            if decided is not None and not decided.speak and not must_speak:
-                self._trace(ctx, necessity, transcript, None, self._elapsed(started), tool_log)
-                self._emit(ctx, Status.PLANNER_SILENT, _brief(decided.analysis))
-                return self._silent(ctx, now, emoji=emoji)
-            if decided is not None and decided.speak:
-                plan = decided.render()
-            if tool_log:
-                plan = f'{plan}\n【工具】\n{tool_log}' if plan else f'【工具】\n{tool_log}'
-
-        self._emit(ctx, Status.EXPRESSING)
-        response = await self._express(ctx, blocks, transcript, images, plan, errors)
-        latency_ms = self._elapsed(started)
-        self._trace(ctx, necessity, transcript, response, latency_ms, plan,
-                    refs=(ref,) if ref else ())
-        if response is None:
-            self._emit(ctx, Status.EXPRESS_FAILED,
-                       _brief(errors[-1], 160) if errors else '表达者调用失败')
-            return self._failed(emoji)
-
-        # 模型常顺手带上「昵称：」前缀或引号包裹，不能直接漏到群里（见 _clean）
-        texts = self._clean(response, ctx)
-        if not texts:
-            self._emit(ctx, Status.EMPTY_REPLY)
-            return self._silent(ctx, now, emoji=emoji)
-        self.policy.record(ctx, spoke=True, now=now)
-        # 两段式里表达者只输出纯文本，给不出逐条目标：这一轮选的 ref / @ 由几条共同带着
-        return Reply(lines=[Outgoing(text=text, at=at, ref=ref) for text in texts], emoji=emoji)
+        return await self._agent_round(ctx, blocks, transcript, images, must_speak, necessity, now)
 
     def _emit(self, ctx: MessageContext, status: str, detail: str = '', **fields) -> None:
         """ 把这一轮的状态发给管理后台。失败也不影响聊天（bus 自己吞异常）。
@@ -988,12 +912,11 @@ class ChatPlugin(Plugin):
 
         return make_plan
 
-    def _tools(self, state: dict, terminal: ToolSpec, handler, ctx: MessageContext) -> list:
-        """ 一轮的完整工具集：表情对 +（agent）先想一步 + 终点动作 + 查历史 + 查日历 + 联网 +（可选）撤回。 """
+    def _tools(self, state: dict, reply, ctx: MessageContext) -> list:
+        """ 一轮的完整工具集：表情对 + 先想一步 + 终点动作 + 查历史 + 查日历 + 联网 +（可选）撤回。 """
         tools = self._emoji_tools(state)
-        if terminal is REPLY:
-            tools.append((PLAN, self._plan_tool(ctx)))
-        tools.append((terminal, handler))
+        tools.append((PLAN, self._plan_tool(ctx)))
+        tools.append((REPLY, reply))
         tools.extend(self._message_tools(ctx))
         tools.extend(self._web_tools())
         tools.extend(self._calendar_tool())
@@ -1002,60 +925,10 @@ class ChatPlugin(Plugin):
             tools.append((REVOKE, self._revoke_tool(ctx)))
         return tools
 
-    async def _plan_with_tools(self, ctx: MessageContext, blocks: dict[str, str], transcript: str,
-                               images: list[tuple[str, bytes]], errors: list[str]) \
-            -> tuple[Plan | None, Emoji | None, str, int, str]:
-        """ 带工具的决策循环（两段式）。返回（决策, 选中的表情, 要 @ 的人, 引用的消息 svrid, 工具记录）。
-
-        模型只挑动作（搜表情 / 选一张 / 说要说话），不写台词——台词还是表达者的事。
-        一个工具都不调 = 本轮不发言；调了动作类工具本轮就结束。
-        """
-        state: dict = {'candidates': [], 'picked': [], 'at': '', 'ref': 0, 'pat': ''}
-        said = {'intent': '', 'emotion': ''}
-
-        async def speak(arguments: dict) -> ToolResult:
-            said['intent'] = arg_str(arguments, 'intent')
-            said['emotion'] = arg_str(arguments, 'emotion')
-            state['at'], at_note = await self._resolve_at(arguments, ctx)
-            state['ref'], ref_note = self._resolve_ref(arguments, ctx)
-            return ToolResult(f'好，交给表达者。{at_note}{ref_note}', stop=True)
-
-        toolbox = Toolbox(self._tools(state, SPEAK, speak, ctx))
-        prompt = await self._planner_prompt(ctx, toolbox.names)
-        messages = [{'role': 'user',
-                     'content': self._build_message(self._compose(ctx, blocks, transcript), images)}]
-        analysis = ''
-        for _ in range(max(1, self.planner_rounds)):
-            turn = await self._ask_tools(prompt, messages, toolbox.schema(), ctx, errors)
-            if turn is None:
-                return None, None, '', 0, toolbox.render_calls()      # 这次没拿到决策
-            analysis = turn.content or turn.reasoning or analysis
-            if not turn.tool_calls:                    # 什么都不调 = 不发言
-                break
-            messages.append(assistant_message(turn))
-            stopped = False
-            for call in turn.tool_calls:
-                result = await toolbox.call(call)
-                stopped = stopped or result.stop
-                messages.append(tool_message(call, result.content))
-            if stopped:
-                break
-
-        emoji = state['picked'][0] if state['picked'] else None
-        log = toolbox.render_calls()
-        if emoji is None and not said['intent']:
-            return Plan(speak=False, analysis=analysis), None, '', 0, log
-        plan = Plan(speak=bool(said['intent']), analysis=analysis, intent=said['intent'],
-                    emotion=said['emotion'], emoji=emoji.desc if emoji else '')
-        return plan, emoji, state['at'], state['ref'], log
-
     async def _reply_agent(self, ctx: MessageContext, blocks: dict[str, str], transcript: str,
                            images: list[tuple[str, bytes]], must_speak: bool,
                            errors: list[str]) -> tuple[list[Outgoing], Emoji | None, str]:
-        """ 单段式：模型自己判断、自己写台词，回话就是一次 `reply` 调用。
-
-        与 _plan_with_tools 只差终点动作：那边调 speak（只说意图），这边调 reply（原话）。
-        表情工具、查历史工具、撤回工具、循环骨架完全一致。
+        """ agent 模式的一轮：模型自己判断、自己写台词，回话就是一次 `reply` 调用。
 
         errors 是出参：模型压根没调通时往里记一条原因。调用方靠它把「模型说不发言」
         和「接口报错」分开——两者都是空回复，但面板上不能显示成同一件事。
@@ -1077,7 +950,7 @@ class ChatPlugin(Plugin):
             # 照样全部执行（Toolbox.call 是先把这轮的调用跑完再 break），所以多条不受影响
             return ToolResult(f'好，这条算说完了（第 {len(lines)} 条）。{at_note}{ref_note}', stop=True)
 
-        toolbox = Toolbox(self._tools(state, REPLY, reply, ctx))
+        toolbox = Toolbox(self._tools(state, reply, ctx))
         prompt = await self._agent_prompt(ctx, toolbox.names)
         messages = [{'role': 'user',
                      'content': self._build_message(self._compose(ctx, blocks, transcript), images)}]
@@ -1192,15 +1065,6 @@ class ChatPlugin(Plugin):
             return '  （这是私聊，ref 一律别填）'
         return ctx.history.latest_n(self.context_length).ref_candidates()
 
-    async def _planner_prompt(self, ctx: MessageContext, tools: tuple[str, ...]) -> str:
-        """ 决策者的 system prompt。tools 决定渲染出哪些工具说明。 """
-        persona = self.persona_for(ctx.contact)
-        return await self.planner_template.render_async(behavior_style=persona.behavior_style,
-                                                        self_name=ctx.self_name, contact=ctx.contact,
-                                                        is_group=ctx.msg.is_chatroom,
-                                                        aliases=persona.aliases, tools=tools,
-                                                        refs=self._ref_candidates(ctx))
-
     async def _agent_prompt(self, ctx: MessageContext, tools: tuple[str, ...]) -> str:
         """ agent 模式的 system prompt：人设 + 行动准则 + 工具说明，一次调用把判断和台词都做了。 """
         persona = self.persona_for(ctx.contact)
@@ -1211,11 +1075,6 @@ class ChatPlugin(Plugin):
             tools=tools, faces=FACE_CATALOG, max_replies=self.agent_max_replies,
             refs=self._ref_candidates(ctx))
 
-    def _clean(self, texts: Iterable[str] | None, ctx: MessageContext) -> list[str]:
-        """ 模型常顺手带上「昵称：」前缀或引号包裹，不能直接漏到群里。 """
-        names = (ctx.self_name, *self.persona_for(ctx.contact).aliases)
-        return [text for text in (clean_reply(x, names) for x in texts or ()) if text]
-
     def _clean_lines(self, lines: list[Outgoing], ctx: MessageContext) -> list[Outgoing]:
         """ 同 `_clean`，但**逐条保留各自的 @ / 引用目标**。 """
         names = (ctx.self_name, *self.persona_for(ctx.contact).aliases)
@@ -1225,36 +1084,6 @@ class ChatPlugin(Plugin):
             if text:
                 cleaned.append(replace(line, text=text))
         return cleaned
-
-    async def _express(self, ctx: MessageContext, blocks: dict[str, str], transcript: str,
-                       images: list[tuple[str, bytes]], plan: str,
-                       errors: list[str]) -> list[str] | None:
-        """ 跑表达者。先把「本轮要回哪条」摆明，再给决策；没决策也不会跑偏到旧话题。 """
-        persona = self.persona_for(ctx.contact)
-        prompt = await self.replyer_template.render_async(
-            identity=persona.identity(ctx.self_name), reply_style=persona.reply_style,
-            self_name=ctx.self_name, contact=ctx.contact, is_group=ctx.msg.is_chatroom,
-            faces=FACE_CATALOG)
-        message = self._compose(ctx, blocks, transcript, plan=plan,
-                                alternate=persona.maybe_alternate(self.rng))
-        return await self._ask(prompt, message, ctx, images, errors=errors)
-
-    async def _ask(self, prompt: str, message: str, ctx: MessageContext,
-                   images: list[tuple[str, bytes]],
-                   errors: list[str] | None = None) -> list[str] | None:
-        """ 调模型。超时或报错只当这次没结果——不能让一次 API 抽风拖死消息处理链。
-
-        errors 给了就往里记一条原因：面板上「表达失败」和「被限流」是两回事。
-        """
-        try:
-            return await asyncio.wait_for(
-                self.ai.chat(prompt.strip(), self._build_message(message, images)), self.timeout)
-        except Exception as e:
-            why = reason_of(e)
-            logger.warning(f'调用模型失败（{ctx.contact}）：{why}')
-            if errors is not None:
-                errors.append(why)
-            return None
 
     @staticmethod
     def _elapsed(started: float) -> int:
@@ -1271,7 +1100,7 @@ class ChatPlugin(Plugin):
             ts=time.time(), contact=msg.reply_target, contact_name=ctx.contact,
             sender=msg.sender_name, trigger=necessity.kind, score=necessity.score,
             reasons=necessity.reasons, transcript=transcript, reply=tuple(response or ()),
-            latency_ms=latency_ms, plan=plan, mode=self.reply_mode, refs=refs,
+            latency_ms=latency_ms, plan=plan, refs=refs,
             msg_id=str(getattr(msg, 'msg_id', ''))))
 
     async def _collect_images(self, history: ChatWindow) -> list[tuple[str, bytes]]:

@@ -163,11 +163,6 @@ class Config:
     # 备用表达风格，用 | 分隔；按概率抽一条用在本次回复上
     reply_styles: str = ''
     style_probability: float = 0.0
-    # 两段式：Planner 判断说与不说，Expressor 负责说成人话
-    enable_planner: bool = True
-    # 回复链路：'two_stage' = 决策者 + 表达者；'agent' = 单模型，回话本身就是工具调用
-    # （reply）。**默认 agent**：离线 A/B 里开口率持平，延迟 −40%、token −30%
-    reply_mode: str = 'agent'
     # Planner 可以单独配一个 OpenAI 兼容服务；**留空就走主模型（推荐）**。
     # 不要指到本地小模型：实测 2B 那档「开口 0/9、推理原地打转」，
     # 连「说一个字」都是 finish=length + content 空（见 notes/未完成.md）

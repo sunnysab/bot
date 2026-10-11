@@ -867,16 +867,17 @@ class TestBotOnMessage(unittest.IsolatedAsyncioTestCase):
 
         from images import ImageStore
         from plugin import ChatPlugin
+        from tools import AssistantTurn
 
         seen: list = []
 
         class Ai:
-            async def chat(self, prompt, message):
-                seen.append(message)
-                return ['不赖']
+            async def chat_tools(self, prompt, messages, tools):
+                seen.append(messages[0]['content'])
+                return AssistantTurn()          # 什么都不调 = 这一轮不发言
 
         with tempfile.TemporaryDirectory() as tmp:
-            self.bot.set_default_plugin(ChatPlugin(Ai(), context_length=10, enable_planner=False,
+            self.bot.set_default_plugin(ChatPlugin(Ai(), context_length=10,
                                                    image_store=ImageStore(tmp)))
             self.bot._wechat.image = b'\xff\xd8fake'
             md5 = '87e65490da9b4228f45a167205caf5eb'

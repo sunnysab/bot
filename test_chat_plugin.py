@@ -37,18 +37,18 @@ PLANNER_MARK = '决策者'          # planner.txt 里独有的字眼，用来区
 
 
 # 决策者默认「说一句」；传 AssistantTurn() 表示这一轮不发言，传 None 表示决策调用失败
-_SPEAK = AssistantTurn(tool_calls=(ToolCall('speak-1', 'speak',
-                                            {'intent': '附和一句', 'emotion': '无奈'}),))
+_REPLY = AssistantTurn(tool_calls=(ToolCall('reply-1', 'reply', {'text': '收到'}),))
 
 
 class FakeAi:
-    """ 决策者 + 表达者共用，用 prompt 里的标记区分。
+    """ 假决策者：agent 模式只有一次调用（`chat_tools`），没有独立的表达者。
 
-    决策者走 `chat_tools`（工具模式），表达者走 `chat`。
+    `planner_calls` / `reply_calls` 都指向同一份记录——两段式删掉后，「决策者看到的」
+    和「模型看到的」本来就是同一条 message（`_compose` 拼出来的那条），
+    留着这两个名字是为了少改断言。
     """
 
-    def __init__(self, reply=('收到',), turn=_SPEAK):
-        self.reply = list(reply) if reply else None
+    def __init__(self, turn=_REPLY):
         self.turn = turn
         self.calls = []
 
@@ -56,17 +56,13 @@ class FakeAi:
         self.calls.append((prompt, messages[0]['content']))
         return self.turn
 
-    async def chat(self, prompt, message):
-        self.calls.append((prompt, message))
-        return self.reply
-
     @property
     def planner_calls(self):
-        return [call for call in self.calls if PLANNER_MARK in call[0]]
+        return self.calls
 
     @property
     def reply_calls(self):
-        return [call for call in self.calls if PLANNER_MARK not in call[0]]
+        return self.calls
 
 
 def _call(name, **arguments):
@@ -75,6 +71,10 @@ def _call(name, **arguments):
 
 def _emoji(md5='a' * 32, desc='无语', scene='别人说了很离谱的话', count=0):
     return Emoji(md5=md5, desc=desc, scene=scene, cdnurl='http://cdn/x', aeskey='k', count=count)
+
+
+def _reply(text):
+    return AssistantTurn(tool_calls=(ToolCall('reply-1', 'reply', {'text': text}),))
 
 
 class ToolAi:
@@ -245,102 +245,33 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(self.ai.planner_calls), 1)
             self.assertIn('【必须回应】', self.ai.planner_calls[0][1])
 
-    async def test_must_respond_ignores_a_silent_plan(self):
-        """ 被点名时决策者说「不发言」不算数——必须回应的场景得真回。 """
-        self.plugin.ai = FakeAi(turn=AssistantTurn())
-        reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
-        self.assertEqual(reply.texts, ['收到'])
-        self.assertNotIn('【决策】', self.plugin.ai.reply_calls[0][1])
-
-    async def test_forced_reply_ignores_a_silent_plan(self):
-        """ 手动触发：决策者仍可说「不发言」，但人点了它，就得不说话也不算数。 """
-        self.plugin.ai = FakeAi(turn=AssistantTurn())
-        reply = await self.plugin.handle(make_ctx(
-            make_msg(is_chatroom=True, content='大家好啊'), forced=True))
-        self.assertEqual(reply.texts, ['收到'])
-        self.assertEqual(len(self.plugin.ai.planner_calls), 1)
-
-    async def test_plan_is_passed_to_expressor(self):
-        await self.plugin.handle(proactive_ctx())
-        message = self.ai.reply_calls[0][1]
-        self.assertIn('【决策】', message)
-        self.assertIn('想表达：附和一句', message)
-        self.assertIn('情绪：无奈', message)
-        self.assertIn('msg11', message)         # 决策之后跟着原始聊天记录
-
-    async def test_planner_is_told_it_is_not_the_bot(self):
-        await self.plugin.handle(proactive_ctx())
-        self.assertIn('不是 Bot 本人', self.ai.planner_calls[0][0])
-
-    async def test_silent_plan_skips_expressor(self):
+    async def test_silent_plan_does_not_reply(self):
         self.plugin.ai = FakeAi(turn=AssistantTurn())
         reply = await self.plugin.handle(proactive_ctx())
         self.assertEqual(reply.texts, [])
         self.assertTrue(reply.stop)
-        self.assertEqual(len(self.plugin.ai.planner_calls), 1)
-        self.assertEqual(self.plugin.ai.reply_calls, [])   # 不再多跑一次表达
-
-    async def test_planner_disabled_falls_back_to_single_call(self):
-        plugin = ChatPlugin(self.ai, context_length=10, enable_planner=False)
-        reply = await plugin.handle(proactive_ctx())
-        self.assertEqual(reply.texts, ['收到'])
-        self.assertEqual(len(self.ai.calls), 1)
-        self.assertIn('你的名字是', self.ai.calls[0][0])
+        self.assertEqual(len(self.plugin.ai.calls), 1)     # 只调了一次，没有下一轮补话
 
     async def test_planner_can_use_its_own_model(self):
-        """ 决策者可以走本地便宜模型，表达者仍用主模型。 """
+        """ 决策者可以走本地便宜模型：这一轮的调用只到 planner，主模型不碰。 """
         planner = FakeAi()
         plugin = ChatPlugin(self.ai, context_length=10, planner_ai=planner)
         await plugin.handle(proactive_ctx())
         self.assertEqual(len(planner.calls), 1)
-        self.assertIn(PLANNER_MARK, planner.calls[0][0])
-        self.assertEqual(len(self.ai.calls), 1)
-        self.assertNotIn(PLANNER_MARK, self.ai.calls[0][0])
+        self.assertEqual(self.ai.calls, [])
 
-    async def test_planner_failure_does_not_mute_the_bot(self):
-        """ 决策者挂了就退回单段，不能因此变吧。 """
+    async def test_planner_failure_ends_the_round(self):
+        """ 决策调用失败：这一轮就没得说（没有表达者兜底了）。 """
         self.plugin.ai = FakeAi(turn=None)
         reply = await self.plugin.handle(proactive_ctx())
-        self.assertEqual(reply.texts, ['收到'])
-        self.assertNotIn('【决策】', self.plugin.ai.reply_calls[0][1])
-
-    async def test_silent_model_does_not_reply(self):
-        self.plugin.ai = FakeAi(reply=None)
-        reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
         self.assertEqual(reply.texts, [])
         self.assertTrue(reply.stop)
 
-    async def test_expressor_failure_says_why(self):
-        """ 表达者挂了不能只在面板上写「表达失败」：限流 / key 失效要一眼看得到。 """
-        class Boom(FakeAi):
-            async def chat(self, prompt, message):
-                if PLANNER_MARK in prompt:
-                    return await super().chat(prompt, message)
-                raise RuntimeError('被限流（用量或频率超了）：weekly limit')
-
-        plugin = ChatPlugin(Boom(), context_length=10)
-        seen: list[tuple[str, str]] = []
-
-        def record(event):
-            seen.append((event.status, event.detail))
-
-        bus.subscribe(record)
-        try:
-            reply = await plugin.handle(proactive_ctx())
-        finally:
-            bus.unsubscribe(record)
-
+    async def test_model_failure_does_not_reply(self):
+        self.plugin.ai = FakeAi(turn=None)
+        reply = await self.plugin.handle(make_ctx(make_msg(is_chatroom=False)))
         self.assertEqual(reply.texts, [])
-        self.assertIn(('express_failed', '被限流（用量或频率超了）：weekly limit'), seen)
-
-    async def test_alternate_style_uses_own_expression(self):
-        import random
-        persona = Persona(alternates=('用1-2个字回复',), alternate_probability=1.0)
-        plugin = ChatPlugin(self.ai, context_length=10, persona=persona, rng=random.Random(0))
-        await plugin.handle(make_ctx(make_msg(is_chatroom=False)))
-        # 临时风格是「这一轮」的事，放请求里，不进 system prompt
-        self.assertIn('【临时风格】用1-2个字回复', self.ai.reply_calls[0][1])
-        self.assertNotIn('用1-2个字回复', self.ai.reply_calls[0][0])
+        self.assertTrue(reply.stop)
 
     async def test_personality_and_style_come_from_config(self):
         persona = Persona(personality='是一只猫', reply_style='只会喵')
@@ -524,7 +455,7 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record['reply'], ['收到'])
         self.assertEqual(record['sender'], 'Alice')
         self.assertIn('msg11', record['transcript'])
-        self.assertIn('想表达：附和一句', record['plan'])
+        self.assertIn('收到', record['plan'])
         self.assertGreaterEqual(record['latency_ms'], 0)
         # 「为什么没回」抽屉靠 msg_id 把气泡和这一轮对上（64 位，存成字符串）
         self.assertEqual(record['msg_id'], '7100000000000000123')
@@ -538,7 +469,7 @@ class TestChatPlugin(unittest.IsolatedAsyncioTestCase):
             record = json.loads(path.read_text(encoding='utf-8').strip())
 
         self.assertEqual(record['trigger'], 'private')
-        self.assertIn('想表达：附和一句', record['plan'])   # 被点名也走决策者（要表情工具）
+        self.assertIn('收到', record['plan'])   # plan 是工具记录：reply({"text": "收到"})
 
     async def test_tracer_records_silent_turns(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -736,6 +667,11 @@ class TestIdleBackoffInPlugin(unittest.IsolatedAsyncioTestCase):
         self.ai = FakeAi(turn=AssistantTurn())
         return ChatPlugin(self.ai, context_length=10)
 
+    def talking_plugin(self):
+        """ 前两轮不说话（制造退避），之后会说一句。 """
+        self.ai = ToolAi([AssistantTurn(), AssistantTurn(), _reply('收到'), _reply('收到')])
+        return ChatPlugin(self.ai, context_length=10)
+
     async def test_silent_rounds_stop_calling_the_planner(self):
         plugin = self.silent_plugin()
         for _ in range(2):
@@ -755,25 +691,24 @@ class TestIdleBackoffInPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await plugin.handle(quiet))
 
     async def test_at_mention_is_never_backed_off(self):
-        plugin = self.silent_plugin()
+        """ 连着两轮没说话进了退避，但被点名那轮照样走到模型、照样回。 """
+        plugin = self.talking_plugin()
         for _ in range(3):
             await plugin.handle(proactive_ctx())
         reply = await plugin.handle(make_ctx(make_msg(is_chatroom=True, is_at_me=True)))
         self.assertEqual(reply.texts, ['收到'])
-        self.assertEqual(len(self.ai.reply_calls), 1)
 
     async def test_replying_clears_the_backoff(self):
-        plugin = self.silent_plugin()
+        plugin = self.talking_plugin()
         for _ in range(2):
             await plugin.handle(proactive_ctx())
         self.assertIsNone(await plugin.handle(proactive_ctx()))     # 退避中，模型都不调
-        planned = len(self.ai.planner_calls)
-        # 被点名回了一句 = 群里还需要它，退避清零（这一轮自己也要走一次决策者）
+        planned = len(self.ai.rounds)
+        # 被点名回了一句 = 群里还需要它，退避清零（这一轮自己也要走一次模型）
         await plugin.handle(make_ctx(make_msg(is_chatroom=True, is_at_me=True)))
-        after_mention = len(self.ai.planner_calls)
-        self.assertEqual(after_mention, planned + 1)
+        self.assertEqual(len(self.ai.rounds), planned + 1)
         await plugin.handle(proactive_ctx())
-        self.assertEqual(len(self.ai.planner_calls), after_mention + 1)
+        self.assertEqual(len(self.ai.rounds), planned + 2)
 
 
 class TestToolLoop(unittest.IsolatedAsyncioTestCase):
@@ -784,15 +719,13 @@ class TestToolLoop(unittest.IsolatedAsyncioTestCase):
         self.search = FakeEmojiSearch(search or {})
         return ChatPlugin(self.ai, context_length=10, emoji_search=self.search, **kwargs)
 
-    async def test_speak_only_is_one_round(self):
+    async def test_reply_only_is_one_round(self):
         plugin = self.plugin([AssistantTurn(content='在吐槽加班',
-                                            tool_calls=(_call('speak', intent='附和一句', emotion='无奈'),))])
+                                            tool_calls=(_call('reply', text='确实'),))])
         reply = await plugin.handle(proactive_ctx())
-        self.assertEqual(reply.texts, ['收到'])
+        self.assertEqual(reply.texts, ['确实'])
         self.assertIsNone(reply.emoji)
-        self.assertEqual(len(self.ai.rounds), 1)
-        # 决策进决策块，表达者能看见
-        self.assertIn('想表达：附和一句', self.ai.reply_calls[0][1])
+        self.assertEqual(len(self.ai.rounds), 1)      # reply 终结本轮，不再多跑一轮
 
     async def test_search_then_send_sends_only_the_sticker(self):
         plugin = self.plugin(
@@ -811,13 +744,11 @@ class TestToolLoop(unittest.IsolatedAsyncioTestCase):
         plugin = self.plugin(
             [AssistantTurn(tool_calls=(_call('search_emoji', keyword='狗头'),)),
              AssistantTurn(tool_calls=(_call('send_emoji', index=1),
-                                       _call('speak', intent='补一句')))],
+                                       _call('reply', text='确实')))],
             search={'狗头': [_emoji(desc='狗头')]})
         reply = await plugin.handle(proactive_ctx())
-        self.assertEqual(reply.texts, ['收到'])
+        self.assertEqual(reply.texts, ['确实'])
         self.assertEqual(reply.emoji.desc, '狗头')
-        # 表达者要知道同时发了表情，免得文字重复那个情绪
-        self.assertIn('同时会发一张表情：狗头', self.ai.reply_calls[0][1])
 
     async def test_no_tool_call_means_silent(self):
         plugin = self.plugin([AssistantTurn(content='接不上话')])
@@ -909,12 +840,12 @@ class TestToolLoop(unittest.IsolatedAsyncioTestCase):
     async def test_prompt_says_how_to_act_without_repeating_the_tools(self):
         """ 工具用法只写在 schema 的 description 里；prompt 只留跨工具的规则。 """
         plugin = self.plugin([])
-        prompt = await plugin._planner_prompt(proactive_ctx(),
-                                              ('search_emoji', 'send_emoji', 'speak', 'revoke'))
+        prompt = await plugin._agent_prompt(proactive_ctx(),
+                                            ('search_emoji', 'send_emoji', 'reply', 'revoke'))
 
         self.assertIn('什么工具都不调，就等于这一轮不发言', prompt)
         self.assertIn('send_emoji', prompt)          # 组合规则里要提它
-        self.assertNotIn('search_emoji', prompt)     # 单工具用法不在这里重抄
+        self.assertNotIn('search_emoji(关键词)', prompt)     # 单工具用法不在这里重抄
         self.assertNotIn('只输出一个 JSON', prompt)
         # {% if %} 独占一行不能留下空行，白烧 token
         self.assertNotIn('\n\n\n', prompt)
@@ -922,8 +853,8 @@ class TestToolLoop(unittest.IsolatedAsyncioTestCase):
     async def test_emoji_tools_are_left_out_of_the_prompt_when_unavailable(self):
         """ 没接表情搜索时，提示词里不能提搜表情——不然模型会去调一个不存在的工具。 """
         plugin = ChatPlugin(ToolAi([]), context_length=10)
-        prompt = await plugin._planner_prompt(proactive_ctx(), ('speak',))
-        self.assertIn('speak', prompt)
+        prompt = await plugin._agent_prompt(proactive_ctx(), ('reply',))
+        self.assertIn('reply', prompt)
         self.assertNotIn('search_emoji', prompt)
         self.assertNotIn('send_emoji', prompt)
 
@@ -983,7 +914,7 @@ class TestMessageSearchTool(unittest.IsolatedAsyncioTestCase):
     def plugin(self, turns, **kwargs):
         self.ai = ToolAi(turns)
         return ChatPlugin(self.ai, context_length=10, message_search=self.search,
-                          reply_mode='agent', **kwargs)
+                          **kwargs)
 
     async def test_hits_are_fed_back_and_the_turn_continues(self):
         plugin = self.plugin([AssistantTurn(tool_calls=(_call('search_messages', keyword='店'),)),
@@ -1028,7 +959,7 @@ class TestWebSearchTool(unittest.IsolatedAsyncioTestCase):
     def plugin(self, turns, **kwargs):
         self.ai = ToolAi(turns)
         return ChatPlugin(self.ai, context_length=10, web_search=self.search,
-                          reply_mode='agent', **kwargs)
+                          **kwargs)
 
     async def test_results_are_fed_back_and_the_turn_continues(self):
         plugin = self.plugin([AssistantTurn(tool_calls=(_call('web_search', query='天气'),)),
@@ -1065,7 +996,7 @@ class TestCalendarTool(unittest.IsolatedAsyncioTestCase):
 
     def plugin(self, turns, **kwargs):
         self.ai = ToolAi(turns)
-        return ChatPlugin(self.ai, context_length=10, reply_mode='agent', **kwargs)
+        return ChatPlugin(self.ai, context_length=10, **kwargs)
 
     async def test_result_is_fed_back_and_the_turn_continues(self):
         plugin = self.plugin([AssistantTurn(tool_calls=(_call('calendar'),)),
@@ -1102,7 +1033,7 @@ class TestCalendarTool(unittest.IsolatedAsyncioTestCase):
     async def test_tool_is_available_out_of_the_box(self):
         """ 不依赖任何可选能力注入——日历是内置的。 """
         ai = ToolAi([AssistantTurn()])
-        await ChatPlugin(ai, context_length=10, reply_mode='agent').handle(proactive_ctx())
+        await ChatPlugin(ai, context_length=10).handle(proactive_ctx())
         self.assertIn('calendar', ai.tools_seen[0])
 
     async def test_compose_carries_the_current_time(self):
@@ -1126,7 +1057,7 @@ class TestRefTool(unittest.IsolatedAsyncioTestCase):
 
     def plugin(self, turns, **kwargs):
         self.ai = ToolAi(turns)
-        return ChatPlugin(self.ai, context_length=10, reply_mode='agent', **kwargs)
+        return ChatPlugin(self.ai, context_length=10, **kwargs)
 
     async def test_ref_handle_becomes_the_svrid(self):
         handle = message_handle(self.SVRID)
@@ -1160,14 +1091,6 @@ class TestRefTool(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.lines[0].ref, 0)
         self.assertNotIn(handle, self.ai.prompts[0])
 
-    async def test_two_stage_speak_carries_the_ref(self):
-        handle = message_handle(self.SVRID)
-        ai = ToolAi([AssistantTurn(tool_calls=(_call('speak', intent='附和', ref=handle),))])
-        plugin = ChatPlugin(ai, context_length=10)
-        reply = await plugin.handle(self.ctx())
-        self.assertEqual(reply.lines[0].ref, self.SVRID)
-
-
 class TestAtTool(unittest.IsolatedAsyncioTestCase):
     """ @ 人：模型给群昵称，wxid 由 Bot 查，只在群聊里且只在有这个人时生效。 """
 
@@ -1183,7 +1106,7 @@ class TestAtTool(unittest.IsolatedAsyncioTestCase):
     def plugin(self, turns, **kwargs):
         self.ai = ToolAi(turns)
         return ChatPlugin(self.ai, context_length=10, member_lookup=self.lookup,
-                          reply_mode='agent', **kwargs)
+                          **kwargs)
 
     async def test_at_name_becomes_a_wxid_on_the_reply(self):
         plugin = self.plugin([AssistantTurn(tool_calls=(_call('reply', text='你问他去', at='张三'),))])
@@ -1227,7 +1150,7 @@ class TestAtTool(unittest.IsolatedAsyncioTestCase):
         calls = (_call('reply', text='在', at='张三'), _call('reply', text='来了', at='李四'))
         self.ai = ToolAi([AssistantTurn(tool_calls=calls)])
         plugin = ChatPlugin(self.ai, context_length=10, member_lookup=lookup,
-                            reply_mode='agent', agent_max_replies=2)
+                            agent_max_replies=2)
         reply = await plugin.handle(proactive_ctx())
         self.assertEqual([line.at for line in reply.lines], ['wxid_zhang', 'wxid_li'])
         self.assertEqual(reply.texts, ['在', '来了'])
@@ -1242,15 +1165,6 @@ class TestAtTool(unittest.IsolatedAsyncioTestCase):
         _, missing = await plugin._resolve_at({'at': '查无此人'}, ctx)
         self.assertIn('没找到叫', missing)
         self.assertEqual(await plugin._resolve_at({}, ctx), ('', ''))
-
-    async def test_two_stage_speak_carries_the_at_too(self):
-        """ 两段式也不能是个只会写提示词的空壳。 """
-        ai = ToolAi([AssistantTurn(tool_calls=(_call('speak', intent='问他', at='张三'),))])
-        plugin = ChatPlugin(ai, context_length=10, member_lookup=self.lookup)
-        reply = await plugin.handle(proactive_ctx())
-        self.assertEqual(reply.lines[0].at, 'wxid_zhang')
-        self.assertEqual(reply.texts, ['收到'])
-
 
 class TestPatTool(unittest.IsolatedAsyncioTestCase):
     """ 拍一拍：模型主动拍人。私聊不用名字，群聊按群昵称，拍成了才能算「回应过」。 """
@@ -1267,7 +1181,7 @@ class TestPatTool(unittest.IsolatedAsyncioTestCase):
     def plugin(self, turns, **kwargs):
         self.ai = ToolAi(turns)
         return ChatPlugin(self.ai, context_length=10, pat=self.pat_action,
-                          reply_mode='agent', **kwargs)
+                          **kwargs)
 
     async def test_pat_is_called_and_reported_back(self):
         plugin = self.plugin([AssistantTurn(tool_calls=(_call('pat', target='张三'),)),
@@ -1284,7 +1198,7 @@ class TestPatTool(unittest.IsolatedAsyncioTestCase):
         msg = make_msg(is_chatroom=True, is_at_me=True, content='拍了拍 你')
         ctx = make_ctx(msg, history=history_with(12, now=time.time()))
         ai = ToolAi([AssistantTurn(tool_calls=(_call('pat', target='张三'),))])
-        plugin = ChatPlugin(ai, context_length=10, pat=self.pat_action, reply_mode='agent')
+        plugin = ChatPlugin(ai, context_length=10, pat=self.pat_action)
         reply = await plugin.handle(ctx)
         # 没有补一轪「必须回应」：拍了就算回应过
         self.assertNotIn('你还没给回应', json.dumps(ai.rounds, ensure_ascii=False))
@@ -1296,7 +1210,7 @@ class TestPatTool(unittest.IsolatedAsyncioTestCase):
         ai = ToolAi([AssistantTurn(tool_calls=(_call('pat', target='查无此人'),)),
                      AssistantTurn(),
                      AssistantTurn(tool_calls=(_call('reply', text='在'),))])
-        plugin = ChatPlugin(ai, context_length=10, pat=self.pat_action, reply_mode='agent')
+        plugin = ChatPlugin(ai, context_length=10, pat=self.pat_action)
         reply = await plugin.handle(ctx)
         # 没拍成就不算回应，下一轮会被推到「必须回应」再补一句
         self.assertIn('你还没给回应', json.dumps(ai.rounds[2], ensure_ascii=False))
@@ -1322,7 +1236,7 @@ class TestAgentMode(unittest.IsolatedAsyncioTestCase):
         self.ai = ToolAi(turns)
         self.search = FakeEmojiSearch(search or {})
         return ChatPlugin(self.ai, context_length=10, emoji_search=self.search,
-                          reply_mode='agent', **kwargs)
+                          **kwargs)
 
     async def test_reply_tool_produces_the_text_directly(self):
         plugin = self.plugin([AssistantTurn(tool_calls=(_call('reply', text='这也太离谱了'),))])
@@ -1390,16 +1304,11 @@ class TestAgentMode(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.texts, ['在'])
         self.assertIn('intent 是空的', json.dumps(self.ai.rounds[1], ensure_ascii=False))
 
-    async def test_plan_is_agent_only(self):
-        """ 两段式自己就有决策者，别再给它一个 plan。 """
-        agent = self.plugin([AssistantTurn()])
-        await agent.handle(proactive_ctx())
+    async def test_plan_tool_is_offered(self):
+        """ 「开口前先想一步」是 agent 模式的一部分。 """
+        plugin = self.plugin([AssistantTurn()])
+        await plugin.handle(proactive_ctx())
         self.assertIn('plan', self.ai.tools_seen[0])
-
-        ai = ToolAi([])
-        two_stage = ChatPlugin(ai, context_length=10)
-        await two_stage.handle(proactive_ctx())
-        self.assertNotIn('plan', ai.tools_seen[0])
 
     async def test_sticker_reaches_the_model_in_a_hot_group(self):
         """ 表情消息不再被入口挡掉（历史里的 `[表情：…]` 自带语义）。 """
@@ -1496,7 +1405,7 @@ class TestAgentMode(unittest.IsolatedAsyncioTestCase):
             async def chat_tools(self, prompt, messages, tools):
                 raise RuntimeError('429 用量超了')
 
-        plugin = ChatPlugin(Boom([]), context_length=10, reply_mode='agent')
+        plugin = ChatPlugin(Boom([]), context_length=10)
         seen: list[tuple[str, str]] = []
 
         def record(event):
@@ -1563,20 +1472,20 @@ class TestCleanReply(unittest.TestCase):
 
 class TestCleanReplyInPlugin(unittest.IsolatedAsyncioTestCase):
     async def test_plugin_cleans_before_sending(self):
-        ai = FakeAi(reply=('Bot：「收到」',))
+        ai = FakeAi(turn=_reply('Bot：「收到」'))
         plugin = ChatPlugin(ai, context_length=10)
         reply = await plugin.handle(make_ctx(make_msg(is_at_me=True)))
         self.assertEqual(reply.texts, ['收到'])
 
     async def test_all_empty_becomes_stop(self):
-        ai = FakeAi(reply=('Bot：',))
+        ai = FakeAi(turn=_reply('Bot：'))
         plugin = ChatPlugin(ai, context_length=10)
         reply = await plugin.handle(make_ctx(make_msg(is_at_me=True)))
         self.assertTrue(reply.stop)
         self.assertEqual(reply.texts, [])
 
     async def test_alias_prefix_is_also_stripped(self):
-        ai = FakeAi(reply=('雨姐：收到',))
+        ai = FakeAi(turn=_reply('雨姐：收到'))
         plugin = ChatPlugin(ai, context_length=10, persona=Persona(aliases=('雨姐',)))
         reply = await plugin.handle(make_ctx(make_msg(is_at_me=True)))
         self.assertEqual(reply.texts, ['收到'])

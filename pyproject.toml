@@ -46,7 +46,6 @@ py-modules = [
     "outbound",
     "persona",
     "personas",
-    "planner",
     "plugin",
     "profiles",
     "replay_memory",

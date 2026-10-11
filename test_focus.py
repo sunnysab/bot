@@ -10,16 +10,14 @@ from necessity import IdleBackoff
 from plugin import ChatPlugin, ReplyPolicy
 from tools import AssistantTurn, ToolCall
 
-PLANNER_MARK = '决策者'
-
 # 决策者默认「说一句」；传 AssistantTurn() 表示这一轮不发言
-_SPEAK = AssistantTurn(tool_calls=(ToolCall('speak-1', 'speak', {'intent': '接一句'}),))
+_REPLY = AssistantTurn(tool_calls=(ToolCall('reply-1', 'reply', {'text': '收到'}),))
 
 
 class FakeAi:
     """ 决策者走 `chat_tools`（工具模式），表达者走 `chat`。 """
 
-    def __init__(self, reply=('收到',), turn=_SPEAK):
+    def __init__(self, reply=('收到',), turn=_REPLY):
         self.reply = list(reply)
         self.turn = turn
         self.calls = []
@@ -34,7 +32,8 @@ class FakeAi:
 
     @property
     def planner_calls(self):
-        return [call for call in self.calls if PLANNER_MARK in call[0]]
+        # agent 模式只有一次调用（`chat_tools`）；名字留着，断言少改
+        return self.calls
 
 
 def make_ctx(others: int, content='大家好啊', now=None):
