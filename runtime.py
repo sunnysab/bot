@@ -26,6 +26,7 @@ from pathlib import Path
 
 from loguru import logger
 
+import otel
 from ai import Deepseek, OpenAI
 from bot import Bot
 from config import Config
@@ -130,6 +131,7 @@ RESTART_FIELDS = frozenset({
     'image_cache_dir',
     'profile_path', 'habit_path', 'moment_path', 'emoji_path', 'scope_path', 'moment_batch',
     'persona_path',
+    'otel_endpoint',
 })
 
 
@@ -339,6 +341,8 @@ class Runtime:
     async def stop(self) -> None:
         await self.bot.stop()
         self.memories.close()
+        # 把还在批处理队列里的 span 刷出去，否则进程一停最后几秒的 trace 就丢了
+        otel.shutdown()
 
     def restart_process(self) -> None:
         """ 整进程重启。必须先停干净再 exec，否则长链会被硬断。 """

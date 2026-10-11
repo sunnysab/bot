@@ -187,6 +187,9 @@ class Config:
     quote_replies: bool = True
     # 回复轨迹 JSONL（攒数据给以后做效果评估）
     trace_path: str = 'reply_trace.jsonl'
+    # 链路追踪（OTLP gRPC 地址）。留空 = 关闭。bot 和 SigNoz 同机时就是 localhost。
+    # 埋点见 notes/可观测性调研.md；改它要重启（TracerProvider 是构造期定死的）
+    otel_endpoint: str = 'http://localhost:4317'
     log_path: str = 'bot.log'
     log_level: str = 'DEBUG'
 

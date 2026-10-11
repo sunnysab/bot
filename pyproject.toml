@@ -14,6 +14,8 @@ dependencies = [
     "weixin-bot",
     "pillow>=12.3.0",
     "lunar-python>=1.4.8",
+    "opentelemetry-sdk>=1.45.1",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.45.1",
 ]
 
 [tool.uv.sources]

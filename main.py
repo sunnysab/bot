@@ -3,6 +3,7 @@ import asyncio
 
 from loguru import logger
 
+import otel
 from admin import Admin
 from config import CONFIG_PATH, Config
 from runtime import Runtime
@@ -11,6 +12,8 @@ from runtime import Runtime
 def main():
     config = Config.load()
     logger.add(sink=config.log_path, level=config.log_level)
+    # 追踪必须在 openai 客户端构造之前起来：插桩是 patch 已经加载的类，晚一步就漏掉
+    otel.boot(config.otel_endpoint)
 
     if not config.deepseek_key:
         logger.warning(f'{CONFIG_PATH} 里没配 deepseek_key，ChatPlugin 将无法调用模型')
