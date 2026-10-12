@@ -595,11 +595,14 @@ class Bot:
                 # 这个 task 是每会话复用的，一个 task 跑很多轮：每轮显式开一条新 trace，
                 # 否则第二轮之后的 span 会全挂到「第一条消息」那个陈旧 parent 上
                 # 接上 daemon 推这条消息时所在的那条 trace：有就延续，没有才开新的一条
-                parent = otel.context_from_traceparent(getattr(msg, 'traceparent', '') or '')
+                inbound = getattr(msg, 'traceparent', '') or ''
+                parent = otel.context_from_traceparent(inbound)
                 with otel.span('turn', {
                         'wxbot.chat_id': contact, 'wxbot.chat_name': source,
                         'wxbot.msg_id': str(getattr(msg, 'msg_id', '')),
-                        'wxbot.fresh': len(block)},
+                        'wxbot.fresh': len(block),
+                        # daemon 带过来的 traceparent。空 = 那一边没接上，诊断用
+                        'wxbot.inbound_traceparent': inbound},
                         parent=parent, new_trace=parent is None):
                     try:
                         await self._wait_media(contact, block)
